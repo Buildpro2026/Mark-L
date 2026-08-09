@@ -1,0 +1,64 @@
+{
+  "identity": {
+    "language": {
+      "value": "English",
+      "updated": "2026-08-08"
+    },
+    "preferred_name": {
+      "value": "Sebastian",
+      "updated": "2026-08-08"
+    },
+    "name": {
+      "value": "Mr. Chandler",
+      "updated": "2026-08-08"
+    },
+    "city": {
+      "value": "Dallas, Texas",
+      "updated": "2026-08-08"
+    }
+  },
+  "preferences": {
+    "social_media_schedule": {
+      "value": "Buffer used for social media scheduling 90 days to 6 months in advance. Affiliate marketing posts scheduled same day.",
+      "updated": "2026-08-08"
+    },
+    "activation_method": {
+      "value": "automatic opening by button click",
+      "updated": "2026-08-08"
+    },
+    "shortcut_creation": {
+      "value": "can create desktop shortcut",
+      "updated": "2026-08-08"
+    },
+    "remote_access": {
+      "value": "remote control from phone",
+      "updated": "2026-08-08"
+    },
+    "customization": {
+      "value": "system customization available",
+      "updated": "2026-08-08"
+    }
+  },
+  "projects": {
+    "two_businesses": {
+      "value": "Owner of two businesses",
+      "updated": "2026-08-08"
+    },
+    "business_1_name": {
+      "value": "build pro recruiters",
+      "updated": "2026-08-08"
+    },
+    "hubspot_crm": {
+      "value": "HubSpot is the primary CRM for candidates, clients, and all company activities.",
+      "updated": "2026-08-08"
+    }
+  },
+  "relationships": {
+    "sebastian_name": {
+      "value": "Sebastian",
+      "updated": "2026-08-08"
+    }
+  },
+  "wishes": {},
+  "notes": {}
+}
