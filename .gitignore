@@ -1,1 +1,40 @@
 config/api_keys.json
+config/strategic_objective.json
+config/google/
+config/certs/
+
+# Personal data, not source code — see docs/MEMORY_SCHEMA.md
+memory/long_term.json
+
+# Corruption-recovery backups made by memory_manager.py/config_manager.py —
+# these can contain the exact same secrets/personal data as the files they
+# back up, so they must never be committed either.
+memory/long_term.corrupt-*.json
+config/api_keys.corrupt-*.json
+memory/long_term.tmp-*
+config/api_keys.tmp-*
+
+# Python virtual environment — never commit, regenerated via requirements.txt
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local runtime data — sqlite DBs, generated logs, uploads
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+
+# J3 headless secrets — real values only ever belong in a local .env or a
+# cloud platform's secret store, never in git. .env.example ships with
+# variable names only and stays tracked.
+.env
+.env.*
+!.env.example
+
+config/api_keys.json

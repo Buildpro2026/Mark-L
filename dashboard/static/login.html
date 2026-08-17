@@ -153,6 +153,15 @@
   </div>
 
   <script>
+    // Where to send the browser after a successful login — defaults to
+    // the phone dashboard ('/'), but /3d redirects here with ?next=/3d
+    // when it finds no session token, so login should bounce back there
+    // instead of always landing on the phone UI.
+    function _next() {
+      const raw = new URLSearchParams(location.search).get('next');
+      return (raw && raw.startsWith('/')) ? raw : '/';
+    }
+
     // Try auto-reconnect with stored device token (set on first QR login)
     (async function() {
       const devTok = localStorage.getItem('jarvis_device_token');
@@ -168,7 +177,7 @@
         if (d.ok && d.token) {
           sessionStorage.setItem('jarvis_key', d.key);
           sessionStorage.setItem('jarvis_token', d.token);
-          location.replace('/');
+          location.replace(_next());
           return;
         }
       } catch (_) {}
@@ -204,7 +213,7 @@
       if (data.ok && data.token) {
         sessionStorage.setItem('jarvis_key', key);
         sessionStorage.setItem('jarvis_token', data.token);
-        location.href = '/';
+        location.href = _next();
       } else {
         inp.value = '';
         inp.focus();

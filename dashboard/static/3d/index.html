@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>JARVIS 3D Command Center</title>
+
+  <!-- PWA / "add to home screen" (iPad Safari + standards-based browsers) -->
+  <link rel="manifest" href="/3d/assets/manifest.json" />
+  <meta name="theme-color" content="#02060b" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="JARVIS" />
+  <link rel="apple-touch-icon" href="/3d/assets/icon.svg" />
+  <link rel="icon" href="/3d/assets/icon.svg" type="image/svg+xml" />
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #02060b;
+      --panel: rgba(5,11,18,0.90);
+      --accent: #00d4ff;
+      --line: rgba(255,255,255,0.12);
+      --muted: #8fa8b8;
+      --text: #e8f7ff;
+      --state-idle: #4b6b7c;
+      --state-listening: #00d4ff;
+      --state-thinking: #b98bff;
+      --state-speaking: #5cffc4;
+      --state-interrupted: #ff5c6c;
+      --right-w: 320px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: Inter, "Segoe UI", Arial, sans-serif;
+      background: radial-gradient(circle at 20% 20%, #0d1c2a 0%, var(--bg) 60%);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .shell { position: relative; height: 100vh; width: 100vw; display: grid; grid-template-columns: 1fr var(--right-w); }
+    .spatial-stage { position: relative; grid-column: 1; overflow: hidden; }
+    #three-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
+
+    .no-webgl {
+      position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+      flex-direction: column; gap: 8px; text-align: center; padding: 24px; color: var(--muted);
+    }
+    .no-webgl.show { display: flex; }
+
+    /* ── Compact HUD (lower-left): status + nav controls, expandable ───
+       Deliberately small and out of the way — the spatial "solar system"
+       (Jarvis orb + Nucleus planets) is the primary visual; this must never
+       obscure it. Secondary info (summary/breadcrumb/revenue/voice hint)
+       collapses behind a toggle so the default footprint stays minimal. ── */
+    .hud {
+      position: absolute; left: 14px; bottom: 14px; z-index: 6;
+      width: 208px; max-width: 44vw;
+      padding: 8px 10px; border-radius: 12px; background: var(--panel);
+      border: 1px solid var(--line); backdrop-filter: blur(10px);
+      font-size: 11px;
+    }
+    .hud-primary { display: flex; align-items: center; gap: 6px; }
+    .hud-focus { flex: 1; min-width: 0; font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hud-toggle {
+      flex-shrink: 0; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--line); border-radius: 5px; background: rgba(255,255,255,0.04);
+      color: var(--muted); cursor: pointer; font-size: 9px; line-height: 1; padding: 0;
+      transition: transform .2s ease;
+    }
+    .hud-toggle.open { transform: rotate(180deg); }
+
+    .jarvis-orb-status { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+    .jarvis-orb-status .dot {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--state-idle);
+      box-shadow: 0 0 8px var(--state-idle); transition: background .2s ease, box-shadow .2s ease;
+    }
+
+    .hud-controls { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+    .btn-mini {
+      border: 1px solid var(--line); background: rgba(255,255,255,0.05); color: var(--text);
+      padding: 3px 9px; border-radius: 999px; cursor: pointer; font-size: 10px;
+    }
+    .btn-mini:hover { border-color: var(--accent); color: #bff6ff; }
+    .btn-mini.primary { border-color: var(--accent); color: #bff6ff; background: rgba(0,212,255,0.12); }
+
+    .conn-status {
+      display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+      font-size: 9px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--muted);
+    }
+    .conn-status .dot { width: 6px; height: 6px; border-radius: 50%; background: #5a6a78; }
+    .conn-status.connected .dot { background: var(--state-speaking); box-shadow: 0 0 6px var(--state-speaking); }
+    .conn-status.reconnecting .dot { background: var(--state-interrupted); animation: pulse-dot 1s infinite; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    .hud-expand {
+      max-height: 0; overflow: hidden; opacity: 0;
+      transition: max-height .22s ease, opacity .18s ease, margin-top .22s ease;
+    }
+    .hud-expand.open {
+      max-height: 260px; opacity: 1; margin-top: 8px; padding-top: 8px;
+      border-top: 1px solid var(--line); overflow-y: auto;
+    }
+    .hud-summary { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+    .breadcrumb { margin-top: 6px; font-size: 10px; color: var(--muted); letter-spacing: 0.5px; }
+    .breadcrumb span::after { content: " / "; color: #3c5666; }
+    .breadcrumb span:last-child::after { content: ""; }
+    .revenue-progress { margin-top: 6px; font-size: 10px; color: #8af3c9; letter-spacing: 0.4px; }
+    .revenue-progress .bar { margin-top: 4px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden; width: 100%; }
+    .revenue-progress .bar-fill { height: 100%; background: linear-gradient(90deg, #00d4ff, #5cffc4); }
+    .voice-hint { margin-top: 6px; font-size: 9.5px; color: var(--muted); letter-spacing: 0.3px; line-height: 1.4; }
+    .hud-state-line { margin-top: 6px; font-size: 9px; color: var(--muted); letter-spacing: 0.5px; text-transform: uppercase; }
+
+    .toast-stack {
+      position: absolute; right: 20px; top: 20px; z-index: 8; display: grid; gap: 8px;
+      max-width: min(320px, calc(100vw - var(--right-w) - 40px));
+    }
+    .toast {
+      padding: 10px 12px; border-radius: 10px; background: rgba(4,12,18,0.92);
+      border: 1px solid var(--line); backdrop-filter: blur(8px); font-size: 11px;
+      color: var(--text); box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+      animation: toast-in .25s ease;
+    }
+    @keyframes toast-in { from { transform: translateY(-6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+    /* ── Right-side contextual info panel ─────────────────────────────── */
+    .info-panel {
+      grid-column: 2; position: relative; z-index: 4; overflow-y: auto;
+      background: var(--panel); border-left: 1px solid var(--line); backdrop-filter: blur(10px);
+      padding: 18px 16px 24px;
+    }
+    .info-panel .title { font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; color: #76dfff; }
+    .info-panel .subtitle { margin-top: 4px; font-size: 20px; font-weight: 700; }
+    .info-panel .status-line { margin-top: 6px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+    .info-section { margin-top: 16px; }
+    .info-section h4 {
+      margin: 0 0 8px; font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: #7fb8c9;
+    }
+    .info-list { display: grid; gap: 7px; }
+    .info-item {
+      padding: 9px 10px; border-radius: 10px; background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: var(--text); line-height: 1.4;
+    }
+    .info-item .k { color: #9fe6ff; font-weight: 600; }
+    .info-item.placeholder { border-style: dashed; color: var(--muted); }
+    .info-empty { font-size: 11px; color: var(--muted); font-style: italic; }
+
+    @media (max-width: 900px) {
+      .shell { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+      .spatial-stage { grid-column: 1; grid-row: 1; }
+      .info-panel { grid-column: 1; grid-row: 2; max-height: 38vh; border-left: none; border-top: 1px solid var(--line); }
+      .hud { width: auto; max-width: min(260px, calc(100vw - 28px)); left: 12px; bottom: 12px; }
+      :root { --right-w: 0px; }
+    }
+
+    @media (max-height: 480px) {
+      /* Short viewports (phone/small-tablet landscape) — cap how much
+         vertical space the expanded HUD can claim from the stage. */
+      .hud-expand.open { max-height: 130px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="spatial-stage" id="stage">
+      <canvas id="three-canvas"></canvas>
+      <div class="no-webgl" id="no-webgl">
+        <div style="font-size:16px;font-weight:700;">3D rendering unavailable</div>
+        <div style="font-size:12px;max-width:360px;">
+          This browser/device couldn't start WebGL, or Three.js failed to load
+          from <code>/3d/assets/vendor/</code>. Voice and mouse navigation still
+          work through the panels below once WebGL is available.
+        </div>
+      </div>
+
+      <!-- Compact HUD/control panel — lower-left, out of the Nucleus field.
+           Primary row + controls always visible; everything secondary lives
+           behind the toggle (see #hud-toggle in app.js) so this never grows
+           large enough to obscure the orb or the Nuclei around it. -->
+      <div class="hud" id="hud">
+        <div class="hud-primary">
+          <span class="jarvis-orb-status" id="jarvis-orb">
+            <span class="dot" id="state-dot"></span>
+          </span>
+          <span class="hud-focus" id="focus-title">Jarvis</span>
+          <button class="hud-toggle" id="hud-toggle" type="button" aria-label="Toggle details" aria-expanded="false">▾</button>
+        </div>
+        <div class="hud-controls">
+          <button class="btn-mini primary" id="btn-home" type="button">Home</button>
+          <button class="btn-mini" id="btn-back" type="button">Back</button>
+          <span class="conn-status" id="conn-status">
+            <span class="dot"></span>
+            <span id="conn-status-label">connecting…</span>
+          </span>
+        </div>
+        <div class="hud-expand" id="hud-expand">
+          <div class="hud-summary" id="focus-summary">Central nucleus — say a Nucleus name to navigate.</div>
+          <div class="breadcrumb" id="breadcrumb"></div>
+          <div class="revenue-progress" id="revenue-progress"></div>
+          <div class="voice-hint">Try: "open BuildPro" · "go to my email" · "go back" · "go home"</div>
+          <div class="hud-state-line">State: <span id="state-label">idle</span></div>
+        </div>
+      </div>
+
+      <div class="toast-stack" id="toast-stack"></div>
+    </div>
+
+    <div class="info-panel" id="info-panel">
+      <div class="title">Selected Nucleus</div>
+      <div class="subtitle" id="panel-title">Jarvis</div>
+      <div class="status-line" id="panel-status">Loading overview…</div>
+      <div class="info-section">
+        <h4>Details</h4>
+        <div class="info-list" id="panel-details"></div>
+      </div>
+      <div class="info-section">
+        <h4>Branches</h4>
+        <div class="info-list" id="panel-children"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Auth — same session-token pairing flow the phone dashboard already
+    // uses (dashboard/static/app.html): a page load can't carry a custom
+    // Authorization header, so this checks sessionStorage and bounces
+    // through /login if there's no session yet. Closes the J1 finding
+    // that /3d was reachable with zero credentials — see dashboard/server.py
+    // for the matching server-side enforcement on /3d/api/* and /3d/ws.
+    if (!sessionStorage.getItem('jarvis_token')) {
+      location.replace('/login?next=' + encodeURIComponent(location.pathname));
+    }
+  </script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/3d/assets/vendor/three.module.js"
+    }
+  }
+  </script>
+  <script type="module" src="/3d/assets/app.js"></script>
+  <script>
+    // Registered from the top-level page (not app.js) so a failure here
+    // never blocks the 3D scene from booting — PWA installability is a
+    // bonus, not a dependency.
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/3d/sw.js").catch((e) => console.warn("[3D] SW registration failed", e));
+      });
+    }
+  </script>
+</body>
+</html>

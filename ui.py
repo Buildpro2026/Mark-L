@@ -25,13 +25,16 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QShortcut,
+    QPen, QPixmap, QRadialGradient, QShortcut, QDesktopServices,
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QComboBox, QSlider,
 )
+
+from core.startup import graceful_release_all_locks
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -49,6 +52,17 @@ def _read_full_config() -> dict:
         return json.loads(API_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _voice_cfg_from_raw(raw: dict) -> dict:
+    """Map api_keys.json's voice_provider/voice_name/voice_speed keys to the
+    provider/voice/speed shape VoiceSettingsOverlay expects."""
+    return {
+        "provider": raw.get("voice_provider", "gemini"),
+        "voice": raw.get("voice_name", "Charon"),
+        "speed": raw.get("voice_speed", 1.0),
+        "elevenlabs_api_key": raw.get("elevenlabs_api_key", ""),
+    }
 
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
@@ -1240,6 +1254,108 @@ class HueWheel(QWidget):
             self.hue_committed.emit(self.color())
 
 
+class VoiceSettingsOverlay(QWidget):
+    """Floating overlay — pick a voice provider and preview a configured voice."""
+
+    saved = pyqtSignal(dict)
+    _OW, _OH = 440, 520
+
+    def __init__(self, config: dict | None = None, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            VoiceSettingsOverlay {{
+                background: rgba(0, 6, 10, 245);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        self._cfg = dict(config or {})
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(8)
+
+        def _lbl(txt, fs=9, bold=False, color=C.PRI, align=Qt.AlignmentFlag.AlignLeft):
+            w = QLabel(txt); w.setAlignment(align)
+            w.setFont(QFont("Courier New", fs, QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            return w
+
+        lay.addWidget(_lbl("🎙  VOICE SETTINGS", 12, True))
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        lay.addWidget(sep)
+
+        lay.addWidget(_lbl("PROVIDER", 8, color=C.TEXT_DIM))
+        self._provider = QComboBox(); self._provider.addItems(["gemini", "local", "elevenlabs"])
+        self._provider.setCurrentText(self._cfg.get("provider", "gemini"))
+        self._provider.setStyleSheet(f"QComboBox {{ background: #000d12; color: {C.TEXT}; border: 1px solid {C.BORDER}; padding: 4px 8px; }}")
+        lay.addWidget(self._provider)
+
+        lay.addWidget(_lbl("VOICE", 8, color=C.TEXT_DIM))
+        self._voice = QLineEdit(self._cfg.get("voice", "Charon"))
+        self._voice.setStyleSheet(f"QLineEdit {{ background: #000d12; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}")
+        lay.addWidget(self._voice)
+
+        lay.addWidget(_lbl("SPEED", 8, color=C.TEXT_DIM))
+        self._speed = QSlider(Qt.Orientation.Horizontal)
+        self._speed.setRange(60, 180)
+        self._speed.setValue(int(float(self._cfg.get("speed", 100.0)) * 100))
+        lay.addWidget(self._speed)
+
+        lay.addWidget(_lbl("ELEVENLABS API KEY (only needed for ElevenLabs)", 8, color=C.TEXT_DIM))
+        self._eleven_key = QLineEdit(self._cfg.get("elevenlabs_api_key", ""))
+        self._eleven_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._eleven_key.setStyleSheet(f"QLineEdit {{ background: #000d12; color: {C.TEXT}; border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}")
+        lay.addWidget(self._eleven_key)
+
+        self._preview = QPushButton("PREVIEW VOICE")
+        self._preview.setFixedHeight(32)
+        self._preview.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._preview.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.PRI}; border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}")
+        self._preview.clicked.connect(self._emit_preview)
+        lay.addWidget(self._preview)
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        save_btn = QPushButton("SAVE")
+        save_btn.setFixedHeight(32)
+        save_btn.clicked.connect(self._save)
+        save_btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.GREEN}; border: 1px solid {C.GREEN_D}; border-radius: 3px; }}")
+        btn_row.addWidget(save_btn)
+        cancel_btn = QPushButton("CANCEL")
+        cancel_btn.setFixedHeight(32)
+        cancel_btn.clicked.connect(self.hide)
+        cancel_btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.TEXT_MED}; border: 1px solid {C.BORDER}; border-radius: 3px; }}")
+        btn_row.addWidget(cancel_btn)
+        lay.addLayout(btn_row)
+
+        self._hint = QLabel(
+            "Gemini Live is the default provider and needs no key. "
+            "Switching provider reconnects JARVIS to apply it."
+        )
+        self._hint.setWordWrap(True)
+        self._hint.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10px;")
+        lay.addWidget(self._hint)
+
+    def _payload(self, preview: bool) -> dict:
+        payload = {
+            "provider": self._provider.currentText(),
+            "voice": self._voice.text().strip() or "Charon",
+            "speed": self._speed.value() / 100.0,
+            "_preview": preview,   # PREVIEW VOICE saves quietly — it shouldn't reconnect the live session
+        }
+        eleven_key = self._eleven_key.text().strip()
+        if eleven_key:
+            payload["elevenlabs_api_key"] = eleven_key
+        return payload
+
+    def _emit_preview(self):
+        self.saved.emit(self._payload(preview=True))
+
+    def _save(self):
+        self.saved.emit(self._payload(preview=False))
+        self.hide()
+
+
 class CustomizeOverlay(QWidget):
     """Floating overlay — change assistant name, user name and UI colour."""
 
@@ -1763,10 +1879,12 @@ class MainWindow(QMainWindow):
         self.on_text_command   = None
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
         self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
+        self.on_voice_settings_changed = None   # callable: (dict) -> None — apply new voice provider live
         self._muted            = False
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
+        self._voice_overlay: VoiceSettingsOverlay | None = None
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -2672,6 +2790,14 @@ class MainWindow(QMainWindow):
         remote_btn.clicked.connect(self._open_remote)
         lay.addWidget(remote_btn)
 
+        three_d_btn = QPushButton("◉  OPEN 3D COMMAND CENTER")
+        three_d_btn.setFixedHeight(26)
+        three_d_btn.setFont(QFont("Courier New", 7))
+        three_d_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        three_d_btn.setStyleSheet(_BTN_STYLE_DIM)
+        three_d_btn.clicked.connect(self._open_3d_command_center)
+        lay.addWidget(three_d_btn)
+
         fs_btn = QPushButton("⛶  FULLSCREEN  [F11]")
         fs_btn.setFixedHeight(26)
         fs_btn.setFont(QFont("Courier New", 7))
@@ -2702,6 +2828,14 @@ class MainWindow(QMainWindow):
         cust_btn.setStyleSheet(_BTN_STYLE_DIM)
         cust_btn.clicked.connect(self._open_customize)
         lay.addWidget(cust_btn)
+
+        voice_btn = QPushButton("🎙  VOICE SETTINGS")
+        voice_btn.setFixedHeight(26)
+        voice_btn.setFont(QFont("Courier New", 7))
+        voice_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        voice_btn.setStyleSheet(_BTN_STYLE_DIM)
+        voice_btn.clicked.connect(self._show_voice_settings)
+        lay.addWidget(voice_btn)
 
         self._brief_btn = QPushButton()
         self._brief_btn.setFixedHeight(26)
@@ -2901,6 +3035,26 @@ class MainWindow(QMainWindow):
     def notify_phone_connected(self) -> None:
         if self._remote_overlay and self._remote_overlay.isVisible():
             self._remote_overlay.mark_connected()
+
+    def _open_3d_command_center(self):
+        # No hardcoded guess here: the dashboard may be plain HTTP or, once
+        # config/certs/jarvis.{crt,key} exist, HTTPS-only on this same port —
+        # a hardcoded "http://" URL silently 404s/resets against an HTTPS-only
+        # port. on_remote_clicked() -> DashboardServer.get_url() is the only
+        # source of truth for the live scheme/host/port.
+        if not self.on_remote_clicked:
+            self._log.append_log("SYS: Dashboard not running — command center unavailable.")
+            return
+        try:
+            result = self.on_remote_clicked()
+            if not result or not str(result[0]).startswith("http"):
+                self._log.append_log("SYS: Dashboard not running — command center unavailable.")
+                return
+            url = f"{result[0]}/3d"
+            QDesktopServices.openUrl(QUrl(url))
+            self._log.append_log(f"SYS: Opened 3D command center at {url}")
+        except Exception as exc:
+            self._log.append_log(f"SYS: Could not open 3D command center: {exc}")
 
     def _open_remote(self):
         if not self.on_remote_clicked:
@@ -3212,6 +3366,26 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _show_voice_settings(self):
+        cfg = _voice_cfg_from_raw(_read_full_config())
+        self._voice_overlay = VoiceSettingsOverlay(cfg, self.centralWidget())
+        self._voice_overlay.saved.connect(self._apply_voice_settings)
+        ow, oh = 440, 520
+        self._voice_overlay.setGeometry((self.width() - ow) // 2, (self.height() - oh) // 2, ow, oh)
+        self._voice_overlay.show()
+
+    def _apply_voice_settings(self, voice_cfg: dict):
+        cfg = _read_full_config()
+        cfg["voice_provider"] = voice_cfg.get("provider", cfg.get("voice_provider", "gemini"))
+        cfg["voice_name"] = voice_cfg.get("voice", cfg.get("voice_name", "Charon"))
+        cfg["voice_speed"] = voice_cfg.get("speed", cfg.get("voice_speed", 1.0))
+        if voice_cfg.get("elevenlabs_api_key"):
+            cfg["elevenlabs_api_key"] = voice_cfg["elevenlabs_api_key"]
+        API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+        self._log.append_log(f"SYS: Voice updated — {cfg['voice_provider']} / {cfg['voice_name']}")
+        if not voice_cfg.get("_preview") and self.on_voice_settings_changed:
+            self.on_voice_settings_changed(voice_cfg)
+
     def _show_setup(self):
         ov = SetupOverlay(self.centralWidget())
         cw = self.centralWidget()
@@ -3252,6 +3426,14 @@ class JarvisUI:
     def __init__(self, face_path: str, size=None):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        # Closing the window (title-bar X) never touches the background
+        # asyncio thread — it's a daemon thread killed without running its
+        # finally blocks once the interpreter starts finalizing. aboutToQuit
+        # fires synchronously on the main thread while mainloop() is still
+        # running, so this is the one hook that reliably catches every quit
+        # path (X button, app.quit(), OS logoff) and not just voice
+        # shutdown/Ctrl+C, which are covered separately in main.py.
+        self._app.aboutToQuit.connect(graceful_release_all_locks)
         self._win = MainWindow(face_path)
         self._win.show()
         self.root = _RootShim(self._app)
@@ -3292,6 +3474,14 @@ class JarvisUI:
     @on_interrupt.setter
     def on_interrupt(self, cb):
         self._win.on_interrupt = cb
+
+    @property
+    def on_voice_settings_changed(self):
+        return self._win.on_voice_settings_changed
+
+    @on_voice_settings_changed.setter
+    def on_voice_settings_changed(self, cb):
+        self._win.on_voice_settings_changed = cb
 
     def notify_phone_connected(self) -> None:
         self._win.notify_phone_connected()

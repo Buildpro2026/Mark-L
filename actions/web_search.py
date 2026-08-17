@@ -1,6 +1,7 @@
 #web_search.py
 import json
 import sys
+import threading
 from pathlib import Path
 
 def _get_base_dir() -> Path:
@@ -23,7 +24,7 @@ def _gemini_search(query: str) -> str:
 
     client   = genai.Client(api_key=_get_api_key())
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-flash-latest",
         contents=query,
         config={"tools": [{"google_search": {}}]},
     )
@@ -124,7 +125,7 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
 
     client = genai.Client(api_key=_get_api_key())
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-flash-latest",
         contents=f"Current world news: {n} headlines. Numbered list, titles only.",
         config={"tools": [{"google_search": {}}]},
     )
@@ -150,35 +151,42 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
     return headlines[:n], raw.strip()
 
 
-# ── Modes ──────────────────────────────────────────────────────────────────────
+# ── Reliability: race Gemini against DDG instead of waiting for Gemini to ──
+# ── fail first (original bug: Gemini 429 RESOURCE_EXHAUSTED made every mode
+#    slow/unreliable since DDG only got a turn *after* Gemini's failure —
+#    which can be a slow SDK-internal retry loop, not a fast raise). Proven
+#    first in _news(); now shared by search/research/price too. ────────────
 
-def _search(query: str) -> str:
-    """Default search — Gemini grounded, DDG fallback."""
+def _log_search_error(label: str, exc: Exception) -> None:
+    msg = str(exc)
+    if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+        line = f"[WebSearch] WARNING: {label} quota exhausted (429) - falling back: {msg[:160]}"
+    else:
+        line = f"[WebSearch] WARNING: {label} failed ({msg[:160]}) - falling back"
     try:
-        return _gemini_search(query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Gemini failed ({e}) — trying DDG...")
-        results = _ddg_search(query)
-        return _format_ddg(query, results)
+        print(line)
+    except UnicodeEncodeError:
+        # Some Windows consoles (cp1252) can't encode every character that
+        # might show up inside a raw exception message (msg[:160] above is
+        # arbitrary third-party text, not something this code controls) —
+        # this print is diagnostic only, so a fallback thread's real
+        # success/failure must never hinge on stdout accepting every byte.
+        print(line.encode("ascii", errors="replace").decode("ascii"))
 
 
-def _news(query: str) -> str:
-    """
-    Runs Gemini grounded search AND DDG news in parallel.
-    Returns whichever delivers a valid result first; cancels the other.
-    """
-    import threading
-
-    gemini_query = f"latest news today: {query}" if query else "top world news today"
-    ddg_query    = query if query else "world news today"
-
-    result_box  = [None]   # first valid result lands here
-    lock        = threading.Lock()
-    done_evt    = threading.Event()
-    failures    = [0]
+def _race(primary_fn, fallback_fn, min_len: int = 40, timeout: float = 10.0,
+          primary_label: str = "Gemini", fallback_label: str = "DDG") -> str | None:
+    """Run `primary_fn` and `fallback_fn` concurrently; return whichever
+    produces a valid (non-empty, sufficiently long) result first, or None if
+    both fail/timeout. Neither function blocks the other — a hung or slow
+    Gemini call no longer delays the DDG fallback."""
+    result_box: list = [None]
+    lock     = threading.Lock()
+    done_evt = threading.Event()
+    failures = [0]
 
     def _store(r: str) -> None:
-        if r and len(r) > 60:
+        if r and len(r) >= min_len:
             with lock:
                 if result_box[0] is None:
                     result_box[0] = r
@@ -189,54 +197,78 @@ def _news(query: str) -> str:
                 if failures[0] >= 2:   # both failed — unblock caller
                     done_evt.set()
 
-    def _try_gemini():
+    def _run_primary():
         try:
-            _store(_gemini_search(gemini_query))
+            _store(primary_fn())
         except Exception as e:
-            print(f"[WebSearch] ⚠️ Gemini news failed ({e})")
+            _log_search_error(primary_label, e)
             _store("")
 
-    def _try_ddg():
+    def _run_fallback():
         try:
-            results = _ddg_news(ddg_query, max_results=8)
-            _store(_format_news(ddg_query, results))
+            _store(fallback_fn())
         except Exception as e:
-            print(f"[WebSearch] ⚠️ DDG news failed ({e})")
+            _log_search_error(fallback_label, e)
             _store("")
 
-    threading.Thread(target=_try_gemini, daemon=True).start()
-    threading.Thread(target=_try_ddg,    daemon=True).start()
+    threading.Thread(target=_run_primary,  daemon=True).start()
+    threading.Thread(target=_run_fallback, daemon=True).start()
 
-    done_evt.wait(timeout=10.0)
-    return result_box[0] or f"No news found for: {query}"
+    done_evt.wait(timeout=timeout)
+    return result_box[0]
+
+
+# ── Modes ──────────────────────────────────────────────────────────────────────
+
+def _search(query: str) -> str:
+    """Default search — Gemini grounded and DDG race concurrently."""
+    result = _race(
+        lambda: _gemini_search(query),
+        lambda: _format_ddg(query, _ddg_search(query)),
+    )
+    return result or f"No results found for: {query}"
+
+
+def _news(query: str) -> str:
+    """Runs Gemini grounded search AND DDG news in parallel — first valid
+    result wins; the original quota-resilient design this pattern is based on."""
+    gemini_query = f"latest news today: {query}" if query else "top world news today"
+    ddg_query    = query if query else "world news today"
+    result = _race(
+        lambda: _gemini_search(gemini_query),
+        lambda: _format_news(ddg_query, _ddg_news(ddg_query, max_results=8)),
+        min_len=60,
+        primary_label="Gemini news",
+        fallback_label="DDG news",
+    )
+    return result or f"No news found for: {query}"
 
 
 def _research(query: str) -> str:
-    """
-    Deep dive — asks Gemini for a comprehensive answer with context.
-    Falls back to a wider DDG fetch.
-    """
+    """Deep dive — races Gemini's comprehensive answer against a wider DDG fetch."""
     research_query = (
         f"Comprehensive, detailed explanation of: {query}. "
         "Include background context, key facts, current state, and important nuances."
     )
-    try:
-        return _gemini_search(research_query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Research Gemini failed ({e}) — DDG fallback...")
-        results = _ddg_search(query, max_results=10)
-        return _format_ddg(query, results)
+    result = _race(
+        lambda: _gemini_search(research_query),
+        lambda: _format_ddg(query, _ddg_search(query, max_results=10)),
+        min_len=60,
+        primary_label="Research Gemini",
+    )
+    return result or f"No results found for: {query}"
 
 
 def _price(query: str) -> str:
-    """Product price lookup — searches for current market prices."""
+    """Product price lookup — races Gemini against a DDG price search."""
     price_query = f"current price of {query} — how much does it cost today"
-    try:
-        return _gemini_search(price_query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Price Gemini failed ({e}) — DDG fallback...")
-        results = _ddg_search(f"{query} price buy", max_results=6)
-        return _format_ddg(query, results)
+    result = _race(
+        lambda: _gemini_search(price_query),
+        lambda: _format_ddg(query, _ddg_search(f"{query} price buy", max_results=6)),
+        min_len=20,
+        primary_label="Price Gemini",
+    )
+    return result or f"No pricing information found for: {query}"
 
 
 def _compare(items: list[str], aspect: str) -> str:

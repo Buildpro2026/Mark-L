@@ -1,0 +1,25 @@
+# Render deployment config for the headless JARVIS core only — the
+# tool-execution API, Agent Orchestrator API, and background worker
+# (agent scheduler, topic monitor, proactive observer). Does NOT deploy
+# the PyQt6 desktop app or its voice loop; see the J2 report for why that
+# split exists (main.py still imports PyQt6/sounddevice at module scope).
+#
+# This is a starting point, not a finished production config — see the
+# J2 report's "remaining blockers" / "what J3 should implement" sections
+# for what's still missing (persistent-volume wiring for data/jarvis2.db,
+# a real Obsidian sync mechanism, etc.).
+services:
+  - type: web
+    name: jarvis-headless-core
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m core.headless_main
+    healthCheckPath: /health
+    envVars:
+      - key: JARVIS_API_TOKEN
+        sync: false   # set as a real secret in the Render dashboard, never committed
+      - key: JARVIS_HEADLESS_HOST
+        value: "0.0.0.0"
+      # No JARVIS_HEADLESS_PORT here — core/headless/config.py falls back
+      # to Render's own $PORT automatically when that's unset.

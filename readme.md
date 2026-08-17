@@ -104,6 +104,8 @@ python main.py
 
 > ⚠️ **Installation Note:** Some OS-specific dependencies are not bundled in `requirements.txt` to keep the repo lightweight. If you hit a `ModuleNotFoundError`, install the missing package with `pip install <module_name>`.
 
+On Windows, once `.venv` is set up, you can also just double-click **`Start Mark-L.bat`** in the repo root — see `docs/WINDOWS_RUNBOOK.md` for start/stop/restart/health-check/recovery steps.
+
 ---
 
 ## 📋 Requirements

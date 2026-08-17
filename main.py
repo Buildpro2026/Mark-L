@@ -52,12 +52,39 @@ from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.system_monitor    import SystemMonitor, get_system_status
-from actions.proactive         import ProactiveEngine
+from actions.proactive         import ProactiveEngine, get_recent_triggers as get_proactive_history
 from actions.background_monitor import (
     add_monitor, remove_monitor, list_monitors, check_all as monitor_check_all,
 )
 from actions.web_search        import _news as _fetch_news_sync
-from memory.config_manager     import get_brief_enabled
+from actions.voice_manager     import get_voice_provider_config, build_tts_player
+from actions.voice_navigation  import parse_navigation_command
+from actions.strategic_objective import (
+    format_objective_for_prompt, get_objective_status, log_revenue,
+)
+from actions.agent_orchestrator import orchestrator as agent_orchestrator
+from actions import agent_orchestrator as agent_scheduler_lock   # module itself, for the single-instance lock functions (distinct from the `orchestrator` singleton imported above)
+from actions import twilio_integration as twilio
+from actions import gmail_integration
+from actions import calendar_integration
+from actions import airtable_integration
+from actions import hubspot_integration
+from actions import buffer_integration
+from actions import buildpro_data
+from actions import buildpro_matching
+from actions import google_auth
+from actions import business_intelligence as biz_intel
+from actions import opportunity_engine as opp_engine
+from actions import decision_engine
+from memory.config_manager     import (
+    get_brief_enabled, get_proactive_enabled, save_proactive_enabled,
+    get_proactive_quiet_hours,
+)
+from core.startup import (
+    print_startup_banner, check_single_instance, graceful_release_all_locks,
+)
+from core.headless.context import ToolContext
+from core.headless.tool_executor import ToolExecutor, UnknownToolError
 
 
 def get_base_dir():
@@ -75,9 +102,274 @@ SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 
+# Barge-in tuning: how much sustained speech Gemini's server-side VAD requires
+# before it commits to "the user started talking" and interrupts playback.
+# Lower = faster real interruptions but more false positives from acoustic
+# echo of JARVIS's own voice bleeding into the mic; higher = the opposite.
+# 200ms was too sensitive in practice — the always-on mic (see
+# _should_forward_mic_audio) picked up acoustic echo/ambient noise while
+# JARVIS was speaking often enough to self-trigger sc.interrupted on
+# nearly every response, silently killing both the audio and the response
+# text before the user could ever hear or see it (confirmed by reproducing
+# this exact sequence against the live _receive_audio()/interrupt() code).
+BARGE_IN_PREFIX_PADDING_MS = 700
+
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    """Raises a RuntimeError containing "API key not valid" (rather than a
+    raw KeyError/FileNotFoundError) on a missing config file or missing/empty
+    key, so run()'s existing error handling — which already recognizes that
+    phrase and prompts reconfiguration instead of retrying forever — catches
+    this case too. Before this fix, a missing gemini_api_key silently caused
+    an infinite 3-second reconnect loop with no guidance to the user.
+
+    J3 Part 2: GEMINI_API_KEY env var takes precedence over
+    config/api_keys.json (core/headless/config.py) — a cloud deploy sets
+    the env var and never needs the JSON file at all; local desktop use,
+    which has never set that env var, keeps reading the file exactly as
+    before."""
+    from core.headless import config as _hc
+    if _hc.GEMINI_API_KEY:
+        return _hc.GEMINI_API_KEY
+    try:
+        with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
+            key = json.load(f).get("gemini_api_key", "")
+    except Exception:
+        key = ""
+    if not key:
+        raise RuntimeError("API key not valid: gemini_api_key is missing from config/api_keys.json")
+    return key
+
+
+def _resolve_input_device() -> tuple[int, str]:
+    """Resolve a usable microphone input device index.
+
+    Windows' reported default input device has been observed stuck at -1
+    (invalid) here even while real microphones are enumerable via PortAudio
+    (see 2026-08-09 recovery diagnosis) — sd.InputStream(...) with no
+    device= inherits that -1 and raises PortAudioError immediately, which
+    tears down the whole Gemini Live session since _listen_audio runs
+    inside run()'s TaskGroup.
+
+    Device metadata alone isn't trustworthy here: several WDM-KS entries
+    report input channels but fail to actually open (PortAudioError -9996),
+    sd.check_input_settings() reports "Invalid sample rate" for devices that
+    open fine in practice, and at least one ("PC Speaker", a WDM-KS pin left
+    over from a phantom/disconnected device per Windows Device Manager)
+    opens without error yet never delivers a single audio callback. So each
+    candidate is verified by actually opening a throwaway InputStream at the
+    app's real settings and confirming a real callback arrives within a
+    short timeout.
+
+    NOTE: this deliberately does NOT reject a device for producing all-zero
+    samples during that window — the real Microphone Array on this machine
+    (Intel Smart Sound Technology) runs through driver-level noise
+    suppression that can legitimately output true digital silence during a
+    quiet moment, which an earlier version of this probe misread as "fake."
+    Whether the callback fires at all is what actually distinguishes a real
+    device from a dead pin like "PC Speaker", which never fires one.
+
+    NOTE: this machine also has VB-Audio Voicemeeter installed, which
+    registers ~70 virtual routing devices (Voicemeeter Out A1-A5/B1-B3,
+    In 1-5, etc. — duplicated across several host APIs) that also report
+    input channels. Trying all of them costs real per-device open/close
+    overhead and previously stretched startup to minutes. None of them are
+    an actual microphone, so they're only tried as a last resort — the OS
+    default and anything actually named "microphone"/"mic" go first and
+    resolve almost immediately in the normal case.
+    """
+    devices = sd.query_devices()
+    default_idx = sd.default.device[0]
+
+    _NON_MIC_HINTS = ("stereo mix", "what u hear", "loopback", "pc speaker")
+
+    def _is_priority(i, d):
+        name = d["name"].lower()
+        return i == default_idx or "microphone" in name or "mic" in name
+
+    def _rank(item):
+        i, d = item
+        name = d["name"].lower()
+        is_default = (i == default_idx)
+        is_named_mic = "microphone" in name or "mic" in name
+        is_non_mic_hint = any(hint in name for hint in _NON_MIC_HINTS)
+        return (not is_default, not is_named_mic, is_non_mic_hint)
+
+    input_capable = [
+        (i, d) for i, d in enumerate(devices)
+        if d.get("max_input_channels", 0) > 0
+    ]
+    if not input_capable:
+        raise RuntimeError("No usable microphone input device found (0 input-capable devices enumerated).")
+
+    priority = sorted((c for c in input_capable if _is_priority(*c)), key=_rank)
+    fallback = sorted((c for c in input_capable if not _is_priority(*c)), key=_rank)
+
+    def _probe(candidates: list) -> tuple[int, str] | None:
+        for i, d in candidates:
+            got_audio = threading.Event()
+
+            def _probe_callback(indata, frames, time_info, status, _evt=got_audio):
+                _evt.set()
+
+            try:
+                # Must probe in callback (non-blocking) mode, matching how
+                # _listen_audio actually uses the stream — some WDM-KS
+                # devices reject the blocking API entirely ("Blocking API
+                # not supported yet") while opening fine in callback mode.
+                with sd.InputStream(
+                    samplerate=SEND_SAMPLE_RATE, channels=CHANNELS,
+                    dtype="int16", blocksize=CHUNK_SIZE, device=i,
+                    callback=_probe_callback,
+                ):
+                    got_audio.wait(timeout=0.5)
+            except Exception:
+                continue
+            if got_audio.is_set():
+                return i, d["name"]
+        return None
+
+    found = _probe(priority) or _probe(fallback)
+    if found is not None:
+        return found
+
+    raise RuntimeError(
+        f"No microphone could actually be opened ({len(input_capable)} input-capable "
+        "device(s) enumerated, all failed to open or deliver audio)."
+    )
+
+
+def _resolve_output_device() -> tuple[int, str]:
+    """Resolve a usable speaker/headphone output device index.
+
+    Same class of bug as _resolve_input_device, mirrored on playback:
+    Windows' default OUTPUT device has been observed both wrong (an
+    HDMI-connected TV) and outright invalid (-1) at different times on this
+    machine — never trust it blindly.
+
+    2026-08-11 update: VB-Audio Voicemeeter (and the TV) are no longer
+    present in this machine's device list at all — the ~30 Voicemeeter
+    virtual devices this function used to fall back on for blocking-mode
+    output are simply gone now. That fallback would silently stop working
+    the moment Voicemeeter was removed, which is exactly what happened
+    (confirmed live: sd.default.device[1] == -1, zero Voicemeeter devices
+    enumerated, and every remaining real "Speakers"/"Headphones" device is
+    a raw WDM-KS pin that rejects the *blocking* API outright — "Invalid
+    device" [-9996] — the same way it rejected blocking-mode input before
+    _listen_audio() was switched to a callback). The actual fix is on the
+    playback side, not here: _open_output_stream()/_play_audio() now use a
+    callback-driven stream (see _AudioSink below) instead of blocking
+    stream.write() calls, so _probe() below tests candidates in callback
+    mode too — confirmed live that real "Speakers"/"Headphones" devices
+    open and deliver callbacks fine that way. TV/HDMI/sound-mapper devices
+    are still excluded outright even though none are present right now, in
+    case one reappears (e.g. the TV gets reconnected).
+    """
+    devices = sd.query_devices()
+    default_idx = sd.default.device[1]
+
+    # "Sound Mapper"/"Primary Sound Driver" are meta-devices that just mirror
+    # whatever Windows' actual default is — not a distinct choice, so they'd
+    # silently redirect right back to the TV. Treated the same as TV/HDMI.
+    _AVOID_HINTS = ("tv", "hdmi", "display audio", "sound mapper", "primary sound")
+
+    def _is_avoid(name: str) -> bool:
+        return any(hint in name for hint in _AVOID_HINTS)
+
+    def _tier(item) -> int:
+        i, d = item
+        name = d["name"].lower()
+        if _is_avoid(name):
+            return 2   # TV/HDMI/display audio — only as an absolute last resort
+        if "speaker" in name or "headphone" in name:
+            return 0   # real physical output, most likely to be heard
+        return 1        # everything else (default meta-device, Voicemeeter, etc.)
+
+    def _rank(item):
+        i, d = item
+        name = d["name"].lower()
+        # Among Voicemeeter's virtual buses, "Voicemeeter Input" (unqualified)
+        # is the conventional main bus most Voicemeeter setups route to real
+        # speakers by default — AUX/In2-5/VAIO3 are typically secondary buses
+        # that may not be routed anywhere, so prefer the main one first.
+        is_secondary_voicemeeter_bus = "voicemeeter" in name and "voicemeeter input" not in name
+        return (_tier(item), is_secondary_voicemeeter_bus, i != default_idx)
+
+    output_capable = [
+        (i, d) for i, d in enumerate(devices)
+        if d.get("max_output_channels", 0) > 0
+    ]
+    if not output_capable:
+        raise RuntimeError("No usable speaker/headphone output device found (0 output-capable devices enumerated).")
+
+    ranked = sorted(output_capable, key=_rank)
+    preferred = [c for c in ranked if _tier(c) < 2]
+    last_resort = [c for c in ranked if _tier(c) == 2]
+
+    def _silence_callback(outdata, frames, time_info, status):
+        outdata[:] = b"\x00" * len(outdata)
+
+    def _probe(candidates: list) -> tuple[int, str] | None:
+        for i, d in candidates:
+            try:
+                # Callback mode, matching how _open_output_stream actually
+                # uses the device now — blocking-mode probing here rejected
+                # real WDM-KS Speakers/Headphones devices that work fine in
+                # callback mode (confirmed live), which is what caused
+                # every real output device to look unusable.
+                with sd.RawOutputStream(
+                    samplerate=RECEIVE_SAMPLE_RATE, channels=CHANNELS,
+                    dtype="int16", blocksize=CHUNK_SIZE, device=i,
+                    callback=_silence_callback,
+                ):
+                    pass
+            except Exception:
+                continue
+            return i, d["name"]
+        return None
+
+    found = _probe(preferred) or _probe(last_resort)
+    if found is not None:
+        return found
+
+    raise RuntimeError(
+        f"No speaker/headphone output device could actually be opened ({len(output_capable)} "
+        "output-capable device(s) enumerated, all failed to open)."
+    )
+
+
+class _AudioSink:
+    """Thread-safe byte buffer feeding a callback-mode sd.RawOutputStream.
+
+    _play_audio() (asyncio) calls write() to hand off audio bytes; the
+    PortAudio callback (a *different*, non-asyncio thread) calls read() to
+    pull exactly the number of bytes it needs for that block, padding with
+    silence on underrun rather than blocking — a callback must never block
+    or PortAudio glitches/drops out. This replaces the old design where
+    _play_audio wrote directly to the stream via a blocking stream.write()
+    call in a thread pool, which real WDM-KS Speakers/Headphones devices on
+    this machine reject outright ("Invalid device" [-9996]); those same
+    devices work fine in callback mode (confirmed live), hence this buffer.
+    """
+
+    def __init__(self):
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+
+    def write(self, data: bytes) -> None:
+        with self._lock:
+            self._buf.extend(data)
+
+    def read(self, n: int) -> bytes:
+        with self._lock:
+            chunk = bytes(self._buf[:n])
+            del self._buf[:n]
+        if len(chunk) < n:
+            chunk += b"\x00" * (n - len(chunk))
+        return chunk
+
+    def clear(self) -> None:
+        with self._lock:
+            self._buf.clear()
 
 
 def _load_system_prompt() -> str:
@@ -90,462 +382,79 @@ def _load_system_prompt() -> str:
             "Never simulate or guess results — always call the appropriate tool."
         )
 
+class _VoiceSettingsChanged(Exception):
+    """Internal signal raised to force a session reconnect after the user
+    changes the voice provider/voice/speed, so the change applies live
+    instead of waiting for the next app restart or network reconnect."""
+
+
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
-def _clean_transcript(text: str) -> str:    
+def _clean_transcript(text: str) -> str:
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
     return text.strip()
 
-TOOL_DECLARATIONS = [
-    {
-        "name": "open_app",
-        "description": (
-            "Opens any application on the computer. "
-            "Use this whenever the user asks to open, launch, or start any app, "
-            "website, or program. Always call this tool — never just say you opened it."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "app_name": {
-                    "type": "STRING",
-                    "description": "Exact name of the application (e.g. 'WhatsApp', 'Chrome', 'Spotify')"
-                }
-            },
-            "required": ["app_name"]
-        }
-    },
-    {
-        "name": "web_search",
-        "description": (
-            "Searches the web. Use for ANY question about current facts, events, prices, "
-            "or topics — always prefer this over guessing. "
-            "Modes: 'search' (default), 'news' (latest headlines on a topic), "
-            "'research' (deep comprehensive answer), 'price' (product cost lookup), "
-            "'compare' (side-by-side comparison of items)."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "query":  {"type": "STRING", "description": "Search query or topic"},
-                "mode":   {"type": "STRING", "description": "search | news | research | price | compare"},
-                "items":  {"type": "ARRAY",  "items": {"type": "STRING"}, "description": "Items to compare (compare mode)"},
-                "aspect": {"type": "STRING", "description": "Comparison aspect: price | specs | reviews | features"},
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "system_status",
-        "description": (
-            "Returns real-time system metrics: CPU usage, RAM, GPU load, CPU temperature, "
-            "uptime, and process count. Use when the user asks about computer performance, "
-            "temperature, memory, or resource usage."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {},
-        }
-    },
-    {
-        "name": "weather_report",
-        "description": "Gives the weather report to user",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "city": {"type": "STRING", "description": "City name"}
-            },
-            "required": ["city"]
-        }
-    },
-    {
-        "name": "send_message",
-        "description": "Sends a text message via WhatsApp, Telegram, or other messaging platform.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "receiver":     {"type": "STRING", "description": "Recipient contact name"},
-                "message_text": {"type": "STRING", "description": "The message to send"},
-                "platform":     {"type": "STRING", "description": "Platform: WhatsApp, Telegram, etc."}
-            },
-            "required": ["receiver", "message_text", "platform"]
-        }
-    },
-    {
-        "name": "reminder",
-        "description": "Sets a timed reminder using Task Scheduler.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "date":    {"type": "STRING", "description": "Date in YYYY-MM-DD format"},
-                "time":    {"type": "STRING", "description": "Time in HH:MM format (24h)"},
-                "message": {"type": "STRING", "description": "Reminder message text"}
-            },
-            "required": ["date", "time", "message"]
-        }
-    },
-    {
-        "name": "youtube_video",
-        "description": (
-            "Controls YouTube. Use for: playing videos, summarizing a video's content, "
-            "getting video info, or showing trending videos."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action": {"type": "STRING", "description": "play | summarize | get_info | trending (default: play)"},
-                "query":  {"type": "STRING", "description": "Search query for play action"},
-                "save":   {"type": "BOOLEAN", "description": "Save summary to Notepad (summarize only)"},
-                "region": {"type": "STRING", "description": "Country code for trending e.g. TR, US"},
-                "url":    {"type": "STRING", "description": "Video URL for get_info action"},
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "screen_process",
-        "description": (
-            "Captures the screen or webcam image and lets you analyze it. "
-            "MUST be called when user asks what is on screen, what you see, "
-            "look at camera, analyze my screen, etc. "
-            "You have NO visual ability without this tool. "
-            "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
-            "When using camera: the live view stays open until user says close it or calls close_camera."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "angle": {"type": "STRING", "description": "'screen' to capture display, 'camera' for webcam. Default: 'screen'"},
-                "text":  {"type": "STRING", "description": "The question or instruction about the captured image"}
-            },
-            "required": ["text"]
-        }
-    },
-    {
-        "name": "close_camera",
-        "description": (
-            "Closes the live camera view shown on screen. "
-            "Call when user says: close camera, stop camera, turn off camera, "
-            "kamerayı kapat, kapat, creepy, etc."
-        ),
-        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
-    },
-    {
-        "name": "computer_settings",
-        "description": (
-            "Controls the computer: volume, brightness, window management, keyboard shortcuts, "
-            "typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, "
-            "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. "
-            "Use for ANY single computer control command."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":      {"type": "STRING", "description": "The action to perform"},
-                "description": {"type": "STRING", "description": "Natural language description of what to do"},
-                "value":       {"type": "STRING", "description": "Optional value: volume level, text to type, etc."}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "browser_control",
-        "description": (
-            "Controls any web browser. Use for: opening websites, searching the web, "
-            "clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. "
-            "Simple open/search requests launch the user's own browser normally (their real profile "
-            "and logged-in accounts); interactive actions (click, type, fill_form...) attach an "
-            "automation browser. "
-            "Always pass the 'browser' parameter when the user specifies a browser (e.g. 'open in Edge', "
-            "'use Firefox', 'open Chrome'). Multiple browsers can run simultaneously."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":      {"type": "STRING", "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"},
-                "browser":     {"type": "STRING", "description": "Target browser: chrome | edge | firefox | opera | operagx | brave | vivaldi | safari. Omit to use the currently active browser."},
-                "url":         {"type": "STRING", "description": "URL for go_to / new_tab action"},
-                "query":       {"type": "STRING", "description": "Search query for search action"},
-                "engine":      {"type": "STRING", "description": "Search engine: google | bing | duckduckgo | yandex (default: google)"},
-                "selector":    {"type": "STRING", "description": "CSS selector for click/type"},
-                "text":        {"type": "STRING", "description": "Text to click or type"},
-                "description": {"type": "STRING", "description": "Element description for smart_click/smart_type"},
-                "direction":   {"type": "STRING", "description": "up | down for scroll"},
-                "amount":      {"type": "INTEGER", "description": "Scroll amount in pixels (default: 500)"},
-                "key":         {"type": "STRING", "description": "Key name for press action (e.g. Enter, Escape, F5)"},
-                "path":        {"type": "STRING", "description": "Save path for screenshot"},
-                "incognito":   {"type": "BOOLEAN", "description": "Open in private/incognito mode"},
-                "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
-            },
-            "required": ["action"]
-        }
-    },
-    {
-        "name": "file_controller",
-        "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":      {"type": "STRING", "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"},
-                "path":        {"type": "STRING", "description": "File/folder path or shortcut: desktop, downloads, documents, home"},
-                "destination": {"type": "STRING", "description": "Destination path for move/copy"},
-                "new_name":    {"type": "STRING", "description": "New name for rename"},
-                "content":     {"type": "STRING", "description": "Content for create_file/write"},
-                "name":        {"type": "STRING", "description": "File name to search for"},
-                "extension":   {"type": "STRING", "description": "File extension to search (e.g. .pdf)"},
-                "count":       {"type": "INTEGER", "description": "Number of results for largest"},
-            },
-            "required": ["action"]
-        }
-    },
-    {
-        "name": "desktop_control",
-        "description": "Controls the desktop: wallpaper, organize, clean, list, stats.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action": {"type": "STRING", "description": "wallpaper | wallpaper_url | organize | clean | list | stats | task"},
-                "path":   {"type": "STRING", "description": "Image path for wallpaper"},
-                "url":    {"type": "STRING", "description": "Image URL for wallpaper_url"},
-                "mode":   {"type": "STRING", "description": "by_type or by_date for organize"},
-                "task":   {"type": "STRING", "description": "Natural language desktop task"},
-            },
-            "required": ["action"]
-        }
-    },
-    {
-        "name": "code_helper",
-        "description": "Writes, edits, explains, runs, or builds code files.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":      {"type": "STRING", "description": "write | edit | explain | run | build | auto (default: auto)"},
-                "description": {"type": "STRING", "description": "What the code should do or what change to make"},
-                "language":    {"type": "STRING", "description": "Programming language (default: python)"},
-                "output_path": {"type": "STRING", "description": "Where to save the file"},
-                "file_path":   {"type": "STRING", "description": "Path to existing file for edit/explain/run/build"},
-                "code":        {"type": "STRING", "description": "Raw code string for explain"},
-                "args":        {"type": "STRING", "description": "CLI arguments for run/build"},
-                "timeout":     {"type": "INTEGER", "description": "Execution timeout in seconds (default: 30)"},
-            },
-            "required": ["action"]
-        }
-    },
-    {
-        "name": "dev_agent",
-        "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "description":  {"type": "STRING", "description": "What the project should do"},
-                "language":     {"type": "STRING", "description": "Programming language (default: python)"},
-                "project_name": {"type": "STRING", "description": "Optional project folder name"},
-                "timeout":      {"type": "INTEGER", "description": "Run timeout in seconds (default: 30)"},
-            },
-            "required": ["description"]
-        }
-    },
-    {
-        "name": "computer_control",
-        "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"},
-                "text":        {"type": "STRING", "description": "Text to type or paste"},
-                "x":           {"type": "INTEGER", "description": "X coordinate"},
-                "y":           {"type": "INTEGER", "description": "Y coordinate"},
-                "keys":        {"type": "STRING", "description": "Key combination e.g. 'ctrl+c'"},
-                "key":         {"type": "STRING", "description": "Single key e.g. 'enter'"},
-                "direction":   {"type": "STRING", "description": "up | down | left | right"},
-                "amount":      {"type": "INTEGER", "description": "Scroll amount (default: 3)"},
-                "seconds":     {"type": "NUMBER",  "description": "Seconds to wait"},
-                "title":       {"type": "STRING",  "description": "Window title for focus_window"},
-                "description": {"type": "STRING",  "description": "Element description for screen_find/screen_click"},
-                "type":        {"type": "STRING",  "description": "Data type for random_data"},
-                "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
-                "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
-                "path":        {"type": "STRING",  "description": "Save path for screenshot"},
-            },
-            "required": ["action"]
-        }
-    },
-    {
-        "name": "game_updater",
-        "description": (
-            "THE ONLY tool for ANY Steam or Epic Games request. "
-            "Use for: installing, downloading, updating games, listing installed games, "
-            "checking download status, scheduling updates. "
-            "ALWAYS call directly for any Steam/Epic/game request. "
-            "NEVER use browser_control or web_search for Steam/Epic."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":    {"type": "STRING",  "description": "update | install | list | download_status | schedule | cancel_schedule | schedule_status (default: update)"},
-                "platform":  {"type": "STRING",  "description": "steam | epic | both (default: both)"},
-                "game_name": {"type": "STRING",  "description": "Game name (partial match supported)"},
-                "app_id":    {"type": "STRING",  "description": "Steam AppID for install (optional)"},
-                "hour":      {"type": "INTEGER", "description": "Hour for scheduled update 0-23 (default: 3)"},
-                "minute":    {"type": "INTEGER", "description": "Minute for scheduled update 0-59 (default: 0)"},
-                "shutdown_when_done": {"type": "BOOLEAN", "description": "Shut down PC when download finishes"},
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "flight_finder",
-        "description": "Searches Google Flights and speaks the best options.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "origin":      {"type": "STRING",  "description": "Departure city or airport code"},
-                "destination": {"type": "STRING",  "description": "Arrival city or airport code"},
-                "date":        {"type": "STRING",  "description": "Departure date (any format)"},
-                "return_date": {"type": "STRING",  "description": "Return date for round trips"},
-                "passengers":  {"type": "INTEGER", "description": "Number of passengers (default: 1)"},
-                "cabin":       {"type": "STRING",  "description": "economy | premium | business | first"},
-                "save":        {"type": "BOOLEAN", "description": "Save results to Notepad"},
-            },
-            "required": ["origin", "destination", "date"]
-        }
-    },
-    {
-        "name": "manage_monitor",
-        "description": (
-            "Add, remove, or list background monitoring topics. "
-            "JARVIS checks these topics once a day and alerts the user when there is a new development. "
-            "Use 'add' when the user says 'monitor X', 'track X', 'follow X'. "
-            "Use 'remove' when the user says 'stop monitoring X'. "
-            "Use 'list' when the user asks what is being monitored. "
-            "Do NOT add crypto, financial, or trading topics."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action": {
-                    "type":        "STRING",
-                    "description": "add | remove | list",
-                },
-                "topic": {
-                    "type":        "STRING",
-                    "description": "Topic to monitor or stop monitoring (e.g. 'space exploration', 'AI news')",
-                },
-            },
-            "required": ["action"],
-        },
-    },
-    {
-        "name": "shutdown_jarvis",
-        "description": (
-            "Shuts down the assistant completely. "
-            "Call this when the user expresses intent to end the conversation, "
-            "close the assistant, say goodbye, or stop Jarvis. "
-            "The user can say this in ANY language."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {},
-        }
-    },
-    {
-    "name": "file_processor",
-    "description": (
-        "Processes any file that the user has uploaded or dropped onto the interface. "
-        "Use this when the user refers to an uploaded file and wants an action on it. "
-        "Supports: images (describe/ocr/resize/compress/convert), "
-        "PDFs (summarize/extract_text/to_word), "
-        "Word docs & text files (summarize/fix/reformat/translate), "
-        "CSV/Excel (analyze/stats/filter/sort/convert), "
-        "JSON/XML (validate/format/analyze), "
-        "code files (explain/review/fix/optimize/run/document/test), "
-        "audio (transcribe/trim/convert/info), "
-        "video (trim/extract_audio/extract_frame/compress/transcribe/info), "
-        "archives (list/extract), "
-        "presentations (summarize/extract_text). "
-        "ALWAYS call this tool when a file has been uploaded and the user gives a command about it. "
-        "If the user's command is ambiguous, pick the most logical action for that file type."
-    ),
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "file_path": {
-                "type": "STRING",
-                "description": "Full path to the uploaded file. Leave empty to use the currently uploaded file."
-            },
-            "action": {
-                "type": "STRING",
-                "description": (
-                    "What to do with the file. Examples by type:\n"
-                    "image: describe | ocr | resize | compress | convert | info\n"
-                    "pdf: summarize | extract_text | to_word | info\n"
-                    "docx/txt: summarize | fix | reformat | translate_hint | word_count | to_bullet\n"
-                    "csv/excel: analyze | stats | filter | sort | convert | info\n"
-                    "json: validate | format | analyze | to_csv\n"
-                    "code: explain | review | fix | optimize | run | document | test\n"
-                    "audio: transcribe | trim | convert | info\n"
-                    "video: trim | extract_audio | extract_frame | compress | transcribe | info | convert\n"
-                    "archive: list | extract\n"
-                    "pptx: summarize | extract_text | analyze"
-                )
-            },
-            "instruction": {
-                "type": "STRING",
-                "description": "Free-form instruction if action doesn't cover it. E.g. 'translate this to Turkish', 'find all email addresses'"
-            },
-            "format": {
-                "type": "STRING",
-                "description": "Target format for conversion. E.g. 'mp3', 'pdf', 'csv', 'png'"
-            },
-            "width":     {"type": "INTEGER", "description": "Target width for image resize"},
-            "height":    {"type": "INTEGER", "description": "Target height for image resize"},
-            "scale":     {"type": "NUMBER",  "description": "Scale factor for image resize (e.g. 0.5)"},
-            "quality":   {"type": "INTEGER", "description": "Quality 1-100 for image/video compress"},
-            "start":     {"type": "STRING",  "description": "Start time for trim: seconds or HH:MM:SS"},
-            "end":       {"type": "STRING",  "description": "End time for trim: seconds or HH:MM:SS"},
-            "timestamp": {"type": "STRING",  "description": "Timestamp for video frame extraction HH:MM:SS"},
-            "column":    {"type": "STRING",  "description": "Column name for CSV filter/sort"},
-            "value":     {"type": "STRING",  "description": "Filter value for CSV filter"},
-            "condition": {"type": "STRING",  "description": "Filter condition: equals|contains|gt|lt"},
-            "ascending": {"type": "BOOLEAN", "description": "Sort order for CSV sort (default: true)"},
-            "save":      {"type": "BOOLEAN", "description": "Save result to file (default: true)"},
-            "destination": {"type": "STRING", "description": "Output folder for archive extract"},
-        },
-        "required": []
-    }
-},
-    {
-        "name": "save_memory",
-        "description": (
-            "Save an important personal fact about the user to long-term memory. "
-            "Call this silently whenever the user reveals something worth remembering: "
-            "name, age, city, job, preferences, hobbies, relationships, projects, or future plans. "
-            "Do NOT call for: weather, reminders, searches, or one-time commands. "
-            "Do NOT announce that you are saving — just call it silently. "
-            "Values must be in English regardless of the conversation language."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "category": {
-                    "type": "STRING",
-                    "description": (
-                        "identity — name, age, birthday, city, job, language, nationality | "
-                        "preferences — favorite food/color/music/film/game/sport, hobbies | "
-                        "projects — active projects, goals, things being built | "
-                        "relationships — friends, family, partner, colleagues | "
-                        "wishes — future plans, things to buy, travel dreams | "
-                        "notes — habits, schedule, anything else worth remembering"
-                    )
-                },
-                "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
-                "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
-            },
-            "required": ["category", "key", "value"]
-        }
-    },
-]
+
+def _classify_connection_error(err: BaseException, prev_backoff: int = 3) -> tuple[str, int]:
+    """Turn a raw exception from the Live-session connect/run loop into a
+    short, English, user-facing log line and the backoff (seconds) to wait
+    before reconnecting.
+
+    Pure/stateless (no self, no I/O) so it's unit-testable without a running
+    event loop or live session — see tests/test_connection_error_reporting.py.
+
+    Three cases, in priority order:
+      1. Audio device errors (raised by _resolve_input_device /
+         _resolve_output_device when no usable mic/speaker is found) get a
+         specific, actionable message. Previously these fell through to the
+         generic branch below with NO ui.write_log call at all — the app
+         just retried silently forever with zero visible explanation.
+      2. Network/timeout errors get an escalating backoff (capped at 60s)
+         and a plain-English message. Previously this message was
+         hardcoded in Turkish regardless of the user's configured language
+         — a leftover dev-local string.
+      3. Anything else gets a generic but still visible message instead of
+         silence.
+    """
+    err_str = str(err)
+    lower = err_str.lower()
+
+    if "microphone" in lower or "speaker/headphone" in lower:
+        return (
+            f"ERR: Audio device problem — {err_str} "
+            "Check Windows Sound settings and reconnect your microphone/speakers.",
+            3,
+        )
+
+    is_net_err = any(k in err_str for k in (
+        "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
+        "ConnectionRefusedError", "OSError", "Cannot connect",
+    ))
+    if is_net_err:
+        backoff = min(prev_backoff * 2, 60)
+        return (
+            f"NET: Could not connect — retrying in {backoff}s. (Check your internet connection / VPN.)",
+            backoff,
+        )
+
+    return (
+        f"ERR: JARVIS lost connection — retrying in 3s. ({type(err).__name__})",
+        3,
+    )
+
+
+def _post_session_state(had_error: bool) -> str:
+    """Which HUD state to show after a run()-loop iteration ends:
+    'RECONNECTING' if it ended because of a real error (about to retry
+    with backoff), or 'SLEEPING' for a normal/clean disconnect. Without
+    this distinction the HUD looked identical either way — a user glancing
+    at the orb (rather than the scrolling log panel) had no way to tell
+    "waiting to retry after a failure" from "nothing is wrong." Pure
+    function so it's unit-testable without driving the full run() loop."""
+    return "RECONNECTING" if had_error else "SLEEPING"
+
+from core.headless.tool_registry import TOOL_DECLARATIONS, SESSION_ONLY_TOOLS  # noqa: F401 (SESSION_ONLY_TOOLS used in _execute_tool)
 
 # --- Plugin system ---
 
@@ -568,9 +477,16 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._voice_provider       = "gemini"  # active provider for the current session
+        self._tts_player           = None      # non-Gemini TTSPlayer (core.tts), else None
+        self._voice_reload_pending = False     # set True to force a reconnect on voice settings save
+        self._out_stream           = None      # live sd.RawOutputStream (callback mode) — interrupt() aborts this directly
+        self._out_sink             = None      # _AudioSink feeding the above stream's callback — interrupt() clears this
+        self._current_speech_text  = None      # text currently being spoken by _tts_player (self-echo check)
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
+        self.ui.on_voice_settings_changed = self._on_voice_settings_changed
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
         self._briefing_sent    = False          # morning briefing fires once per process
@@ -592,6 +508,13 @@ class JarvisLive:
         manual = self._dashboard.get_manual_url()
         return url, key, f"{url}/auto-login?key={key}", manual
 
+    def _on_voice_settings_changed(self, voice_cfg: dict):
+        """Called from the Qt thread when the user saves new voice settings.
+        Flags a reconnect so the change takes effect on the live session
+        instead of only after the next app restart."""
+        self._voice_reload_pending = True
+        self.ui.write_log("SYS: Voice settings changed — reconnecting to apply...")
+
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
@@ -603,17 +526,60 @@ class JarvisLive:
             self._loop
         )
 
+    def _broadcast_orb_state(self, state: str) -> None:
+        """Best-effort push of JARVIS's current state (idle/listening/
+        thinking/speaking/interrupted) to the 3D command center orb. Never
+        blocks or raises — this is cosmetic, not core functionality, and
+        must not affect the voice loop if the dashboard is down.
+        Safe to call from any thread: run_coroutine_threadsafe doesn't block
+        even when called from the loop's own thread."""
+        dashboard = getattr(self, "_dashboard", None)
+        loop = getattr(self, "_loop", None)
+        if not dashboard or not loop:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                dashboard.broadcast_nav({"type": "jarvis_state", "state": state}),
+                loop,
+            )
+        except Exception:
+            pass
+
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
         if value:
             self.ui.set_state("SPEAKING")
+            self._broadcast_orb_state("speaking")
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
+            self._broadcast_orb_state("listening")
 
     def interrupt(self) -> None:
-        """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
+        """Stop JARVIS mid-speech immediately and switch back to listening.
+
+        Reaches every real audio output layer, not just internal flags:
+        aborts the live sounddevice output stream (Gemini-audio path — see
+        _play_audio) and stops the active TTSPlayer (local/ElevenLabs path —
+        see _speak_with_tts_player), both of which discard already-buffered
+        audio instead of waiting for it to finish playing.
+        """
         self._interrupted = True
+        self._broadcast_orb_state("interrupted")
+        self._turn_done_event = self._turn_done_event or asyncio.Event()
+        if self._turn_done_event:
+            self._turn_done_event.clear()
+
+        out_stream = getattr(self, "_out_stream", None)
+        if out_stream is not None:
+            try:
+                out_stream.abort()   # immediate — does NOT wait for buffered audio to drain
+            except Exception:
+                pass
+        out_sink = getattr(self, "_out_sink", None)
+        if out_sink is not None:
+            out_sink.clear()   # discard anything already handed to the sink but not yet played
+
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -625,9 +591,15 @@ class JarvisLive:
                     break
             if drained:
                 print(f"[JARVIS] ✋ Interrupted — {drained} audio chunks discarded")
+        player = getattr(self, "_tts_player", None)
+        if player:
+            try:
+                player.stop()
+            except Exception:
+                pass
         self.set_speaking(False)
-        if self._turn_done_event:
-            self._turn_done_event.clear()
+        if getattr(self, "_loop", None) and getattr(self, "session", None):
+            self.ui.set_state("LISTENING")
         self.ui.write_log("SYS: Interrupted — listening...")
 
     def speak(self, text: str):
@@ -646,7 +618,25 @@ class JarvisLive:
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
-    def _build_config(self) -> types.LiveConnectConfig:
+    @property
+    def _tool_executor(self) -> ToolExecutor:
+        """Lazy, cached ToolExecutor wrapping this instance's ui/speak/
+        proactive engine. A property (not a plain __init__ attribute)
+        because a number of existing tests build JarvisLive via
+        object.__new__() and set only a few attributes by hand, bypassing
+        __init__ entirely — this still works for them since it reads
+        whatever's on `self` at first access instead of requiring __init__
+        to have run. Cached after first access so repeated tool calls on
+        the same instance share one ToolContext (and therefore the same
+        ProactiveEngine, if one was already set on self._proactive)."""
+        cached = self.__dict__.get("_tool_executor_cache")
+        if cached is None:
+            ctx = ToolContext(ui=self.ui, speak=self.speak, proactive=getattr(self, "_proactive", None))
+            cached = ToolExecutor(ctx)
+            self.__dict__["_tool_executor_cache"] = cached
+        return cached
+
+    def _build_config(self, voice_cfg: dict | None = None) -> types.LiveConnectConfig:
         from datetime import datetime
 
         # Load customization from config
@@ -657,6 +647,11 @@ class JarvisLive:
         except Exception:
             self._asst_name = "JARVIS"
             _user_name = ""
+
+        voice_cfg = voice_cfg or get_voice_provider_config()
+        voice_name = voice_cfg.get("voice") or "Charon"
+        provider   = (voice_cfg.get("provider") or "gemini").lower()
+        self._voice_provider = provider
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
@@ -682,26 +677,48 @@ class JarvisLive:
             f"{_addr}\n\n"
         )
 
-        parts = [time_ctx, identity_ctx]
+        parts = [time_ctx, identity_ctx, format_objective_for_prompt()]
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
 
-        return types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            output_audio_transcription={},
+        live_kwargs = dict(
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
             session_resumption=types.SessionResumptionConfig(),
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
-                    )
-                )
+            # Server-side VAD on the mic stream, which now stays open the whole
+            # time JARVIS is speaking (see _listen_audio) — this is what makes
+            # real barge-in possible instead of a custom VAD implementation.
+            # LOW start-sensitivity + prefix padding require a bit of sustained
+            # speech before committing, to avoid JARVIS's own audio bleeding
+            # into the mic (acoustic echo) triggering a self-interrupt.
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                    prefix_padding_ms=BARGE_IN_PREFIX_PADDING_MS,
+                ),
+                activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
             ),
         )
+
+        if provider == "gemini":
+            # Gemini Live speaks its own audio directly — original behaviour, unchanged.
+            live_kwargs["response_modalities"] = ["AUDIO"]
+            live_kwargs["output_audio_transcription"] = {}
+            live_kwargs["speech_config"] = types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice_name
+                    )
+                )
+            )
+        else:
+            # ElevenLabs / Local (Kokoro): Gemini only reasons in text; the
+            # resulting text is spoken by self._tts_player (see run()/_receive_audio()).
+            live_kwargs["response_modalities"] = ["TEXT"]
+
+        return types.LiveConnectConfig(**live_kwargs)
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
@@ -709,6 +726,7 @@ class JarvisLive:
 
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
+        self._broadcast_orb_state("thinking")
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -728,35 +746,7 @@ class JarvisLive:
         result = "Done."
 
         try:
-            if name == "open_app":
-                r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
-                result = r or f"Opened {args.get('app_name')}."
-
-            elif name == "weather_report":
-                r = await loop.run_in_executor(None, lambda: weather_action(parameters=args, player=self.ui))
-                result = r or "Weather delivered."
-
-            elif name == "browser_control":
-                r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "file_controller":
-                r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "send_message":
-                r = await loop.run_in_executor(None, lambda: send_message(parameters=args, response=None, player=self.ui, session_memory=None))
-                result = r or f"Message sent to {args.get('receiver')}."
-
-            elif name == "reminder":
-                r = await loop.run_in_executor(None, lambda: reminder(parameters=args, response=None, player=self.ui))
-                result = r or "Reminder set."
-
-            elif name == "youtube_video":
-                r = await loop.run_in_executor(None, lambda: youtube_video(parameters=args, response=None, player=self.ui))
-                result = r or "Done."
-
-            elif name == "screen_process":
+            if name == "screen_process":
                 import time as _t_mod
                 _now = _t_mod.monotonic()
                 _cooldown = 4.0  # seconds — covers echo window after speaking ends
@@ -790,70 +780,25 @@ class JarvisLive:
             elif name == "close_camera":
                 self.ui.stop_camera_stream()
                 result = "Camera closed."
-
-            elif name == "computer_settings":
-                r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
-                result = r or "Done."
-
-            elif name == "desktop_control":
-                r = await loop.run_in_executor(None, lambda: desktop_control(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "code_helper":
-                r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "dev_agent":
-                r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "web_search":
-                r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
-                result = r or "Done."
-                # Mirror results to the on-screen content panel
-                _mode = args.get("mode", "search")
-                if r and not r.startswith("No results") and not r.startswith("Search failed"):
-                    _query = args.get("query") or ", ".join(args.get("items", []))
-                    _label = f"{_mode.upper()} — {_query[:38]}" if _query else _mode.upper()
-                    self.ui.show_content(_label, r)
-            elif name == "file_processor":
-                if not args.get("file_path") and self.ui.current_file:
-                    args["file_path"] = self.ui.current_file
-                r = await loop.run_in_executor(
-                    None,
-                    lambda: file_processor(parameters=args, player=self.ui, speak=self.speak)
-                )
-                result = r or "Done."
-
-            elif name == "computer_control":
-                r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "game_updater":
-                r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "flight_finder":
-                r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "system_status":
-                r = await loop.run_in_executor(None, get_system_status)
-                result = str(r)
-
-            elif name == "manage_monitor":
-                action = args.get("action", "").lower().strip()
-                topic  = args.get("topic", "").strip()
-                if action == "add" and topic:
-                    result = await asyncio.to_thread(add_monitor, topic)
-                elif action == "remove" and topic:
-                    result = await asyncio.to_thread(remove_monitor, topic)
-                elif action == "list":
-                    topics = await asyncio.to_thread(list_monitors)
-                    result = ("Monitoring: " + ", ".join(topics)) if topics else "No topics are being monitored."
+            elif name == "navigate_command_center":
+                parsed = parse_navigation_command(args.get("action"), args.get("target"))
+                if parsed.get("error"):
+                    result = parsed["error"]
+                elif self._dashboard is None:
+                    result = "The command center dashboard isn't running, so I can't navigate it right now."
                 else:
-                    result = "Specify action (add/remove/list) and a topic."
-
+                    event = self._dashboard.apply_navigation(
+                        parsed["action"], parsed.get("nucleus_id") or ""
+                    )
+                    await self._dashboard.broadcast_nav(event)
+                    if parsed["action"] == "status":
+                        result = f"You're currently looking at the {event['name']} nucleus."
+                    elif parsed["action"] == "home":
+                        result = "Returning to the central command center."
+                    elif parsed["action"] == "back":
+                        result = f"Going back to {event['name']}."
+                    else:
+                        result = f"Opening the {event['name']} nucleus."
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 async def _do_shutdown():
@@ -867,13 +812,21 @@ class JarvisLive:
                         except Exception:
                             pass
                     await asyncio.sleep(1.5)
+                    # Release the app-instance and agent-scheduler locks
+                    # before the hard exit below — os._exit() bypasses all
+                    # normal Python cleanup (no finally blocks, no atexit),
+                    # so this is the only chance to leave the lock files
+                    # clean for the next launch rather than relying solely
+                    # on their dead-PID stale-reclaim logic.
+                    graceful_release_all_locks()
                     import os as _os
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
-
             else:
-                result = f"Unknown tool: {name}"
+                result = await self._tool_executor.execute(name, args)
 
+        except UnknownToolError as e:
+            result = str(e)
         except Exception as e:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
@@ -893,14 +846,27 @@ class JarvisLive:
             msg = await self.out_queue.get()
             await self.session.send_realtime_input(media=msg)
 
+    def _should_forward_mic_audio(self) -> bool:
+        """Whether _listen_audio's callback should forward the current mic
+        frame to Gemini. Deliberately does NOT check _is_speaking — real
+        barge-in requires the mic to stay open while JARVIS talks; self-echo
+        is handled by server-side VAD tuning and _looks_like_self_echo
+        instead of blanket-muting the mic during playback."""
+        return not self.ui.muted and not self._phone_active
+
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
+        try:
+            device_index, device_name = _resolve_input_device()
+        except Exception as e:
+            print(f"[JARVIS] ❌ Mic: {e}")
+            raise
+        print(f"[JARVIS] 🎤 Selected input device: [{device_index}] {device_name}")
+
         def callback(indata, frames, time_info, status):
-            with self._speaking_lock:
-                jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted and not self._phone_active:
+            if self._should_forward_mic_audio():
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -913,6 +879,7 @@ class JarvisLive:
                 channels=CHANNELS,
                 dtype="int16",
                 blocksize=CHUNK_SIZE,
+                device=device_index,
                 callback=callback,
             ):
                 print("[JARVIS] 🎤 Mic stream open")
@@ -925,12 +892,16 @@ class JarvisLive:
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
+        _diag_awaiting_first_audio = True   # DIAGNOSTIC: temporary latency instrumentation
 
         try:
             while True:
                 async for response in self.session.receive():
 
                     if response.data:
+                        if _diag_awaiting_first_audio:
+                            print(f"[DIAG] first response audio chunk: +{time.monotonic() - self._last_user_speech:.3f}s after last input transcript")
+                            _diag_awaiting_first_audio = False
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
@@ -946,18 +917,54 @@ class JarvisLive:
                     if response.server_content:
                         sc = response.server_content
 
+                        if sc.interrupted:
+                            # Gemini's own server-side VAD detected the user talking
+                            # over JARVIS (see realtime_input_config in _build_config)
+                            # — this is the primary barge-in signal for the Gemini
+                            # audio path. Route through the same interrupt() used by
+                            # the manual ESC/button path so every layer stops together.
+                            self.interrupt()
+
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
+                            if txt and txt != (out_buf[-1] if out_buf else ""):
+                                out_buf.append(txt)
+
+                        # TEXT-modality reply (ElevenLabs/Local voice providers — see
+                        # _build_config): no audio output, so there is no
+                        # output_transcription. The model's answer arrives as plain
+                        # text parts on the response instead.
+                        elif self._voice_provider != "gemini" and response.text:
+                            txt = _clean_transcript(response.text)
                             if txt and txt != (out_buf[-1] if out_buf else ""):
                                 out_buf.append(txt)
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                if not in_buf:
+                                    print(f"[DIAG] first input transcript chunk at {time.monotonic():.3f}: {txt!r}")
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
 
+                                # Local/ElevenLabs playback has no server-side
+                                # "interrupted" signal to hook (Gemini's own text
+                                # generation for the turn is long finished by the
+                                # time local TTS is still speaking it) — use fresh
+                                # transcribed user speech arriving mid-playback as
+                                # the interrupt trigger instead.
+                                with self._speaking_lock:
+                                    speaking = self._is_speaking
+                                if (
+                                    self._voice_provider != "gemini"
+                                    and speaking
+                                    and not self._looks_like_self_echo(txt)
+                                ):
+                                    self.interrupt()
+
                         if sc.turn_complete:
+                            print(f"[DIAG] turn_complete at {time.monotonic():.3f}")
+                            _diag_awaiting_first_audio = True   # DIAGNOSTIC
                             if self._turn_done_event:
                                 self._turn_done_event.set()
 
@@ -991,6 +998,10 @@ class JarvisLive:
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                                if self._voice_provider != "gemini" and self._tts_player:
+                                    # Gemini answered in text only (see _build_config) —
+                                    # speak it with the selected non-Gemini engine.
+                                    asyncio.create_task(self._speak_with_tts_player(full_out))
                             out_buf = []
 
                             # Vision injection: model finished tool-response turn → now send the image
@@ -1038,16 +1049,72 @@ class JarvisLive:
             traceback.print_exc()
             raise
 
-    async def _play_audio(self):
-        print("[JARVIS] 🔊 Play started")
+    def _looks_like_self_echo(self, heard_text: str) -> bool:
+        """Cheap heuristic to cut down false barge-in triggers from acoustic
+        echo of JARVIS's own local/ElevenLabs playback being picked back up
+        by the mic. This is NOT real echo cancellation — it just skips an
+        interrupt trigger when the transcribed snippet is a near-duplicate of
+        what JARVIS is currently saying, which is what plain speaker→mic
+        bleed usually transcribes as."""
+        said = (self._current_speech_text or "").lower()
+        heard = heard_text.lower().strip()
+        if not said or not heard:
+            return False
+        return heard in said
+
+    async def _speak_with_tts_player(self, text: str):
+        """Speak `text` through the active non-Gemini engine (ElevenLabs/Local).
+        Drives _is_speaking via on_start/on_done, same as _play_audio does for
+        the Gemini-audio path, so both UI state and the mid-playback interrupt
+        trigger in _receive_audio see consistent speaking state."""
+        player = self._tts_player
+        if not player or self._interrupted:
+            return
+        self._current_speech_text = text
+        try:
+            await asyncio.to_thread(
+                player.speak,
+                text,
+                on_start=lambda: self.set_speaking(True),
+                on_done=lambda: self.set_speaking(False),
+            )
+        except Exception as e:
+            print(f"[TTS] Playback error: {e}")
+            self.ui.write_log(f"ERR: Voice playback failed — {e}")
+            self.set_speaking(False)
+        finally:
+            self._current_speech_text = None
+
+    def _open_output_stream(self) -> tuple[sd.RawOutputStream, "_AudioSink"]:
+        """Callback-mode output stream: real "Speakers"/"Headphones" WDM-KS
+        devices on this machine reject the blocking API outright ("Invalid
+        device" -9996) but work fine in callback mode (confirmed live) —
+        see _AudioSink and _resolve_output_device's docstring. _play_audio()
+        below only ever calls sink.write(); the callback here is what
+        actually feeds PortAudio, on its own thread."""
+        device_index, device_name = _resolve_output_device()
+        print(f"[JARVIS] 🔊 Selected output device: [{device_index}] {device_name}")
+        sink = _AudioSink()
+
+        def _callback(outdata, frames, time_info, status):
+            outdata[:] = sink.read(len(outdata))
 
         stream = sd.RawOutputStream(
             samplerate=RECEIVE_SAMPLE_RATE,
             channels=CHANNELS,
             dtype="int16",
             blocksize=CHUNK_SIZE,
+            device=device_index,
+            callback=_callback,
         )
         stream.start()
+        self._out_stream = stream
+        self._out_sink = sink
+        return stream, sink
+
+    async def _play_audio(self):
+        print("[JARVIS] 🔊 Play started")
+        stream, sink = self._open_output_stream()
 
         try:
             while True:
@@ -1057,8 +1124,13 @@ class JarvisLive:
                         timeout=0.1
                     )
                 except asyncio.TimeoutError:
+                    # Non-Gemini providers own speaking-state via _speak_with_tts_player
+                    # (on_start/on_done) instead — Gemini never sends audio data for
+                    # them to begin with, so this branch would otherwise flip
+                    # _is_speaking off while local/ElevenLabs playback is still in flight.
                     if (
-                        self._turn_done_event
+                        self._voice_provider == "gemini"
+                        and self._turn_done_event
                         and self._turn_done_event.is_set()
                         and self.audio_in_queue.empty()
                     ):
@@ -1066,29 +1138,49 @@ class JarvisLive:
                         self._turn_done_event.clear()
                     continue
 
+                if self._interrupted:
+                    self._interrupted = False
+                    self.set_speaking(False)
+                    # interrupt() already called stream.abort() to kill
+                    # in-flight audio immediately — an aborted PortAudio
+                    # stream can't just resume, so open a fresh one before
+                    # the next write, same as the old blocking-mode design
+                    # did after catching a PortAudioError from stream.write().
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+                    stream, sink = self._open_output_stream()
+                    continue
+
                 self.set_speaking(True)
 
-                # Batch all immediately-available chunks into one write to reduce
-                # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
-                # Cap at ~200 ms so interrupt() still stops audio within ~200 ms.
+                # Batch all immediately-available chunks into one sink.write()
+                # call. Unlike the old blocking design this doesn't bound how
+                # much can be in flight when interrupt() aborts — sink.clear()
+                # (called by interrupt()) handles that instead.
                 batch = bytearray(chunk)
-                while len(batch) < 9600:   # 9600 bytes ≈ 200 ms at 24 kHz / 16-bit mono
+                while len(batch) < 4800:   # 4800 bytes ≈ 100 ms at 24 kHz / 16-bit mono
                     try:
                         batch.extend(self.audio_in_queue.get_nowait())
                     except asyncio.QueueEmpty:
                         break
 
-                try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
-                except (RuntimeError, asyncio.CancelledError):
-                    break   # executor shutting down — exit cleanly
+                sink.write(bytes(batch))
+        except (RuntimeError, asyncio.CancelledError):
+            pass   # executor/loop shutting down — exit cleanly
         except Exception as e:
             print(f"[JARVIS] ❌ Play: {e}")
             raise
         finally:
             self.set_speaking(False)
-            stream.stop()
-            stream.close()
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+            self._out_stream = None
+            self._out_sink = None
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 
@@ -1236,7 +1328,7 @@ class JarvisLive:
             client = _genai.Client(api_key=_get_api_key())
             resp   = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.5-flash",
+                model="gemini-flash-latest",
                 contents=prompt,
             )
             summary = (resp.text or "").strip()
@@ -1307,6 +1399,11 @@ class JarvisLive:
         Background task: periodically checks if the user has been silent long enough,
         then hands time + memory context to Gemini so it can decide what (if anything)
         to say proactively. No hardcoded rules — Gemini makes the call.
+
+        Reads the enabled flag and quiet-hours window fresh from config on
+        every check (not cached at startup) so a live voice command to
+        disable/snooze proactive mode takes effect on the very next check,
+        not just after a restart.
         """
         while True:
             await asyncio.sleep(60)   # evaluate once per minute
@@ -1319,7 +1416,9 @@ class JarvisLive:
             if speaking:
                 continue
 
-            if not self._proactive.should_trigger(self._last_user_speech):
+            enabled     = await asyncio.to_thread(get_proactive_enabled)
+            quiet_hours = await asyncio.to_thread(get_proactive_quiet_hours)
+            if not self._proactive.should_trigger(self._last_user_speech, enabled=enabled, quiet_hours=quiet_hours):
                 continue
 
             self._proactive.mark_triggered()
@@ -1340,6 +1439,54 @@ class JarvisLive:
                 self.ui.write_log("SYS: Proactive check-in.")
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
+
+    async def _run_agent_scheduler(self) -> None:
+        """Background autonomy (Phase 7): periodically runs any agent that is
+        due per its own `schedule` field. Both safety gates live in
+        AgentOrchestrator.get_due_agents(), not here — an agent only runs
+        unattended if Lee/Jarvis has explicitly started it (IDLE, via the
+        agent_orchestrator tool's 'start' action) AND it isn't EXECUTE-level
+        (those always need explicit approve_task, schedule or not). Results
+        land in the orchestrator's task/event history either way; this loop
+        just also surfaces a log line + toast so they're not silent.
+
+        Holds a single-instance file lock (actions/agent_orchestrator.py's
+        acquire/refresh/release_scheduler_lock) for the duration this
+        process is actively scheduling — guards against two JARVIS
+        processes both deciding the same due agent should run. A process
+        that doesn't get the lock keeps retrying every poll rather than
+        being permanently locked out (the other instance may exit later),
+        and a stale lock (dead PID, or just old) is reclaimed automatically
+        — see acquire_scheduler_lock's docstring."""
+        have_lock = await asyncio.to_thread(agent_scheduler_lock.acquire_scheduler_lock)
+        if not have_lock:
+            print("[AgentScheduler] Another JARVIS instance holds the scheduler lock — will keep retrying.")
+        try:
+            while True:
+                await asyncio.sleep(300)   # poll every 5 min; each agent's own `schedule` governs actual cadence
+                if not have_lock:
+                    have_lock = await asyncio.to_thread(agent_scheduler_lock.acquire_scheduler_lock)
+                    if not have_lock:
+                        continue
+                else:
+                    await asyncio.to_thread(agent_scheduler_lock.refresh_scheduler_lock)
+                try:
+                    due = await asyncio.to_thread(agent_orchestrator.get_due_agents)
+                    for agent in due:
+                        task = await asyncio.to_thread(
+                            agent_orchestrator.assign_task, agent.id, "Scheduled background check"
+                        )
+                        summary_text = (task.result or {}).get("summary", "completed") if task.result else (task.error or "failed")
+                        self.ui.write_log(f"AGENT: {agent.name} — {summary_text}")
+                        if self._dashboard:
+                            await self._dashboard.broadcast_nav({
+                                "type": "notification", "text": f"🤖 {agent.name}: {summary_text}",
+                            })
+                except Exception as e:
+                    print(f"[AgentScheduler] ⚠️ {e}")
+        finally:
+            if have_lock:
+                await asyncio.to_thread(agent_scheduler_lock.release_scheduler_lock)
 
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
@@ -1395,6 +1542,16 @@ class JarvisLive:
                 print(f"[Dashboard] Command error: {e}")
                 await asyncio.sleep(0.5)
 
+    async def _watch_voice_reload(self) -> None:
+        """Break out of the current Live session when voice settings change,
+        so run()'s existing reconnect loop re-reads config and applies the
+        new provider/voice/speed immediately instead of on next restart."""
+        while True:
+            await asyncio.sleep(0.5)
+            if self._voice_reload_pending:
+                self._voice_reload_pending = False
+                raise _VoiceSettingsChanged()
+
     # ── main loop ───────────────────────────────────────────────────────────
 
     async def run(self):
@@ -1413,10 +1570,29 @@ class JarvisLive:
             self._dashboard = None
 
         while True:
+            _had_error = False   # distinguishes a real error's retry from a clean disconnect's — see below
             try:
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
-                config = self._build_config()
+
+                voice_cfg = get_voice_provider_config()
+                self._tts_player = None
+                if voice_cfg.get("provider", "gemini") != "gemini":
+                    try:
+                        self._tts_player = await self._loop.run_in_executor(
+                            None, build_tts_player, voice_cfg
+                        )
+                    except Exception as e:
+                        print(
+                            f"[JARVIS] ⚠ Voice provider '{voice_cfg.get('provider')}' "
+                            f"failed to initialize — falling back to Gemini voice: {e}"
+                        )
+                        self.ui.write_log(
+                            f"SYS: {voice_cfg.get('provider')} voice unavailable — using Gemini voice."
+                        )
+                        voice_cfg = dict(voice_cfg, provider="gemini")
+
+                config = self._build_config(voice_cfg)
 
                 # Fresh client on every reconnect — avoids stale HTTP session state
                 client = genai.Client(
@@ -1440,6 +1616,7 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._voice_reload_pending = False
 
                     print("[JARVIS] Connected.")
                     self.ui.set_state("LISTENING")
@@ -1455,6 +1632,8 @@ class JarvisLive:
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
+                    tg.create_task(self._run_agent_scheduler())
+                    tg.create_task(self._watch_voice_reload())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
@@ -1473,6 +1652,19 @@ class JarvisLive:
                 # externally, which `except Exception` would miss, letting the
                 # exception escape the while-loop and causing asyncio.run() to
                 # start shutdown — resulting in "executor after shutdown" errors).
+                # Voice settings changed (_watch_voice_reload) — reconnect quietly,
+                # this isn't a real error. TaskGroup wraps it in a Base/ExceptionGroup,
+                # so check via .subgroup() instead of isinstance(e, _VoiceSettingsChanged).
+                voice_change = (
+                    e.subgroup(_VoiceSettingsChanged)
+                    if isinstance(e, BaseExceptionGroup)
+                    else (e if isinstance(e, _VoiceSettingsChanged) else None)
+                )
+                if voice_change is not None:
+                    print("[JARVIS] Voice settings changed — reconnecting...")
+                    self._conn_backoff = 0
+                    continue
+
                 err_str = str(e)
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
@@ -1481,6 +1673,7 @@ class JarvisLive:
                 if "API key not valid" in err_str or "1007" in err_str:
                     self.ui.write_log("ERR: API key invalid — please re-enter your key.")
                     self.ui.set_state("SLEEPING")
+                    self._broadcast_orb_state("idle")
                     self.ui.prompt_reconfig()
                     while not self.ui._win._ready:
                         await asyncio.sleep(1)
@@ -1488,20 +1681,14 @@ class JarvisLive:
                     _conn_backoff = 3
                     continue
 
-                # Network / timeout errors — log clearly and back off
-                is_net_err = any(k in err_str for k in (
-                    "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
-                    "ConnectionRefusedError", "OSError", "Cannot connect",
-                ))
-                if is_net_err:
-                    _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
-                    self._conn_backoff = _conn_backoff
-                    self.ui.write_log(
-                        f"NET: Bağlantı kurulamadı — {_conn_backoff}s sonra tekrar deneniyor. "
-                        "(VPN gerekiyor olabilir)"
-                    )
-                else:
-                    self._conn_backoff = 3
+                # Every other failure — including audio-device errors that used
+                # to retry silently with no visible explanation at all — always
+                # gets a plain-English, user-visible log line. See
+                # _classify_connection_error's docstring for the three cases.
+                log_msg, _conn_backoff = _classify_connection_error(e, getattr(self, "_conn_backoff", 3))
+                self._conn_backoff = _conn_backoff
+                self.ui.write_log(log_msg)
+                _had_error = True
             finally:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
@@ -1509,7 +1696,8 @@ class JarvisLive:
                     asyncio.create_task(self._save_session_summary())
 
             self.set_speaking(False)
-            self.ui.set_state("SLEEPING")
+            self.ui.set_state(_post_session_state(_had_error))
+            self._broadcast_orb_state("idle")
 
             if self._dashboard:
                 await self._dashboard.broadcast({"type": "status", "state": "sleeping"})
@@ -1519,6 +1707,9 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
+    print_startup_banner()
+    check_single_instance()
+
     ui = JarvisUI("face.png")
 
     def runner():
@@ -1528,6 +1719,12 @@ def main():
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:
             print("\n🔴 Shutting down...")
+        finally:
+            # Covers Ctrl+C / an unhandled exception breaking out of
+            # run()'s reconnect loop. The window-close (X button) path is
+            # covered separately by QApplication.aboutToQuit in ui.py,
+            # since that never reaches this thread at all.
+            graceful_release_all_locks()
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()

@@ -1,0 +1,14 @@
+{
+  "name": "JARVIS Command Center",
+  "short_name": "JARVIS",
+  "description": "JARVIS 3D spatial command center — voice, Nuclei, agents, and business status.",
+  "start_url": "/3d",
+  "scope": "/3d",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#02060b",
+  "theme_color": "#02060b",
+  "icons": [
+    { "src": "/3d/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

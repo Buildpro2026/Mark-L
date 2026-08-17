@@ -169,7 +169,7 @@ def _parse_flights_with_gemini(
 
     try:
         response = _client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-flash-latest",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=(
