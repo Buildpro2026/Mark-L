@@ -14,6 +14,7 @@ from core.headless import config
 from core.headless import orchestrator_api
 from core.headless import tools_api
 from core.headless import status_api
+from core.headless import ui
 from core.headless.background import BackgroundWorker
 
 START_TS = time.time()
@@ -64,5 +65,14 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     app.include_router(tools_api.router, prefix="/api")
     app.include_router(orchestrator_api.router, prefix="/api/orchestrator")
     app.include_router(status_api.router, prefix="/api")
+    app.include_router(ui.router)
+    app.include_router(ui.api)
+
+    # Bare public URL now serves the browser UI instead of 404ing — this
+    # is what a user opens in Chrome/Safari; /health and /api/* are
+    # unaffected since FastAPI matches those explicit routes first.
+    @app.get("/")
+    def index():
+        return ui.serve_index()
 
     return app

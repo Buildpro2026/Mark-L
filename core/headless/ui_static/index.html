@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12151d;
+    --panel-border: #232838;
+    --text: #e6e9f0;
+    --muted: #8892a6;
+    --accent: #4da3ff;
+    --ok: #34d399;
+    --bad: #f87171;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 1.15rem; letter-spacing: 0.04em; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .brand .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .brand .dot.bad { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+  #conn-text { color: var(--muted); font-size: 0.8rem; font-weight: 400; }
+  button {
+    background: var(--accent);
+    color: #051022;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--panel-border); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  input, textarea, select {
+    background: #0e1119;
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    width: 100%;
+  }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+
+  #login-screen {
+    max-width: 380px;
+    margin: 15vh auto;
+    padding: 28px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+  }
+  #login-screen h1 { margin-top: 0; font-size: 1.3rem; }
+  #login-screen p { color: var(--muted); font-size: 0.85rem; }
+  #login-error { color: var(--bad); font-size: 0.85rem; min-height: 1.2em; margin-top: 8px; }
+
+  main { max-width: 980px; margin: 0 auto; padding: 20px; display: none; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .panel h2 { margin: 0 0 12px; font-size: 1rem; color: var(--text); }
+  .panel h2 small { color: var(--muted); font-weight: 400; font-size: 0.75rem; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .row > * { flex: 1; }
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; }
+  pre.result {
+    background: #0e1119;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 10px;
+    max-height: 260px;
+    overflow: auto;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  pre.result.error { border-color: var(--bad); color: var(--bad); }
+  ul.list { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
+  ul.list li {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--panel-border);
+    font-size: 0.85rem;
+  }
+  ul.list li:last-child { border-bottom: none; }
+  .tag { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; background: #1c2231; color: var(--muted); margin-left: 6px; }
+  .tag.ok { background: rgba(52,211,153,0.15); color: var(--ok); }
+  .tag.bad { background: rgba(248,113,113,0.15); color: var(--bad); }
+  .note { color: var(--muted); font-size: 0.78rem; }
+  #global-error {
+    display: none;
+    background: rgba(248,113,113,0.12);
+    border: 1px solid var(--bad);
+    color: var(--bad);
+    padding: 10px 16px;
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+
+<div id="global-error"></div>
+
+<header>
+  <div class="brand">
+    <span class="dot" id="conn-dot"></span>
+    <span>JARVIS</span>
+    <span id="conn-text">checking connection…</span>
+  </div>
+  <button class="secondary" id="logout-btn" style="display:none">Log out</button>
+</header>
+
+<div id="login-screen">
+  <h1>JARVIS Access</h1>
+  <p>Enter your JARVIS API token to sign in. It is checked once on the server and never stored in this page.</p>
+  <div class="field">
+    <label for="token-input">API token</label>
+    <input id="token-input" type="password" autocomplete="off" placeholder="Paste your JARVIS_API_TOKEN">
+  </div>
+  <button id="login-btn" style="width:100%">Sign in</button>
+  <div id="login-error"></div>
+</div>
+
+<main id="main">
+  <div class="grid">
+
+    <div class="panel">
+      <h2>System status <small>GET /ui/api/status</small></h2>
+      <div id="status-body" class="note">Loading…</div>
+    </div>
+
+    <div class="panel">
+      <h2>Run a tool <small>POST /ui/api/tools/execute</small></h2>
+      <div class="field">
+        <label for="tool-select">Tool</label>
+        <select id="tool-select"></select>
+      </div>
+      <div class="field">
+        <label for="tool-args">Arguments (JSON)</label>
+        <textarea id="tool-args" rows="3">{}</textarea>
+      </div>
+      <button id="run-tool-btn">Run tool</button>
+      <div class="field" style="margin-top:10px">
+        <pre class="result" id="tool-result">No result yet.</pre>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Agents <small>GET /ui/api/agents</small></h2>
+      <ul class="list" id="agents-list"><li class="note">Loading…</li></ul>
+    </div>
+
+    <div class="panel">
+      <h2>Assign a task</h2>
+      <div class="field">
+        <label for="task-agent">Agent</label>
+        <select id="task-agent"></select>
+      </div>
+      <div class="field">
+        <label for="task-desc">Description</label>
+        <textarea id="task-desc" rows="2">Manual task from the web UI</textarea>
+      </div>
+      <button id="assign-task-btn">Assign task</button>
+      <div class="field" style="margin-top:10px">
+        <pre class="result" id="task-result">No task submitted yet.</pre>
+      </div>
+    </div>
+
+    <div class="panel" style="grid-column: 1 / -1;">
+      <h2>Recent activity <small>GET /ui/api/activity</small></h2>
+      <ul class="list" id="activity-list"><li class="note">Loading…</li></ul>
+    </div>
+
+    <div class="panel" style="grid-column: 1 / -1;">
+      <h2>Voice</h2>
+      <p class="note">Voice interaction is not part of this cloud deployment. The desktop JARVIS app
+        (main.py) uses PyQt6 and a live microphone session for voice; this headless service intentionally
+        runs without those to stay a lightweight, always-on Linux cloud process. This web interface is
+        text/task based only.</p>
+    </div>
+
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function showError(msg) {
+  const el = $('global-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(showError._t);
+  showError._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    ...opts,
+  });
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* no body */ }
+  if (!res.ok) {
+    const detail = (body && body.detail) ? body.detail : res.statusText;
+    const err = new Error(`HTTP ${res.status}: ${detail}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+let connOk = false;
+async function pollHealth() {
+  try {
+    const h = await api('/health');
+    connOk = true;
+    $('conn-dot').className = 'dot ok';
+    $('conn-text').textContent = `connected · uptime ${Math.round(h.uptime_seconds)}s`;
+  } catch (e) {
+    connOk = false;
+    $('conn-dot').className = 'dot bad';
+    $('conn-text').textContent = 'disconnected';
+  }
+}
+
+async function checkSession() {
+  const s = await api('/ui/session');
+  if (s.authenticated) {
+    showMain();
+  } else {
+    showLogin();
+  }
+}
+
+function showLogin() {
+  $('login-screen').style.display = 'block';
+  $('main').style.display = 'none';
+  $('logout-btn').style.display = 'none';
+}
+
+function showMain() {
+  $('login-screen').style.display = 'none';
+  $('main').style.display = 'block';
+  $('logout-btn').style.display = 'inline-block';
+  loadAll();
+}
+
+$('login-btn').addEventListener('click', async () => {
+  const token = $('token-input').value.trim();
+  $('login-error').textContent = '';
+  if (!token) { $('login-error').textContent = 'Enter a token.'; return; }
+  try {
+    await api('/ui/login', { method: 'POST', body: JSON.stringify({ token }) });
+    $('token-input').value = '';
+    showMain();
+  } catch (e) {
+    $('login-error').textContent = e.status === 401 ? 'Incorrect token.' : e.message;
+  }
+});
+$('token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('login-btn').click(); });
+
+$('logout-btn').addEventListener('click', async () => {
+  try { await api('/ui/logout', { method: 'POST' }); } catch (e) {}
+  showLogin();
+});
+
+async function loadStatus() {
+  const el = $('status-body');
+  try {
+    const s = await api('/ui/api/status');
+    const integ = s.integrations || {};
+    const rows = Object.entries(integ).map(([name, v]) => {
+      const ok = v && (v.configured || v.authorized || v.state === 'CONFIGURED');
+      return `<div>${name} <span class="tag ${ok ? 'ok' : 'bad'}">${ok ? 'ok' : 'not configured'}</span></div>`;
+    }).join('');
+    const agentCount = (s.orchestrator && s.orchestrator.agents || []).length;
+    el.innerHTML = `<div>Agents registered: <b>${agentCount}</b></div>
+      <div>Pending approvals: <b>${s.orchestrator ? s.orchestrator.pending_approval_count : '?'}</b></div>
+      <div style="margin-top:8px">${rows}</div>`;
+  } catch (e) {
+    el.innerHTML = `<span style="color:var(--bad)">Failed to load status: ${e.message}</span>`;
+    showError(e.message);
+  }
+}
+
+let agentsCache = [];
+async function loadAgents() {
+  const list = $('agents-list');
+  const select = $('task-agent');
+  try {
+    const r = await api('/ui/api/agents');
+    agentsCache = r.agents || [];
+    list.innerHTML = agentsCache.map(a =>
+      `<li><b>${a.name}</b> <span class="tag">${a.permission_level}</span> <span class="tag">${a.status}</span>
+       <div class="note">${a.description}</div></li>`
+    ).join('') || '<li class="note">No agents registered.</li>';
+    select.innerHTML = agentsCache.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+  } catch (e) {
+    list.innerHTML = `<li style="color:var(--bad)">Failed to load agents: ${e.message}</li>`;
+    showError(e.message);
+  }
+}
+
+async function loadTools() {
+  const select = $('tool-select');
+  try {
+    const r = await api('/ui/api/tools');
+    select.innerHTML = (r.tools || []).map(t => `<option value="${t}">${t}</option>`).join('');
+  } catch (e) {
+    showError('Failed to load tools: ' + e.message);
+  }
+}
+
+async function loadActivity() {
+  const list = $('activity-list');
+  try {
+    const r = await api('/ui/api/activity?limit=25');
+    const items = r.activity || [];
+    list.innerHTML = items.map(a =>
+      `<li><span class="tag">${a.source}</span> ${a.message || a.kind}</li>`
+    ).join('') || '<li class="note">No recent activity.</li>';
+  } catch (e) {
+    list.innerHTML = `<li style="color:var(--bad)">Failed to load activity: ${e.message}</li>`;
+  }
+}
+
+function loadAll() {
+  loadStatus();
+  loadAgents();
+  loadTools();
+  loadActivity();
+}
+
+$('run-tool-btn').addEventListener('click', async () => {
+  const name = $('tool-select').value;
+  const resultEl = $('tool-result');
+  let args = {};
+  try {
+    args = JSON.parse($('tool-args').value || '{}');
+  } catch (e) {
+    resultEl.textContent = 'Invalid JSON in arguments field.';
+    resultEl.classList.add('error');
+    return;
+  }
+  resultEl.textContent = 'Running…';
+  resultEl.classList.remove('error');
+  try {
+    const r = await api('/ui/api/tools/execute', { method: 'POST', body: JSON.stringify({ name, args }) });
+    resultEl.textContent = JSON.stringify(r, null, 2);
+  } catch (e) {
+    resultEl.textContent = e.message;
+    resultEl.classList.add('error');
+  }
+});
+
+$('assign-task-btn').addEventListener('click', async () => {
+  const agent_id = $('task-agent').value;
+  const description = $('task-desc').value.trim() || 'Manual task from the web UI';
+  const resultEl = $('task-result');
+  if (!agent_id) { resultEl.textContent = 'No agent selected.'; return; }
+  resultEl.textContent = 'Submitting…';
+  resultEl.classList.remove('error');
+  try {
+    const task = await api('/ui/api/tasks', { method: 'POST', body: JSON.stringify({ agent_id, description }) });
+    resultEl.textContent = JSON.stringify(task, null, 2);
+    loadActivity();
+  } catch (e) {
+    resultEl.textContent = e.message;
+    resultEl.classList.add('error');
+  }
+});
+
+pollHealth();
+setInterval(pollHealth, 15000);
+checkSession();
+</script>
+</body>
+</html>

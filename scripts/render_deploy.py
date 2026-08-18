@@ -148,6 +148,11 @@ def _post(api_key: str, path: str, body: dict):
         # print, this is our own request failing, not a secret echo.
         print(f"  Render API error {r.status_code}: {r.text[:500]}")
         r.raise_for_status()
+    if not r.content:
+        # Some endpoints (e.g. POST /services/{id}/deploys) reply 202
+        # Accepted with an empty body — there's no JSON to parse, that's
+        # success, not a failure.
+        return {}
     return r.json()
 
 
@@ -212,7 +217,12 @@ def create_service(api_key: str, owner_id: str, branch: str, env_pairs: list[dic
 def trigger_deploy(api_key: str, service_id: str) -> str:
     resp = _post(api_key, f"/services/{service_id}/deploys", {})
     deploy = resp.get("deploy", resp)
-    return deploy["id"]
+    deploy_id = deploy.get("id") if deploy else None
+    if not deploy_id:
+        # 202 Accepted with no body is the normal case — fall back to
+        # querying the deploy that was just created.
+        deploy_id = latest_deploy_id(api_key, service_id)
+    return deploy_id
 
 
 def latest_deploy_id(api_key: str, service_id: str) -> str | None:
