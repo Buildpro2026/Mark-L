@@ -6,22 +6,24 @@
 #
 # Python version is pinned via .python-version at the repo root (Render
 # reads it automatically) rather than duplicated here.
+#
+# J4 decision: Free plan, no disk, for a short-term proof-of-life test —
+# not a persistence story for anything durable. Free web services have no
+# persistent disk option at any price point below Starter, and the intent
+# here is explicitly $0. JARVIS_DATA_DIR is left unset on purpose so
+# DATA_DIR falls back to config.py's local-dev default (plain ephemeral
+# storage inside the container) — data survives across requests within a
+# single running instance, but is wiped on every restart/redeploy/sleep
+# cycle. When this moves to a permanent host, re-add a `disk:` block
+# (Starter plan or above) and set JARVIS_DATA_DIR to its mount path.
 services:
   - type: web
     name: jarvis-headless-core
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python -m core.headless_main
     healthCheckPath: /health
-    disk:
-      # Persistent volume for data/jarvis2.db, the agent-scheduler lock,
-      # and everything else core/headless/config.py's DATA_DIR covers —
-      # survives restarts/redeploys, unlike the container's own
-      # filesystem. JARVIS_DATA_DIR below points at this exact mount path.
-      name: jarvis-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: JARVIS_API_TOKEN
         sync: false   # set as a real secret in the Render dashboard, never committed
@@ -29,7 +31,5 @@ services:
         sync: false   # set as a real secret in the Render dashboard, never committed
       - key: JARVIS_HEADLESS_HOST
         value: "0.0.0.0"
-      - key: JARVIS_DATA_DIR
-        value: "/var/data"
       # No JARVIS_HEADLESS_PORT here — core/headless/config.py falls back
       # to Render's own $PORT automatically when that's unset.

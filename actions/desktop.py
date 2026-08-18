@@ -12,7 +12,10 @@ from datetime import datetime
 try:
     import pyautogui
     _PYAUTOGUI = True
-except ImportError:
+except Exception:
+    # Not just ImportError: pyautogui is installed but its mouseinfo
+    # dependency probes os.environ['DISPLAY'] at import time and raises
+    # KeyError on a headless Linux host with no X server (e.g. Render).
     _PYAUTOGUI = False
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
