@@ -183,16 +183,47 @@ def _slugify(name: str, product_id: str) -> str:
     return base or suffix or f"deal-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
 
 
+def _find_duplicate_product_id(conn: sqlite3.Connection, candidate: dict[str, Any]) -> str | None:
+    """Uses the existing (previously unused) is_duplicate() to reuse an
+    existing row's product_id instead of inserting a redundant one — only
+    when the caller didn't give an explicit product_id to key off of
+    (an explicit id is already an unambiguous identity; this only covers
+    the case is_duplicate() itself is built for: matching by name when
+    neither side has one)."""
+    if str(candidate.get("product_id") or "").strip():
+        return None
+    # is_duplicate()'s name-matching branch only fires when NEITHER side has
+    # a product_id — a stored row always has one, so it must be omitted
+    # here to compare on name the way is_duplicate() actually intends,
+    # not the (always-populated, always-mismatching) product_id branch.
+    rows = conn.execute("SELECT product_id, name FROM products").fetchall()
+    for row in rows:
+        if is_duplicate(candidate, {"name": row["name"]}):
+            return row["product_id"]
+    return None
+
+
 def save_product(product: dict[str, Any]) -> dict[str, Any]:
     """Never fabricates a price, discount, or affiliate URL — every value
     persisted here is exactly what the caller passed in; the only derived
     fields are `score` (from score_product), `slug` (from name/product_id,
     only if not already given), and `discount_pct` (computed from
-    original/current price only when both are real numbers — never guessed)."""
+    original/current price only when both are real numbers — never guessed).
+
+    Also de-duplicates by name via is_duplicate() when no explicit
+    product_id was given, reusing the existing row instead of creating a
+    near-identical second one (previously is_duplicate() existed and was
+    unit-tested but nothing actually called it — this closes that gap)."""
     validate_retailer(product.get("retailer"))
 
     conn = _connect()
-    product_id = str(product.get("product_id") or "").strip() or f"manual-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    product_id = str(product.get("product_id") or "").strip()
+    if not product_id:
+        # uuid suffix, not just a seconds-precision timestamp — same fix as
+        # create_post's post_id already applies, for the same reason: two
+        # different unnamed products saved within the same second would
+        # otherwise collide on this PRIMARY KEY and silently overwrite.
+        product_id = _find_duplicate_product_id(conn, product) or f"manual-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     product_record = dict(product)
     product_record["product_id"] = product_id
     product_record["score"] = score_product(product)
