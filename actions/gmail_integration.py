@@ -116,6 +116,28 @@ def create_draft(to: str, subject: str, body: str) -> dict[str, Any]:
         return {"ok": False, "state": "ERROR", "detail": str(exc)}
 
 
+def send_draft(draft_id: str, approved: bool = False) -> dict[str, Any]:
+    """Sends an EXISTING draft (created earlier by create_draft() — see
+    actions/buildpro_email_monitor.py) via Gmail's drafts().send(), rather
+    than composing a new message. Same approval gate as send_email(): a
+    real, irreversible send only happens with approved=True, set only by
+    a caller acting on real authorization (the buildpro_email_responder
+    EXECUTE agent — see agent_orchestrator.py — only reaches this after
+    Lee's explicit approve_task() call, never on its own initiative)."""
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": "Sending requires explicit approval."}
+    if not draft_id:
+        return {"ok": False, "state": "ERROR", "detail": "No draft_id given."}
+    try:
+        service = _service()
+        sent = service.users().drafts().send(userId="me", body={"id": draft_id}).execute()
+        return {"ok": True, "message_id": sent.get("id")}
+    except RuntimeError as exc:
+        return {"ok": False, "state": "NOT_AUTHORIZED", "detail": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "state": "ERROR", "detail": str(exc)}
+
+
 def send_email(to: str, subject: str, body: str, approved: bool = False) -> dict[str, Any]:
     """Refuses to send unless approved=True is passed explicitly — no
     caller in this codebase sets that automatically today. Whoever wires

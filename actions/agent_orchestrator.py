@@ -330,6 +330,35 @@ def _buildpro_email_monitor_handler(task: "AgentTask") -> dict:
     return {"summary": result["summary"], "configured": True, "relevant": result["relevant"]}
 
 
+def _buildpro_email_responder_handler(task: "AgentTask") -> dict:
+    """J4: the real EXECUTE-capable half of the BuildPro Email Monitor
+    workflow. buildpro_email_monitor_handler (SUGGEST, above) only ever
+    reads/classifies/logs and — separately, only when explicitly asked
+    for via scan_inbox(draft_replies=True) — creates a Gmail draft, which
+    is inherently safe (never sent). Sending that draft is the
+    consequential half, so it lives on its own EXECUTE-level agent:
+    task.description is the draft_id to send. assign_task() on an
+    EXECUTE agent always leaves the task PENDING_APPROVAL (see
+    AgentOrchestrator.assign_task/run_task) — this handler only ever runs
+    after Lee's explicit approve_task() call, exactly like every other
+    EXECUTE-level path in this codebase. Never invents a draft_id or
+    composes new content; it only sends what a human can already see
+    sitting in the Gmail Drafts folder."""
+    from actions import gmail_integration
+    from actions import audit_log
+    draft_id = (task.description or "").strip()
+    r = gmail_integration.send_draft(draft_id, approved=True)
+    audit_log.record(
+        "gmail_send_draft", actor="agent:buildpro_email_responder", task=task.id,
+        approval_status="approved", execution_status="succeeded" if r["ok"] else "failed",
+        result={"draft_id": draft_id}, error=None if r["ok"] else r.get("detail"),
+        external_system="gmail", reference_id=r.get("message_id"),
+    )
+    if not r["ok"]:
+        return {"summary": f"Couldn't send draft {draft_id} ({r.get('state')}): {r.get('detail')}", "sent": False}
+    return {"summary": f"Sent draft {draft_id}.", "sent": True, "message_id": r.get("message_id")}
+
+
 # ── Agent handlers built on real, already-existing infrastructure ────────
 # Each one uses a genuinely working backend where one exists (web_search,
 # daily_deal_finders, twilio_integration, strategic_objective, business_
@@ -548,6 +577,17 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="buildpro", business="buildpro",
         permission_level=PermissionLevel.SUGGEST, schedule="60m",
         handler=_buildpro_email_monitor_handler,
+    ),
+    "buildpro_email_responder": AgentDefinition(
+        id="buildpro_email_responder", name="BuildPro Email Responder",
+        description=(
+            "Sends a specific Gmail draft (task description = draft_id) that "
+            "buildpro_email_monitor or a human already prepared. EXECUTE-level: "
+            "always requires Lee's explicit approve_task() before it sends anything."
+        ),
+        nucleus_id="buildpro", business="buildpro",
+        permission_level=PermissionLevel.EXECUTE, schedule=None,
+        handler=_buildpro_email_responder_handler,
     ),
     "business_research_agent": AgentDefinition(
         id="business_research_agent", name="Business Research Agent",
