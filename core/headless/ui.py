@@ -8,10 +8,30 @@ a bearer-token JSON API meant for programmatic callers.
 Security model: the browser NEVER sees JARVIS_API_TOKEN. The user pastes
 it once into the login form, POST /ui/login checks it server-side against
 config.API_TOKEN (the same constant-time check as auth.require_auth) and,
-on success, issues a random opaque session id as an httpOnly/Secure
-cookie. Every other /ui/api/* route requires that cookie, not the token
-itself — so the token never touches page source, browser storage, or JS
-memory beyond the single login POST body.
+on success, issues a session cookie — not the token itself, and not an
+id into any server-side store (see "Session persistence" below) — so the
+token never touches page source, browser storage, or JS memory beyond
+the single login POST body.
+
+Session persistence: the cookie is a signed, stateless token
+(base64(expiry) + "." + base64(HMAC-SHA256(expiry))), verified by
+recomputing the HMAC with a key derived from config.API_TOKEN — never
+stored anywhere server-side. This is deliberate: Render's Free plan has
+no persistent disk (render.yaml's own J4 decision), so anything kept in
+a dict or a file is wiped on every restart/redeploy/sleep-wake cycle —
+which is exactly what broke the previous in-memory `_sessions` dict,
+forcing re-login after every spin-down. A signature check needs no
+storage to validate, only the (already-persistent, Render-env-var-backed)
+API token, so it survives restarts the same way the token itself does.
+Logout can't fully revoke a stateless token without server-side state,
+so it does the best available thing: clears the browser's cookie AND
+adds the token to a small in-memory revocation set for the remaining
+life of THIS process (closes the "already-logged-out tab keeps working"
+gap for as long as the process stays up; a restart clears the
+revocation set exactly like it clears everything else here, but by then
+the cookie is already gone from the browser that logged out, so this
+only matters for a captured/replayed cookie value — an inherent limit
+of stateless tokens on disk-less infrastructure, not a new one).
 
 Every /ui/api/* handler below is a thin pass-through to the same
 functions tools_api.py / orchestrator_api.py / status_api.py already
@@ -20,7 +40,9 @@ reimplemented, so the UI and the programmatic API can never drift apart.
 """
 from __future__ import annotations
 
-import secrets
+import base64
+import hashlib
+import hmac
 import time
 from pathlib import Path
 
@@ -42,28 +64,60 @@ INDEX_FILE = STATIC_DIR / "index.html"
 COOKIE_NAME = "jarvis_ui_session"
 SESSION_TTL_SECONDS = 12 * 3600
 
-# In-memory session store — fine for a single-instance deployment (see
-# render.yaml: Free plan, one instance). A restart clears everyone's
-# session, same as it clears everything else on this ephemeral host.
-_sessions: dict[str, float] = {}
+# Best-effort, process-lifetime-only revocation set for logout (see
+# "Session persistence" above) — {token: expiry}. Not a session store:
+# validity is decided by the HMAC signature, this only ever *removes*
+# trust from an otherwise-valid token early. Fine for it to reset on
+# restart; that's not a regression, the cookie that would need it is
+# gone from the browser by then too.
+_revoked: dict[str, float] = {}
+
+
+def _prune_revoked() -> None:
+    now = time.time()
+    for tok in [t for t, exp in _revoked.items() if exp < now]:
+        _revoked.pop(tok, None)
+
+
+def _sign_key() -> bytes:
+    # Derived, not the raw token itself — key separation, same pattern as
+    # dashboard/server.py's _derive_key (SHA-256 of secret + purpose tag).
+    return hashlib.sha256((config.API_TOKEN or "").encode("utf-8") + b"jarvis-ui-session-v1").digest()
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s.encode("ascii"))
 
 
 def _new_session() -> str:
-    sid = secrets.token_urlsafe(32)
-    _sessions[sid] = time.time() + SESSION_TTL_SECONDS
-    return sid
+    """Returns a signed, self-verifying session token — nothing is stored
+    server-side for this call, on purpose (see module docstring)."""
+    exp_bytes = str(int(time.time()) + SESSION_TTL_SECONDS).encode("ascii")
+    sig = hmac.new(_sign_key(), exp_bytes, hashlib.sha256).digest()
+    return f"{_b64(exp_bytes)}.{_b64(sig)}"
 
 
-def _session_valid(sid: str | None) -> bool:
-    if not sid:
+def _session_valid(token: str | None) -> bool:
+    if not token or not config.API_TOKEN or "." not in token:
         return False
-    expiry = _sessions.get(sid)
-    if expiry is None:
+    exp_part, sig_part = token.split(".", 1)
+    try:
+        exp_bytes = _b64d(exp_part)
+        sig = _b64d(sig_part)
+        expiry = int(exp_bytes.decode("ascii"))
+    except Exception:
+        return False
+    expected_sig = hmac.new(_sign_key(), exp_bytes, hashlib.sha256).digest()
+    if not hmac.compare_digest(sig, expected_sig):
         return False
     if expiry < time.time():
-        _sessions.pop(sid, None)
         return False
-    return True
+    _prune_revoked()
+    return token not in _revoked
 
 
 def require_ui_session(jarvis_ui_session: str | None = Cookie(default=None)) -> None:
@@ -100,7 +154,10 @@ def login(body: LoginRequest, response: Response):
 @router.post("/logout")
 def logout(response: Response, jarvis_ui_session: str | None = Cookie(default=None)):
     if jarvis_ui_session:
-        _sessions.pop(jarvis_ui_session, None)
+        # Best-effort revocation for the rest of this process's uptime —
+        # see module docstring's "Session persistence" section for why a
+        # stateless token can't be revoked more durably than that.
+        _revoked[jarvis_ui_session] = time.time() + SESSION_TTL_SECONDS
     response.delete_cookie(COOKIE_NAME)
     return {"ok": True}
 
