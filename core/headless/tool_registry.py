@@ -871,6 +871,28 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "cloud_status",
+        "description": (
+            "Checks the always-on CLOUD JARVIS instance (the Render deployment) — this "
+            "is a SEPARATE running process from this desktop app, with its own background "
+            "worker, so it knows about agent runs and monitoring that happened while this "
+            "desktop app wasn't open. Use 'status' for a full snapshot (agents, "
+            "integrations, pending approvals), 'brief' for the executive/morning brief, "
+            "'activity' for a recent events feed, or 'run_agent' to assign a task to a "
+            "named agent on the cloud instance specifically (only when the user clearly "
+            "wants the CLOUD copy to run it, not this local session)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":      {"type": "STRING", "description": "status | brief | activity | run_agent (default 'status')"},
+                "agent_id":    {"type": "STRING", "description": "Target cloud agent id, for 'run_agent'"},
+                "description": {"type": "STRING", "description": "Task description, for 'run_agent'"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "navigate_command_center",
         "description": (
             "Controls the 3D spatial command center (the /3d browser view). "

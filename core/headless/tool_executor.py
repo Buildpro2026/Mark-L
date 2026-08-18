@@ -57,6 +57,7 @@ from actions import opportunity_engine as opp_engine
 from actions import decision_engine
 from actions import audit_log
 from actions import proactive as proactive_module
+from actions import cloud_bridge
 from memory.memory_manager import update_memory
 from memory import config_manager
 
@@ -892,6 +893,38 @@ class ToolExecutor:
                     result = f"Unknown ceo_decision action: {daction}"
             except ValueError as e:
                 result = str(e)
+
+        elif name == "cloud_status":
+            caction = (args.get("action") or "status").strip().lower()
+            if caction == "status":
+                r = await loop.run_in_executor(None, cloud_bridge.get_status)
+                if "_bridge_error" in r:
+                    result = f"Couldn't reach cloud JARVIS: {r['_bridge_error']}"
+                else:
+                    agents = (r.get("orchestrator") or {}).get("agents") or []
+                    pending = (r.get("orchestrator") or {}).get("pending_approval_count", 0)
+                    result = f"Cloud JARVIS is up — {len(agents)} agents registered, {pending} pending approval(s)."
+            elif caction == "brief":
+                r = await loop.run_in_executor(None, cloud_bridge.get_brief)
+                result = r.get("_bridge_error") or json.dumps(r)[:800]
+            elif caction == "activity":
+                limit = int(args.get("limit") or 10)
+                r = await loop.run_in_executor(None, lambda: cloud_bridge.get_activity(limit))
+                if "_bridge_error" in r:
+                    result = f"Couldn't reach cloud JARVIS: {r['_bridge_error']}"
+                else:
+                    items = r.get("activity") or []
+                    result = "; ".join(a.get("message", a.get("kind", "")) for a in items) or "No recent cloud activity."
+            elif caction == "run_agent":
+                r = await loop.run_in_executor(
+                    None, lambda: cloud_bridge.run_cloud_agent(args.get("agent_id", ""), args.get("description", ""))
+                )
+                if "_bridge_error" in r:
+                    result = f"Couldn't run that on cloud JARVIS: {r['_bridge_error']}"
+                else:
+                    result = f"Cloud task {r.get('id', '?')} for {r.get('agent_id', '?')} is now {r.get('status', 'unknown')}."
+            else:
+                result = f"Unknown cloud_status action: {caction}"
 
         else:
             raise UnknownToolError(f"Unknown tool: {name}")
