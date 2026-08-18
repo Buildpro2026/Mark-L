@@ -154,8 +154,8 @@
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
-    const _authToken  = sessionStorage.getItem('jarvis_token');
-    const _sessionKey = sessionStorage.getItem('jarvis_key');
+    const _authToken  = localStorage.getItem('jarvis_token');
+    const _sessionKey = localStorage.getItem('jarvis_key');
 
     if (!_authToken) {
       location.replace('/login');

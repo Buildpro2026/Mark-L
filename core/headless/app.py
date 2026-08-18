@@ -2,15 +2,24 @@
 a live Gemini Live session. Assembles the health check, tool-execution API,
 and Agent Orchestrator API behind one app object; core/headless_main.py is
 the process entry point that actually serves it plus the background worker.
+
+The bare public URL (see the dashboard mount at the bottom of create_app)
+serves the ORIGINAL JARVIS interface — dashboard/server.py's login/pairing
+flow, phone command-center (app.html), and 3D spatial command center
+(/3d) — not a bespoke replacement UI. core/headless/ui.py's own generic
+SPA stays mounted at /ui as a fallback surface (nothing currently links to
+it) rather than being deleted outright.
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 
 from fastapi import FastAPI
 
 from core.headless import config
+from core.headless import dashboard_bridge
 from core.headless import orchestrator_api
 from core.headless import tools_api
 from core.headless import status_api
@@ -38,14 +47,28 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     )
     app.state.background_worker = BackgroundWorker()
 
+    # The original JARVIS dashboard/phone/3D-command-center UI, imported
+    # lazily here (not at module scope) so a dashboard/server.py import
+    # failure can't take the whole headless app down with it — see the
+    # mount at the bottom of this function.
+    from dashboard.server import DashboardServer
+    dashboard_server = DashboardServer()
+    app.state.dashboard_server = dashboard_server
+
     if start_background_worker:
         @app.on_event("startup")
         async def _start_background_worker():
             app.state.background_worker.start()
+            app.state.dashboard_bridge_task = asyncio.create_task(
+                dashboard_bridge.run(dashboard_server)
+            )
 
         @app.on_event("shutdown")
         async def _stop_background_worker():
             await app.state.background_worker.stop()
+            task = getattr(app.state, "dashboard_bridge_task", None)
+            if task:
+                task.cancel()
 
     @app.get("/health")
     def health():
@@ -68,11 +91,13 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     app.include_router(ui.router)
     app.include_router(ui.api)
 
-    # Bare public URL now serves the browser UI instead of 404ing — this
-    # is what a user opens in Chrome/Safari; /health and /api/* are
-    # unaffected since FastAPI matches those explicit routes first.
-    @app.get("/")
-    def index():
-        return ui.serve_index()
+    # Everything else — "/", "/login", "/3d", "/ws", "/api/command", etc.
+    # — falls through to dashboard/server.py's own FastAPI app, mounted
+    # last so the explicit routes above (/health, /api/tools*, /api/status,
+    # /api/orchestrator/*, /ui/*) are matched first and never shadowed by
+    # it. This is what makes the bare public URL serve the ORIGINAL JARVIS
+    # phone/3D command-center UI instead of core/headless/ui.py's generic
+    # SPA (still reachable at /ui as a fallback — see module docstring).
+    app.mount("/", dashboard_server.app)
 
     return app

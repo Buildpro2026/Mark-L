@@ -226,11 +226,12 @@
   <script>
     // Auth — same session-token pairing flow the phone dashboard already
     // uses (dashboard/static/app.html): a page load can't carry a custom
-    // Authorization header, so this checks sessionStorage and bounces
-    // through /login if there's no session yet. Closes the J1 finding
-    // that /3d was reachable with zero credentials — see dashboard/server.py
-    // for the matching server-side enforcement on /3d/api/* and /3d/ws.
-    if (!sessionStorage.getItem('jarvis_token')) {
+    // Authorization header, so this checks localStorage (persists across
+    // browser restarts — see login.html) and bounces through /login if
+    // there's no session yet. Closes the J1 finding that /3d was
+    // reachable with zero credentials — see dashboard/server.py for the
+    // matching server-side enforcement on /3d/api/* and /3d/ws.
+    if (!localStorage.getItem('jarvis_token')) {
       location.replace('/login?next=' + encodeURIComponent(location.pathname));
     }
   </script>

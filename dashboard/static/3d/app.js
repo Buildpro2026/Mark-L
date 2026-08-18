@@ -18,7 +18,7 @@ import { OrbitControls } from "/3d/assets/vendor/OrbitControls.js";
 // token exists, so _authToken below is expected to be set by the time any
 // of this runs. See dashboard/server.py for the matching server-side check
 // on /3d/api/* and /3d/ws.
-const _authToken = sessionStorage.getItem("jarvis_token") || "";
+const _authToken = localStorage.getItem("jarvis_token") || "";
 function _authFetch(url, opts = {}) {
   opts.headers = Object.assign({}, opts.headers, { Authorization: `Bearer ${_authToken}` });
   return fetch(url, opts);

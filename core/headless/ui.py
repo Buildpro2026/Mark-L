@@ -40,6 +40,7 @@ reimplemented, so the UI and the programmatic API can never drift apart.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -57,6 +58,10 @@ from core.headless import status_api
 from core.headless import tools_api
 from core.headless.orchestrator_api import CreateTaskRequest
 from core.headless.tools_api import ExecuteToolRequest
+
+PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "core" / "prompt.txt"
+CHAT_MODEL = "gemini-flash-latest"   # same model main.py's own text-only Gemini calls use (see _save_session_summary)
+_MAX_TOOL_CALL_ROUNDS = 4            # caps a runaway tool-call chain, not normal conversation length
 
 STATIC_DIR = Path(__file__).parent / "ui_static"
 INDEX_FILE = STATIC_DIR / "index.html"
@@ -189,6 +194,113 @@ def ui_activity(limit: int = 50):
 @api.get("/brief")
 def ui_brief():
     return status_api.brief()
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []   # [{"role": "user"|"model", "text": "..."}] — kept client-side, not persisted
+
+
+def _chat_system_prompt() -> str:
+    try:
+        return PROMPT_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return (
+            "You are JARVIS, a concise and direct assistant. "
+            "Always use the provided tools to complete tasks — never simulate or guess results."
+        )
+
+
+def _chat_tool_declarations() -> list[dict]:
+    from core.headless.tool_registry import TOOL_DECLARATIONS, SESSION_ONLY_TOOLS
+    # SESSION_ONLY_TOOLS (screen_process, close_camera, shutdown_jarvis,
+    # navigate_command_center) need a live desktop/voice session — excluded
+    # from the declared set entirely so Gemini never tries to call one here,
+    # rather than declaring them and only failing when invoked.
+    return [t for t in TOOL_DECLARATIONS if t["name"] not in SESSION_ONLY_TOOLS]
+
+
+async def run_chat_turn(message: str, history: list[dict]) -> tuple[str, list[dict]]:
+    """One conversational turn through Gemini + the shared ToolExecutor —
+    the browser equivalent of what Gemini Live's function-calling already
+    does for the desktop voice loop (main.py), using the SAME tool
+    declarations and the SAME ToolExecutor, just over a plain (non-Live)
+    Gemini call since neither a browser chat tab nor a headless cloud
+    process can hold a Live audio session the way main.py's Gemini Live
+    client does. Nothing about tool dispatch or the underlying agents/
+    business logic is reimplemented here. Shared by /ui/api/chat (the
+    generic web UI) and core.headless.dashboard_bridge (the original
+    JARVIS phone/3D command-center UI's typed-command relay) so both
+    surfaces run the exact same conversational path.
+
+    Raises HTTPException on a missing GEMINI_API_KEY, an empty message, or
+    a Gemini request failure — callers that don't want that (e.g. the
+    dashboard bridge, which just wants a reply string) should catch it."""
+    if not config.GEMINI_API_KEY:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on this server.")
+    if not message.strip():
+        raise HTTPException(status_code=400, detail="Empty message.")
+
+    from google import genai
+    from google.genai import types as gtypes
+    from core.headless.context import ToolContext
+    from core.headless.tool_executor import ToolExecutor, UnknownToolError
+
+    client = genai.Client(api_key=config.GEMINI_API_KEY)
+    tools = [gtypes.Tool(function_declarations=_chat_tool_declarations())]
+    gen_config = gtypes.GenerateContentConfig(system_instruction=_chat_system_prompt(), tools=tools)
+
+    contents: list = []
+    for turn in history[-20:]:
+        role = "model" if turn.get("role") == "model" else "user"
+        text = str(turn.get("text") or "")
+        if text:
+            contents.append(gtypes.Content(role=role, parts=[gtypes.Part(text=text)]))
+    contents.append(gtypes.Content(role="user", parts=[gtypes.Part(text=message)]))
+
+    executor = ToolExecutor(ToolContext())
+    tool_calls_made: list[dict] = []
+    loop = asyncio.get_event_loop()
+
+    for _ in range(_MAX_TOOL_CALL_ROUNDS):
+        try:
+            resp = await loop.run_in_executor(
+                None, lambda: client.models.generate_content(model=CHAT_MODEL, contents=contents, config=gen_config)
+            )
+        except Exception as e:
+            # Gemini's own API returns a clean, user-safe error message
+            # (e.g. "high demand" 503s) — safe to surface directly, this
+            # is never a secret-bearing string.
+            raise HTTPException(status_code=502, detail=f"Gemini request failed: {e}")
+
+        if not resp.function_calls:
+            return resp.text or "", tool_calls_made
+
+        contents.append(resp.candidates[0].content)
+        for fc in resp.function_calls:
+            args = dict(fc.args or {})
+            try:
+                result = await executor.execute(fc.name, args)
+            except UnknownToolError as e:
+                result = f"Error: {e}"
+            except Exception as e:
+                result = f"Error: {fc.name} failed — {e}"
+            tool_calls_made.append({"name": fc.name, "args": args, "result": result})
+            contents.append(gtypes.Content(
+                role="user",
+                parts=[gtypes.Part(function_response=gtypes.FunctionResponse(name=fc.name, response={"result": result}))],
+            ))
+
+    return (
+        "I ran several tool calls but didn't reach a final answer — try rephrasing or breaking the request into smaller steps.",
+        tool_calls_made,
+    )
+
+
+@api.post("/chat")
+async def chat(body: ChatRequest):
+    reply, tool_calls = await run_chat_turn(body.message, body.history)
+    return {"reply": reply, "tool_calls": tool_calls}
 
 
 @api.get("/agents")

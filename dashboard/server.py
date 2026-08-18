@@ -651,22 +651,29 @@ class DashboardServer:
             return _token_valid(tok)
 
         def _token_valid(tok: str) -> bool:
-            """A valid credential is either a live pairing-session token
-            (self._tokens — the phone QR/key flow) or, if configured, the
-            static JARVIS_API_TOKEN (core/headless/config.py) — a
-            persistent pre-shared secret meant for the eventual remote UI
-            and other non-interactive clients that have no pairing key to
-            enter. Used for both header-based auth (_auth, above) and the
-            query-param auth /3d/ws needs (browsers can't set custom
-            WebSocket headers). No hardcoded fallback: if neither is
-            configured/valid, this is False."""
+            """A valid credential is any of:
+            1. A live pairing-session token (self._tokens — the phone QR/key
+               flow, in-memory, lost on process restart by design).
+            2. The static JARVIS_API_TOKEN itself (core/headless/config.py)
+               — a persistent pre-shared secret for non-interactive callers.
+            3. A stateless, HMAC-signed session token minted by /login for a
+               browser that authenticated with (2) — see core.headless.ui's
+               _new_session()/_session_valid(). This is what the cloud login
+               flow actually hands the browser: it survives a Render
+               restart (no server-side state to lose, same reasoning as
+               core/headless/ui.py's own session cookie) without the
+               browser having to hold the raw API token indefinitely.
+            Used for both header-based auth (_auth, above) and the
+            query-param auth /3d/ws, /ws, /ws/phone-audio, /uploads/{filename}
+            need (browsers can't set custom WebSocket/redirect headers)."""
             if not tok:
                 return False
             if tok in self._tokens:
                 return True
-            if headless_config.API_TOKEN:
-                return hmac.compare_digest(tok, headless_config.API_TOKEN)
-            return False
+            if headless_config.API_TOKEN and hmac.compare_digest(tok, headless_config.API_TOKEN):
+                return True
+            from core.headless.ui import _session_valid as _ui_session_valid
+            return _ui_session_valid(tok)
 
         # serve CryptoJS from local cache, fallback to CDN redirect
         @app.get("/static/crypto.js")
@@ -1273,7 +1280,8 @@ class DashboardServer:
         @app.post("/login")
         async def login(req: Request):
             body    = await req.json()
-            entered = str(body.get("pin", "")).strip().upper()
+            raw     = str(body.get("pin", "")).strip()
+            entered = raw.upper()
             now     = time.time()
             if entered in self._pending_keys and self._pending_keys[entered] > now:
                 del self._pending_keys[entered]          # one-time use
@@ -1287,6 +1295,21 @@ class DashboardServer:
                     {"type": "sys", "text": "Remote connection established."}
                 ))
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
+                return JSONResponse({"ok": True, "token": tok})
+            # No live desktop JARVIS to hand out a 6-char pairing key (the
+            # normal case for a cloud-only deployment) — accept the static
+            # JARVIS_API_TOKEN directly instead, and hand back a stateless
+            # signed session token (see _token_valid above) rather than the
+            # raw secret, so the browser never has to hold the actual
+            # JARVIS_API_TOKEN beyond this one login POST body.
+            if headless_config.API_TOKEN and hmac.compare_digest(raw, headless_config.API_TOKEN):
+                from core.headless.ui import _new_session
+                tok = _new_session()
+                if self._connect_callback:
+                    self._connect_callback()
+                asyncio.create_task(self.broadcast(
+                    {"type": "sys", "text": "Remote connection established."}
+                ))
                 return JSONResponse({"ok": True, "token": tok})
             return JSONResponse({"ok": False, "error": "Invalid or expired key"},
                                 status_code=401)
@@ -1330,8 +1353,8 @@ class DashboardServer:
 </style></head>
 <body>
 <script>
-  sessionStorage.setItem('jarvis_token','{tok}');
-  sessionStorage.setItem('jarvis_key','{key}');
+  localStorage.setItem('jarvis_token','{tok}');
+  localStorage.setItem('jarvis_key','{key}');
   localStorage.setItem('jarvis_device_token','{dev_tok}');
   setTimeout(function(){{location.replace('/')}},400);
 </script>
@@ -1401,7 +1424,7 @@ class DashboardServer:
         @app.websocket("/ws/phone-audio")
         async def phone_audio_ws(websocket: WebSocket, token: str = ""):
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not _token_valid(tok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
@@ -1504,7 +1527,7 @@ class DashboardServer:
         async def download_file(filename: str, token: str = ""):
             # Auth via query param — browser <a download> can't send custom headers
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not _token_valid(tok):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             safe = re.sub(r'[/\\]', '', filename)
             path = self._uploads_dir / safe
@@ -1515,7 +1538,7 @@ class DashboardServer:
         @app.websocket("/ws")
         async def ws_ep(websocket: WebSocket, token: str = ""):
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not _token_valid(tok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
