@@ -557,7 +557,10 @@ TOOL_DECLARATIONS = [
             "moved to 3pm') — never call 'send' speculatively, to guess "
             "at something the user didn't clearly ask for, or without a "
             "real recipient address. When in doubt, use 'draft' instead "
-            "and tell the user a draft is ready for them to review."
+            "and tell the user a draft is ready for them to review. "
+            "'send_brief' emails the current executive brief to Lee's own "
+            "authenticated Gmail address — only call it when he's actually "
+            "asked to have the brief emailed to him."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -692,6 +695,38 @@ TOOL_DECLARATIONS = [
                 "image_url":       {"type": "STRING", "description": "Optional image URL to attach"},
                 "mode":            {"type": "STRING", "description": "addToQueue (default) | shareNow | shareNext | customScheduled"},
                 "allow_duplicate": {"type": "BOOLEAN", "description": "Set true to post despite an identical recent post, only after the user has confirmed — for 'publish'"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "obsidian",
+        "description": (
+            "Lee's long-term knowledge vault (goals, priorities, SOPs, past "
+            "decisions, research) — not the same thing as memory/personal "
+            "facts you already store automatically. 'status' reports "
+            "whether a vault is configured at all. 'list_notes'/'read_note'/"
+            "'search_notes' are always safe, read-only. 'write_note' creates "
+            "a new note (never overwrites an existing one unless overwrite=true "
+            "is explicitly set, and never call that without Lee explicitly "
+            "saying to replace something) and requires approved=true. "
+            "'record_decision' and 'record_completed_work' always create a "
+            "new timestamped entry (can never overwrite anything) and also "
+            "require approved=true, since they're still a write to Lee's "
+            "real knowledge base. If the vault isn't configured, say so "
+            "honestly rather than pretending the information doesn't exist."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "status | list_notes | read_note | search_notes | write_note | record_decision | record_completed_work"},
+                "subfolder": {"type": "STRING", "description": "Subfolder to list, for 'list_notes' (optional, default whole vault)"},
+                "path": {"type": "STRING", "description": "Note path relative to the vault root, for 'read_note'/'write_note'"},
+                "query": {"type": "STRING", "description": "Search text, for 'search_notes'"},
+                "content": {"type": "STRING", "description": "Note content, for 'write_note'"},
+                "title": {"type": "STRING", "description": "Entry title, for 'record_decision'/'record_completed_work'"},
+                "overwrite": {"type": "BOOLEAN", "description": "Must be true to replace an existing note, for 'write_note' — only on Lee's explicit instruction"},
+                "approved": {"type": "BOOLEAN", "description": "Must be true for any write action — only on Lee's explicit instruction"},
             },
             "required": ["action"],
         },

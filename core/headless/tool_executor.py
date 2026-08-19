@@ -409,6 +409,33 @@ class ToolExecutor:
                         result={"to": to, "subject": subject}, error=None if r["ok"] else r.get("detail"),
                         external_system="gmail", reference_id=r.get("message_id"),
                     )
+            elif gaction == "send_brief":
+                # On-demand executive brief delivery (Phase 4 Part 19) — Lee
+                # asking for this IS the explicit instruction that gates the
+                # send, same contract as every other send in this codebase.
+                # No scheduled/unattended version exists: an automatic daily
+                # send would need to either bypass the approval gate or queue
+                # a real approval every morning, and that's a product
+                # decision this tool doesn't make on its own.
+                own = await loop.run_in_executor(None, gmail_integration.get_own_email_address)
+                if not own["ok"]:
+                    result = f"Couldn't send the brief ({own.get('state')}): {own.get('detail')}"
+                else:
+                    from actions.executive_brief import generate_brief, format_brief_as_email
+                    brief_data = await loop.run_in_executor(None, generate_brief)
+                    subject, body = format_brief_as_email(brief_data)
+                    r = await loop.run_in_executor(
+                        None, lambda: gmail_integration.send_email(own["email"], subject, body, approved=True)
+                    )
+                    result = (
+                        f"Sent the brief to {own['email']}." if r["ok"]
+                        else f"Couldn't send the brief ({r.get('state')}): {r.get('detail')}"
+                    )
+                    audit_log.record(
+                        "gmail_send_brief", execution_status="succeeded" if r["ok"] else "failed",
+                        result={"to": own["email"]}, error=None if r["ok"] else r.get("detail"),
+                        external_system="gmail", reference_id=r.get("message_id"),
+                    )
             else:
                 result = f"Unknown gmail action: {gaction}"
 
@@ -793,6 +820,74 @@ class ToolExecutor:
                     )
             else:
                 result = f"Unknown buildpro_matching action: {bmaction}"
+
+        elif name == "obsidian":
+            from core.headless.obsidian import ObsidianVault, VaultNotConfigured
+            oaction = (args.get("action") or "status").strip().lower()
+            vault = ObsidianVault()
+            if oaction == "status":
+                st = vault.status()
+                result = (
+                    f"Vault configured at {st['path']}." if st["configured"] and st["exists"]
+                    else "No Obsidian vault configured — set JARVIS_OBSIDIAN_VAULT_PATH." if not st["configured"]
+                    else f"Vault path {st['path']} is configured but doesn't exist on disk."
+                )
+            elif oaction == "list_notes":
+                notes = await loop.run_in_executor(None, lambda: vault.list_notes(args.get("subfolder") or ""))
+                result = "; ".join(notes[:30]) if notes else "No notes found."
+            elif oaction == "read_note":
+                path = (args.get("path") or "").strip()
+                if not path:
+                    result = "I need the note path."
+                else:
+                    try:
+                        content = await loop.run_in_executor(None, lambda: vault.read_note(path))
+                        result = content if content is not None else f"No note found at {path}."
+                    except (ValueError, VaultNotConfigured) as e:
+                        result = str(e)
+            elif oaction == "search_notes":
+                query = (args.get("query") or "").strip()
+                if not query:
+                    result = "I need something to search for."
+                else:
+                    hits = await loop.run_in_executor(None, lambda: vault.search_notes(query))
+                    result = (
+                        "; ".join(f"{h['path']}: {h['snippet'][:80]}" for h in hits[:10])
+                        if hits else f"No notes matched '{query}'."
+                    )
+            elif oaction == "write_note":
+                path = (args.get("path") or "").strip()
+                content = args.get("content") or ""
+                if not path or not content:
+                    result = "I need both a note path and content."
+                else:
+                    r = await loop.run_in_executor(
+                        None, lambda: vault.write_note(path, content, approved=bool(args.get("approved", False)), overwrite=bool(args.get("overwrite", False)))
+                    )
+                    result = f"Saved {path} to the vault." if r["ok"] else f"Couldn't save the note: {r.get('detail')}"
+                    audit_log.record(
+                        "obsidian_write_note", execution_status="succeeded" if r["ok"] else "failed",
+                        result={"path": path}, error=None if r["ok"] else r.get("detail"),
+                        external_system="obsidian",
+                    )
+            elif oaction in ("record_decision", "record_completed_work"):
+                title = (args.get("title") or "").strip()
+                content = args.get("content") or ""
+                if not title:
+                    result = "I need a title."
+                elif not args.get("approved", False):
+                    result = "Recording this to the vault needs your approval — call again with approved=true."
+                else:
+                    fn = vault.record_decision if oaction == "record_decision" else vault.record_completed_work
+                    r = await loop.run_in_executor(None, lambda: fn(title, content))
+                    result = f"Recorded to the vault: {r['path']}." if r.get("ok") else f"Couldn't record it: {r.get('detail')}"
+                    audit_log.record(
+                        f"obsidian_{oaction}", execution_status="succeeded" if r.get("ok") else "failed",
+                        result={"title": title}, error=None if r.get("ok") else r.get("detail"),
+                        external_system="obsidian",
+                    )
+            else:
+                result = f"Unknown obsidian action: {oaction}"
 
         elif name == "daily_deal_finders":
             daction = (args.get("action") or "").strip().lower()

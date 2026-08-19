@@ -25,6 +25,22 @@ def _service():
     return google_auth.build_service("gmail", "v1")
 
 
+def get_own_email_address() -> dict[str, Any]:
+    """The authenticated account's own address (e.g. for sending Lee a
+    digest to himself) — a real API call (users.getProfile), not a
+    guess or a config value that could drift from the actual OAuth
+    account. Honest ok=False on any auth/API failure, same as every
+    other function here."""
+    try:
+        service = _service()
+        profile = service.users().getProfile(userId="me").execute()
+        return {"ok": True, "email": profile.get("emailAddress")}
+    except RuntimeError as exc:
+        return {"ok": False, "state": "NOT_AUTHORIZED", "detail": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "state": "ERROR", "detail": str(exc)}
+
+
 def list_messages(query: str = "", max_results: int = 10) -> dict[str, Any]:
     """Read-only: lists messages matching an optional Gmail search query
     (e.g. 'is:unread', 'from:someone@example.com'), each with full

@@ -137,6 +137,54 @@ def _completed_overnight(window_secs: float = _OVERNIGHT_WINDOW_SECS) -> dict[st
     return {"agent_tasks": agent_tasks, "audited_actions": audit_entries}
 
 
+def format_brief_as_email(brief: dict[str, Any]) -> tuple[str, str]:
+    """Turns generate_brief()'s data into a subject + plain-text body — a
+    real, readable digest, not a JSON dump. Pure formatting only, no new
+    data gathered here; every line traces back to a field generate_brief()
+    already produced."""
+    risks = brief.get("risks", [])
+    approvals = brief.get("pending_approvals", [])
+    ddf = brief.get("daily_deal_finders", {})
+    recs = brief.get("recommended_actions", [])
+    objective = brief.get("strategic_objective", {})
+
+    subject = f"JARVIS Brief — {risks and 'attention needed' or 'all clear'}"
+    lines = [f"Executive brief\n"]
+
+    if risks:
+        lines.append(f"RISKS ({len(risks)})")
+        for r in risks:
+            lines.append(f"  - [{r['kind']}] {r['detail']}")
+        lines.append("")
+
+    if approvals:
+        lines.append(f"WAITING ON YOUR APPROVAL ({len(approvals)})")
+        for a in approvals:
+            lines.append(f"  - {a.get('agent_id')}: {a.get('description')}")
+        lines.append("")
+
+    if recs:
+        lines.append("RECOMMENDATIONS")
+        for r in recs:
+            lines.append(f"  - {r}")
+        lines.append("")
+
+    picks = ddf.get("high_ticket_picks", [])
+    if picks:
+        lines.append("DDF — TODAY'S HIGH-TICKET PICKS")
+        for p in picks:
+            lines.append(f"  - {p.get('name')} (${p.get('current_price', p.get('price'))})")
+        lines.append("")
+
+    if objective:
+        lines.append(
+            f"OBJECTIVE: ${round(objective.get('cumulative_revenue_usd', 0)):,} "
+            f"toward ${round(objective.get('target_amount_usd', 0)):,}"
+        )
+
+    return subject, "\n".join(lines).strip() + "\n"
+
+
 def generate_brief() -> dict[str, Any]:
     """The single entry point — real data, honestly labeled where a source
     isn't configured/available. Never sends or publishes anything itself;
