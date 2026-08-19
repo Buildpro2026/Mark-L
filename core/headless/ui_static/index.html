@@ -4,12 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JARVIS</title>
-<!-- Same three.js the /3d command center already uses, served from the
-     same origin (dashboard/server.py is mounted at "/" on this same app) —
-     no separate copy of the ~1MB of vendor/loader files needed here. -->
-<script type="importmap">
-{ "imports": { "three": "/3d/assets/vendor/three.module.js" } }
-</script>
 <style>
   :root {
     --bg: #0a0c10;
@@ -85,23 +79,25 @@
   #sidebar .brand .dot.ok { background: var(--ok); }
   #sidebar .brand .dot.bad { background: var(--bad); }
   #identity-badge { padding: 0 18px 14px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
-  /* ── avatar widget: the same face-avatar rig /3d uses, shrunk into the
-     sidebar so it's visible on every tab, not just Command. See
-     window.setAvatarState() near the end of this file. ── */
-  #avatar-wrap { display: flex; justify-content: center; padding: 10px 18px 14px; }
-  #avatar-canvas { width: 108px; height: 108px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #182233, #05080d 72%); border: 1px solid var(--line-strong); }
-  #avatar-state-label { text-align: center; font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin-top: 6px; }
-  nav.tabs { display: flex; flex-direction: column; gap: 1px; flex: 1; overflow-y: auto; }
-  nav.tabs button {
-    background: none; color: var(--muted); border: none; border-radius: 0; text-align: left;
-    padding: 8px 18px; font-weight: 500; font-size: 13px; border-left: 2px solid transparent;
-    display: flex; justify-content: space-between; align-items: center;
+  /* ── report picker: a dropdown instead of the old tall sidebar button
+     list — same underlying switchTab()/.page.active mechanism, just a
+     more compact trigger so the sidebar stops competing with the orb for
+     "the thing your eye goes to." ── */
+  #report-picker-wrap { padding: 4px 18px 14px; }
+  #report-picker {
+    width: 100%; background: var(--panel-alt); border: 1px solid var(--line-strong); color: var(--text);
+    padding: 10px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+    appearance: none; -webkit-appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: calc(100% - 18px) center, calc(100% - 13px) center;
+    background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
   }
-  nav.tabs button:hover { background: rgba(127,127,127,0.06); color: var(--text); }
-  nav.tabs button.active { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text); border-left-color: var(--accent); }
-  nav.tabs button .count { font-size: 11px; background: var(--line-strong); padding: 1px 6px; border-radius: 8px; color: var(--muted); }
-  nav.tabs button .count.alert { background: var(--bad); color: #1a0505; }
-  nav.tabs .divider { height: 1px; background: var(--line); margin: 8px 18px; }
+  #approval-badge {
+    display: none; align-items: center; gap: 8px; margin: 0 18px 14px; padding: 9px 12px;
+    background: color-mix(in srgb, var(--bad) 14%, transparent); border: 1px solid var(--bad);
+    border-radius: 8px; font-size: 12px; color: var(--text); cursor: pointer;
+  }
+  #approval-badge .count { font-weight: 700; background: var(--bad); color: #1a0505; padding: 1px 7px; border-radius: 8px; font-size: 11px; }
   #sidebar-foot { padding: 12px 18px 0; border-top: 1px solid var(--line); margin-top: 8px; }
   #sidebar-foot button { width: 100%; }
 
@@ -237,6 +233,57 @@
   }
   .identity-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .identity-card .swatch { width: 100%; height: 28px; border-radius: 4px; margin-bottom: 8px; }
+
+  /* ── The floating orb ─────────────────────────────────────────────────
+     A genuine floating presence, not a docked sidebar icon: fixed
+     position anywhere on screen, draggable, resizable, and — see
+     window.onReportOpened in the orb script — hops to a fresh corner
+     whenever a different report opens so it never sits on top of what
+     you're reading. --orb-state-color drives the glow/pulse color;
+     JS sets it per idle/listening/thinking/speaking/interrupted. */
+  :root { --orb-size: 128px; --orb-state-color: #4b6b7c; }
+  #orb-widget {
+    position: fixed; z-index: 60; display: flex; flex-direction: column; align-items: center; gap: 10px;
+    left: var(--orb-x, calc(100vw - 128px - 32px)); top: var(--orb-y, calc(100vh - 128px - 32px));
+    width: var(--orb-size); touch-action: none; user-select: none;
+    transition: left .55s cubic-bezier(.2,.8,.2,1), top .55s cubic-bezier(.2,.8,.2,1);
+  }
+  #orb-widget.dragging { transition: none; cursor: grabbing; }
+  #orb-canvas {
+    width: var(--orb-size); height: var(--orb-size); border-radius: 50%; cursor: grab; display: block;
+    filter: drop-shadow(0 0 calc(var(--orb-size) * 0.14) color-mix(in srgb, var(--orb-state-color) 65%, transparent))
+            drop-shadow(0 8px 24px rgba(0,0,0,0.45));
+    transition: filter .4s ease;
+  }
+  #orb-resize-handle {
+    position: absolute; width: 16px; height: 16px; right: -2px; bottom: 34px; border-radius: 50%;
+    background: var(--panel-alt); border: 1px solid var(--line-strong); cursor: nwse-resize;
+    display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .2s;
+  }
+  #orb-resize-handle::before { content: ""; width: 6px; height: 6px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); }
+  #orb-widget:hover #orb-resize-handle { opacity: 1; }
+  #orb-controls { display: flex; gap: 6px; opacity: 0.45; transition: opacity .2s; }
+  #orb-widget:hover #orb-controls, #orb-widget.listening #orb-controls, #orb-widget.voice-on #orb-controls { opacity: 1; }
+  .orb-icon-btn {
+    width: 30px; height: 30px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--panel-alt); border: 1px solid var(--line-strong); color: var(--muted);
+  }
+  .orb-icon-btn:hover { color: var(--text); border-color: var(--accent); }
+  .orb-icon-btn.active { background: var(--accent); color: #04101f; border-color: var(--accent); }
+  #orb-mic-btn.listening { background: var(--bad); color: #1a0505; border-color: var(--bad); animation: orb-mic-pulse 1.1s infinite; }
+  @keyframes orb-mic-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(224,85,92,0.5); } 50% { box-shadow: 0 0 0 6px rgba(224,85,92,0); } }
+  #orb-input-row { width: 100%; opacity: 0; max-height: 0; overflow: hidden; transition: opacity .2s, max-height .2s; }
+  #orb-widget:hover #orb-input-row, #orb-widget.input-focused #orb-input-row { opacity: 1; max-height: 40px; }
+  #orb-input-row input {
+    width: 100%; text-align: center; border-radius: 999px; font-size: 12px; padding: 8px 14px;
+    background: color-mix(in srgb, var(--panel) 80%, transparent); backdrop-filter: blur(6px);
+  }
+  #orb-state-label {
+    font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+    opacity: 0; transition: opacity .2s;
+  }
+  #orb-widget:hover #orb-state-label { opacity: 1; }
+  @media (max-width: 640px) { #orb-widget { --orb-size: 92px !important; } }
 </style>
 </head>
 <body>
@@ -256,28 +303,23 @@
   <div id="sidebar">
     <div class="brand"><span class="dot" id="conn-dot"></span> JARVIS</div>
     <div id="identity-badge">Executive</div>
-    <div id="avatar-wrap">
-      <div>
-        <canvas id="avatar-canvas"></canvas>
-        <div id="avatar-state-label">idle</div>
-      </div>
+    <div id="approval-badge"><span id="approval-badge-text">Tasks waiting on you</span><span class="count" id="approval-count">0</span></div>
+    <div id="report-picker-wrap">
+      <label class="field-label" for="report-picker">Report</label>
+      <select id="report-picker">
+        <option value="home" selected>Home</option>
+        <option value="command">Command</option>
+        <option value="ceo">CEO Brief</option>
+        <option value="buildpro">BuildPro</option>
+        <option value="ddf">DDF</option>
+        <option value="intelligence">Intelligence</option>
+        <option value="agents">Agents</option>
+        <option value="tasks">Tasks &amp; Approvals</option>
+        <option value="history">History</option>
+        <option value="settings">Settings</option>
+        <option value="tools">Tools</option>
+      </select>
     </div>
-    <nav class="tabs">
-      <button data-tab="home" class="active">Home</button>
-      <button data-tab="command">Command</button>
-      <div class="divider"></div>
-      <button data-tab="ceo">CEO Brief</button>
-      <button data-tab="buildpro">BuildPro</button>
-      <button data-tab="ddf">DDF</button>
-      <button data-tab="intelligence">Intelligence</button>
-      <div class="divider"></div>
-      <button data-tab="agents">Agents</button>
-      <button data-tab="tasks">Tasks &amp; Approvals <span class="count" id="approval-count" style="display:none"></span></button>
-      <button data-tab="history">History</button>
-      <div class="divider"></div>
-      <button data-tab="settings">Settings</button>
-      <button data-tab="tools">Tools</button>
-    </nav>
     <div id="sidebar-foot"><button class="ghost" id="logout-btn">Log out</button></div>
   </div>
 
@@ -474,6 +516,30 @@
   </div>
 </div>
 
+<!-- ── The floating orb: JARVIS's actual presence on this page. Draggable,
+     resizable, hops corners when a report opens, carries voice input/output
+     and a compact always-available chat input — see the orb script block
+     near the end of this file (window.setOrbState / window.speakReply). ── -->
+<div id="orb-widget">
+  <div id="orb-resize-handle" title="Drag to resize"></div>
+  <canvas id="orb-canvas"></canvas>
+  <div id="orb-controls">
+    <button id="orb-mic-btn" class="orb-icon-btn" type="button" title="Click to talk">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18v3"/></svg>
+    </button>
+    <button id="orb-continuous-toggle" class="orb-icon-btn" type="button" title="Continuous listening (stays on after each reply)">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a5 5 0 0 0-5 5v2a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5Z"/><circle cx="12" cy="12" r="10"/></svg>
+    </button>
+    <button id="orb-voice-toggle" class="orb-icon-btn" type="button" title="Toggle spoken replies">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+    </button>
+  </div>
+  <form id="orb-input-row" autocomplete="off">
+    <input id="orb-input" type="text" placeholder="Ask Jarvis, or click the mic…">
+  </form>
+  <div id="orb-state-label">idle</div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const IDENTITY_LABELS = { executive: "Executive", buildpro: "BuildPro COS", careerrocket: "Career Rocket Pro", ddf: "Daily Deal Finders" };
@@ -553,14 +619,15 @@ $('logout-btn').addEventListener('click', async () => {
   showLogin();
 });
 
-/* ── tab navigation ───────────────────────────────────────────────── */
+/* ── report navigation (dropdown, replacing the old sidebar tab list) ── */
 function switchTab(tabId) {
-  document.querySelectorAll('nav.tabs button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tabId));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + tabId));
+  const picker = $('report-picker');
+  if (picker && picker.value !== tabId) picker.value = tabId;
+  if (window.onReportOpened) window.onReportOpened(tabId);
 }
-document.querySelectorAll('nav.tabs button[data-tab]').forEach(btn => {
-  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-});
+$('report-picker').addEventListener('change', (e) => switchTab(e.target.value));
+$('approval-badge').addEventListener('click', () => switchTab('tasks'));
 
 /* ── Home ──────────────────────────────────────────────────────────── */
 function renderPriorityRow(p) {
@@ -688,7 +755,7 @@ function appendMessage(role, text, toolCalls) {
   div.innerHTML = `<div class="who">${role === 'user' ? 'You' : 'Jarvis'}</div><div>${escapeHtml(text)}</div>${toolsHtml}`;
   wrap.appendChild(div);
   wrap.scrollTop = wrap.scrollHeight;
-  if (role === 'jarvis' && window.setAvatarState) window.setAvatarState('speaking');
+  if (role === 'jarvis' && window.setOrbState) window.setOrbState('speaking');
 }
 function appendError(text) {
   clearProgress();
@@ -700,7 +767,7 @@ function appendError(text) {
   div.innerHTML = `<div class="who">Jarvis</div><div>${escapeHtml(text)}</div>`;
   wrap.appendChild(div);
   wrap.scrollTop = wrap.scrollHeight;
-  if (window.setAvatarState) window.setAvatarState('idle');
+  if (window.setOrbState) window.setOrbState('idle');
 }
 function showProgress(text) {
   clearProgress();
@@ -714,27 +781,39 @@ function showProgress(text) {
 }
 function clearProgress() { if (_progressEl) { _progressEl.remove(); _progressEl = null; } }
 
-async function sendChat() {
-  const input = $('chat-input');
-  const message = input.value.trim();
-  if (!message) return;
-  input.value = ''; input.style.height = 'auto';
+// Shared by the Command page's textarea AND the floating orb's own compact
+// input/mic — one conversation, one history, regardless of which surface
+// sent the message. Returns the reply text (orb.js's TTS uses this).
+async function sendMessage(message) {
+  message = (message || '').trim();
+  if (!message) return null;
   if (!_transcriptExpanded) setTranscriptExpanded(true);
   appendMessage('user', message);
   chatHistory.push({ role: 'user', text: message });
   showProgress('Thinking...');
-  if (window.setAvatarState) window.setAvatarState('thinking');
+  if (window.setOrbState) window.setOrbState('thinking');
   $('send-btn').disabled = true;
   try {
     const r = await api('/ui/api/chat', { method: 'POST', body: JSON.stringify({ message, history: chatHistory.slice(-20) }) });
     chatHistory.push({ role: 'model', text: r.reply });
     appendMessage('jarvis', r.reply, r.tool_calls);
     loadHistory();
+    if (window.speakReply) window.speakReply(r.reply);
+    return r.reply;
   } catch (e) {
     appendError(e.message);
+    if (window.setOrbState) window.setOrbState('idle');
+    return null;
   } finally {
     $('send-btn').disabled = false;
   }
+}
+
+async function sendChat() {
+  const input = $('chat-input');
+  const message = input.value.trim();
+  input.value = ''; input.style.height = 'auto';
+  await sendMessage(message);
 }
 $('send-btn').addEventListener('click', sendChat);
 $('chat-input').addEventListener('keydown', (e) => {
@@ -1024,8 +1103,9 @@ async function loadTasksAndApprovals() {
     const brief = await api('/ui/api/brief');
     const approvals = brief.pending_approvals || [];
     const countBadge = $('approval-count');
-    if (approvals.length) { countBadge.textContent = approvals.length; countBadge.className = 'count alert'; countBadge.style.display = 'inline-block'; }
-    else { countBadge.style.display = 'none'; }
+    const badgeWrap = $('approval-badge');
+    if (approvals.length) { countBadge.textContent = approvals.length; badgeWrap.style.display = 'flex'; }
+    else { badgeWrap.style.display = 'none'; }
 
     approvalsEl.innerHTML = approvals.length ? approvals.map(t => `
       <div class="row">
@@ -1209,93 +1289,297 @@ setInterval(() => { if ($('shell').classList.contains('active')) { loadTasksAndA
 checkSession();
 </script>
 
-<script type="module">
-/* ── avatar widget ─────────────────────────────────────────────────────
-   Same rigged face model /3d uses (Face Cap by Bannaflak, bundled with
-   three.js's own examples — see dashboard/static/3d/app.js for the
-   original integration and why it needs GLTFLoader+KTX2Loader+meshopt).
-   This is a standalone, minimal instance: no orbit controls, no nucleus
-   navigation, just a small always-visible face reacting to the actual
-   Command-tab chat lifecycle via window.setAvatarState() below — there's
-   no live voice session on this page (POST /ui/api/chat is
-   request/response, not streaming), so "state" here means idle while
-   nothing's happening, thinking while a reply is in flight, and speaking
-   briefly once the reply lands — not real-time voice state. */
-import * as THREE from "three";
-import { GLTFLoader } from "/3d/assets/vendor/GLTFLoader.js";
-import { KTX2Loader } from "/3d/assets/vendor/KTX2Loader.js";
-import { MeshoptDecoder } from "/3d/assets/libs/meshopt_decoder.module.js";
+<script>
+/* ── The floating orb ──────────────────────────────────────────────────
+   Lee's call 2026-08-19: the rigged 3D face ("creepy") is gone, replaced
+   with the original breathing-orb concept — but now a genuine floating
+   presence instead of a docked sidebar icon: draggable anywhere, resizable,
+   hops to a fresh corner when a different report opens, and carries real
+   voice (SpeechRecognition in, speechSynthesis out) plus a compact chat
+   input, so talking to Jarvis doesn't require the Command page at all.
+   Plain canvas 2D, no WebGL/Three.js — lighter weight, no GPU/driver
+   compatibility surface, matches the original orb's own reasoning for
+   staying off a 3D engine. */
+(function () {
+  const STATE_COLORS = { idle: "#4b6b7c", listening: "#00d4ff", thinking: "#b98bff", speaking: "#5cffc4", interrupted: "#ff5c6c" };
+  const STATE_PULSE_SPEED = { idle: 0.7, listening: 1.6, thinking: 2.6, speaking: 2.1, interrupted: 5.5 };
+  const widget = document.getElementById("orb-widget");
+  const canvas = document.getElementById("orb-canvas");
+  const stateLabel = document.getElementById("orb-state-label");
+  if (!widget || !canvas) return;
+  const ctx = canvas.getContext("2d");
 
-const STATE_FACE_TIMESCALE = { idle: 0.05, thinking: 0.22, speaking: 1.0 };
-let faceMixer = null, faceClipAction = null, currentState = "idle";
-let speakingTimeout = null;
+  let currentState = "idle";
+  let stateHoldUntil = 0;
 
-// Defined synchronously so callers never have to wait on the model load.
-window.setAvatarState = function setAvatarState(state, opts = {}) {
-  currentState = STATE_FACE_TIMESCALE[state] !== undefined ? state : "idle";
-  const label = document.getElementById("avatar-state-label");
-  if (label) label.textContent = currentState;
-  if (faceClipAction) faceClipAction.timeScale = STATE_FACE_TIMESCALE[currentState];
-  clearTimeout(speakingTimeout);
-  if (currentState === "speaking") {
-    // No end-of-speech event to key off (this isn't TTS) — settle back to
-    // idle a few seconds after a reply lands, roughly how long it'd take
-    // to read a short reply.
-    speakingTimeout = setTimeout(() => window.setAvatarState("idle"), opts.holdMs || 4000);
+  window.setOrbState = function setOrbState(state) {
+    const now = performance.now();
+    if (currentState === "interrupted" && now < stateHoldUntil) return;
+    currentState = STATE_COLORS[state] ? state : "idle";
+    if (currentState === "interrupted") stateHoldUntil = now + 600;
+    if (stateLabel) stateLabel.textContent = currentState;
+    widget.classList.toggle("listening", currentState === "listening");
+    document.documentElement.style.setProperty("--orb-state-color", STATE_COLORS[currentState]);
+    // No real speech to time this turn (voice replies are off) — give it
+    // a short visible pulse rather than sitting in "speaking" forever.
+    if (currentState === "speaking" && !_speaking) {
+      clearTimeout(window._orbSpeakingFallback);
+      window._orbSpeakingFallback = setTimeout(() => { if (currentState === "speaking") setOrbState("idle"); }, 2500);
+    }
+  };
+
+  // ── canvas: breathing gradient core + a few slowly orbiting particles ──
+  function sizeCanvas() {
+    const cssSize = widget.getBoundingClientRect().width || parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = cssSize * dpr;
+    canvas.height = cssSize * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return cssSize;
   }
-};
+  let orbCssSize = sizeCanvas();
+  window.addEventListener("resize", () => { orbCssSize = sizeCanvas(); });
 
-const canvas = document.getElementById("avatar-canvas");
-if (canvas) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(108, 108, false);
+  const particles = Array.from({ length: 5 }, (_, i) => ({
+    angle: (i / 5) * Math.PI * 2, radiusFactor: 0.62 + (i % 2) * 0.1, speed: 0.25 + i * 0.05,
+  }));
 
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(30, 1, 0.05, 50);
-  scene.add(new THREE.AmbientLight(0x445566, 1.4));
-  const key = new THREE.PointLight(0x9fe6ff, 2.6, 20);
-  key.position.set(2, 3, 3);
-  scene.add(key);
+  function draw(t) {
+    const size = orbCssSize;
+    const cx = size / 2, cy = size / 2;
+    const speed = STATE_PULSE_SPEED[currentState] || 1;
+    const pulse = 1 + Math.sin(t * speed) * 0.05;
+    const r = (size / 2 - 4) * pulse;
+    const color = STATE_COLORS[currentState];
 
-  const ktx2Loader = new KTX2Loader().setTranscoderPath("/3d/assets/libs/basis/").detectSupport(renderer);
-  new GLTFLoader().setKTX2Loader(ktx2Loader).setMeshoptDecoder(MeshoptDecoder).load(
-    "/3d/assets/models/facecap.glb",
-    (gltf) => {
-      const faceGroup = gltf.scene;
-      scene.add(faceGroup);
+    ctx.clearRect(0, 0, size, size);
 
-      // Auto-frame the camera from the model's actual computed bounding
-      // box instead of hand-picking a distance — robust to this model's
-      // own scale/pivot convention without needing to reverse-engineer it.
-      const box = new THREE.Box3().setFromObject(faceGroup);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3()).length();
-      camera.position.set(center.x, center.y, center.z + Math.max(size, 0.001) * 0.62);
-      camera.lookAt(center);
-      camera.updateProjectionMatrix();
+    // Core: radial gradient sphere.
+    const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.35, r * 0.05, cx, cy, r);
+    grad.addColorStop(0, "#ffffff");
+    grad.addColorStop(0.18, color);
+    grad.addColorStop(1, "#02060b");
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
 
-      const head = faceGroup.getObjectByName("mesh_2");
-      if (head?.morphTargetDictionary && gltf.animations[0]) {
-        faceMixer = new THREE.AnimationMixer(head);
-        faceClipAction = faceMixer.clipAction(gltf.animations[0]);
-        faceClipAction.setLoop(THREE.LoopRepeat, Infinity);
-        faceClipAction.timeScale = STATE_FACE_TIMESCALE[currentState];
-        faceClipAction.play();
-      }
-    },
-    undefined,
-    (err) => console.warn("[UI avatar] model failed to load:", err)
-  );
+    // Thin bright rim.
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 0.985, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = Math.max(1, size * 0.01);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
 
-  const clock = new THREE.Clock();
-  (function animate() {
-    requestAnimationFrame(animate);
-    if (faceMixer) faceMixer.update(clock.getDelta());
-    else clock.getDelta(); // keep the clock consistent even before the model's loaded
-    renderer.render(scene, camera);
+    // Orbiting particles — brand motif shared with the /3d command center's
+    // orbiting nuclei, so the two surfaces read as the same product.
+    for (const p of particles) {
+      const angle = t * p.speed + p.angle;
+      const pr = r * p.radiusFactor;
+      const px = cx + Math.cos(angle) * pr;
+      const py = cy + Math.sin(angle) * pr * 0.5; // flattened ellipse orbit
+      ctx.beginPath();
+      ctx.arc(px, py, Math.max(1.4, size * 0.014), 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.8;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    requestAnimationFrame((t2) => draw(t2 / 1000));
+  }
+  requestAnimationFrame((t) => draw(t / 1000));
+
+  // ── position + size persistence ─────────────────────────────────────
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function applyPosition(x, y) {
+    const size = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
+    x = clamp(x, 8, window.innerWidth - size - 8);
+    y = clamp(y, 8, window.innerHeight - size - 8);
+    document.documentElement.style.setProperty("--orb-x", x + "px");
+    document.documentElement.style.setProperty("--orb-y", y + "px");
+    return { x, y };
+  }
+  function savePosition(x, y) { localStorage.setItem("jarvis_orb_pos", JSON.stringify({ x, y })); }
+  function saveSize(px) { localStorage.setItem("jarvis_orb_size", String(px)); }
+
+  (function restore() {
+    const savedSize = parseInt(localStorage.getItem("jarvis_orb_size") || "", 10);
+    if (savedSize) document.documentElement.style.setProperty("--orb-size", savedSize + "px");
+    let pos;
+    try { pos = JSON.parse(localStorage.getItem("jarvis_orb_pos") || "null"); } catch (e) { pos = null; }
+    if (pos && typeof pos.x === "number") applyPosition(pos.x, pos.y);
+    else applyPosition(window.innerWidth - (savedSize || 128) - 32, window.innerHeight - (savedSize || 128) - 32);
+    orbCssSize = sizeCanvas();
   })();
-}
+
+  // ── drag ──────────────────────────────────────────────────────────────
+  let dragging = false, dragOffsetX = 0, dragOffsetY = 0, userHasDragged = false;
+  canvas.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    widget.classList.add("dragging");
+    const rect = widget.getBoundingClientRect();
+    dragOffsetX = e.clientX - rect.left;
+    dragOffsetY = e.clientY - rect.top;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const { x, y } = applyPosition(e.clientX - dragOffsetX, e.clientY - dragOffsetY);
+    savePosition(x, y);
+  });
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    userHasDragged = true;
+    widget.classList.remove("dragging");
+  }
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("click", () => {
+    // A drag that never actually moved still fires "click" — only treat a
+    // real (non-dragged) click as "focus the input," handled via CSS hover
+    // already; nothing else needed here, kept as a hook point.
+  });
+
+  // ── resize ────────────────────────────────────────────────────────────
+  const resizeHandle = document.getElementById("orb-resize-handle");
+  let resizing = false, resizeStartX = 0, resizeStartSize = 128;
+  resizeHandle.addEventListener("pointerdown", (e) => {
+    resizing = true;
+    resizeStartX = e.clientX;
+    resizeStartSize = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
+    resizeHandle.setPointerCapture(e.pointerId);
+    e.stopPropagation();
+  });
+  resizeHandle.addEventListener("pointermove", (e) => {
+    if (!resizing) return;
+    const next = clamp(resizeStartSize + (e.clientX - resizeStartX), 72, 220);
+    document.documentElement.style.setProperty("--orb-size", next + "px");
+    orbCssSize = sizeCanvas();
+  });
+  function endResize(e) {
+    if (!resizing) return;
+    resizing = false;
+    const finalSize = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
+    saveSize(finalSize);
+  }
+  resizeHandle.addEventListener("pointerup", endResize);
+  resizeHandle.addEventListener("pointercancel", endResize);
+
+  // ── corner-hop when a different report opens ─────────────────────────
+  // "he moves out of the way" — cycles through the four corners so the
+  // orb never sits in the same spot two reports in a row. Paused for a
+  // while after a manual drag so it doesn't fight a position Lee chose.
+  const CORNERS = ["br", "bl", "tl", "tr"];
+  let cornerIndex = 0;
+  let lastReport = null;
+  let dragCooldownUntil = 0;
+  canvas.addEventListener("pointerup", () => { if (userHasDragged) dragCooldownUntil = Date.now() + 60000; });
+
+  function moveToCorner(name) {
+    const size = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
+    const margin = 32;
+    const x = name.includes("r") ? window.innerWidth - size - margin : margin;
+    const y = name.includes("b") ? window.innerHeight - size - margin : margin + 8;
+    const { x: fx, y: fy } = applyPosition(x, y);
+    savePosition(fx, fy);
+  }
+  window.onReportOpened = function onReportOpened(tabId) {
+    if (tabId === lastReport) return;
+    lastReport = tabId;
+    if (Date.now() < dragCooldownUntil) return;
+    cornerIndex = (cornerIndex + 1) % CORNERS.length;
+    moveToCorner(CORNERS[cornerIndex]);
+  };
+
+  // ── compact input ─────────────────────────────────────────────────────
+  const orbInput = document.getElementById("orb-input");
+  const orbInputRow = document.getElementById("orb-input-row");
+  orbInputRow.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = orbInput.value.trim();
+    if (!text) return;
+    orbInput.value = "";
+    if (window.sendMessage) await window.sendMessage(text);
+  });
+  orbInput.addEventListener("focus", () => widget.classList.add("input-focused"));
+  orbInput.addEventListener("blur", () => widget.classList.remove("input-focused"));
+
+  // ── voice: mic input (SpeechRecognition) ──────────────────────────────
+  const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const micBtn = document.getElementById("orb-mic-btn");
+  const continuousBtn = document.getElementById("orb-continuous-toggle");
+  let recognition = null, listening = false, continuousMode = localStorage.getItem("jarvis_orb_continuous") === "1";
+  continuousBtn.classList.toggle("active", continuousMode);
+
+  if (!SpeechRecognitionImpl) {
+    // Silently disables itself rather than erroring — matches the
+    // original orb's own philosophy for unsupported browsers.
+    micBtn.disabled = true;
+    micBtn.title = "Voice input isn't supported in this browser";
+    continuousBtn.disabled = true;
+  } else {
+    recognition = new SpeechRecognitionImpl();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => { listening = true; micBtn.classList.add("listening"); window.setOrbState("listening"); };
+    recognition.onerror = () => { listening = false; micBtn.classList.remove("listening"); window.setOrbState("idle"); };
+    recognition.onend = () => {
+      listening = false;
+      micBtn.classList.remove("listening");
+      if (continuousMode && currentState !== "thinking") {
+        try { recognition.start(); } catch (e) { /* already starting */ }
+      } else if (currentState === "listening") {
+        window.setOrbState("idle");
+      }
+    };
+    recognition.onresult = async (event) => {
+      const transcript = event.results[event.results.length - 1][0].transcript.trim();
+      if (transcript && window.sendMessage) await window.sendMessage(transcript);
+    };
+
+    micBtn.addEventListener("click", () => {
+      if (listening) { recognition.stop(); return; }
+      try { recognition.start(); } catch (e) { /* already listening */ }
+    });
+    continuousBtn.addEventListener("click", () => {
+      continuousMode = !continuousMode;
+      localStorage.setItem("jarvis_orb_continuous", continuousMode ? "1" : "0");
+      continuousBtn.classList.toggle("active", continuousMode);
+      if (continuousMode && !listening) { try { recognition.start(); } catch (e) {} }
+    });
+  }
+
+  // ── voice: spoken replies (speechSynthesis) ───────────────────────────
+  const voiceBtn = document.getElementById("orb-voice-toggle");
+  let voiceOn = localStorage.getItem("jarvis_orb_voice") !== "0"; // on by default, matching "he should talk back"
+  let _speaking = false;
+  voiceBtn.classList.toggle("active", voiceOn);
+  widget.classList.toggle("voice-on", voiceOn);
+  voiceBtn.addEventListener("click", () => {
+    voiceOn = !voiceOn;
+    localStorage.setItem("jarvis_orb_voice", voiceOn ? "1" : "0");
+    voiceBtn.classList.toggle("active", voiceOn);
+    widget.classList.toggle("voice-on", voiceOn);
+    if (!voiceOn && window.speechSynthesis) window.speechSynthesis.cancel();
+  });
+
+  window.speakReply = function speakReply(text) {
+    if (!voiceOn || !window.speechSynthesis || !text) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    _speaking = true;
+    utterance.onstart = () => window.setOrbState("speaking");
+    utterance.onend = () => { _speaking = false; window.setOrbState("idle"); };
+    utterance.onerror = () => { _speaking = false; window.setOrbState("idle"); };
+    window.speechSynthesis.speak(utterance);
+  };
+})();
 </script>
 </body>
 </html>

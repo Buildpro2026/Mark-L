@@ -12,9 +12,6 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "/3d/assets/vendor/OrbitControls.js";
-import { GLTFLoader } from "/3d/assets/vendor/GLTFLoader.js";
-import { KTX2Loader } from "/3d/assets/vendor/KTX2Loader.js";
-import { MeshoptDecoder } from "/3d/assets/libs/meshopt_decoder.module.js";
 
 // ── Auth — bearer token from the same session the /login page issues ────
 // index.html already redirects to /login before this module loads if no
@@ -67,19 +64,6 @@ const STATE_PULSE_SPEED = {
   idle: 0.6, listening: 1.2, thinking: 2.4, speaking: 2.0, interrupted: 6.0,
 };
 
-// How fast the avatar's baked facial-performance clip plays per state.
-// There's no live audio stream reaching this browser page today (voice
-// audio plays server-side/on the desktop app, not here), so this is not
-// true phoneme lip-sync — it's a real captured facial performance (Face
-// Cap by Bannaflak, bundled with three.js's own examples) played back at
-// a state-appropriate rate: nearly frozen at idle, a slow simmer while
-// listening/thinking, full natural motion while speaking. Wiring actual
-// audio-driven visemes would require streaming TTS/Gemini audio to this
-// page, which nothing currently does.
-const STATE_FACE_TIMESCALE = {
-  idle: 0.05, listening: 0.15, thinking: 0.22, speaking: 1.0, interrupted: 0.05,
-};
-
 const NUCLEUS_COLORS = {
   buildpro: 0x00d4ff, ddf: 0x5cffc4, careerrocket: 0xffb85c,
   email: 0x8fb8ff, calendar: 0xff8fd1, files: 0xb98bff,
@@ -90,8 +74,6 @@ const NUCLEUS_COLORS = {
 // ── Three.js setup ──────────────────────────────────────────────────────
 let renderer, scene, camera, controls, clock;
 let orbMesh, orbLight, orbGlow, starField;
-let faceGroup = null, faceMixer = null, faceClipAction = null;
-let lastMixerElapsed = 0;
 const rootGroup = new THREE.Group();
 const childGroup = new THREE.Group();
 const lineGroup = new THREE.Group();      // root nuclei's orbit connectors — geometry updated in place each frame, never cleared by navigation
@@ -132,61 +114,9 @@ function initThree() {
 
   createStarfield();
   createOrb();
-  createFaceAvatar();
   window.addEventListener("resize", onResize);
   clock = new THREE.Clock();
   return true;
-}
-
-// Loads the human face avatar in place of (visually — the orb sphere stays
-// as the state-color light/click anchor, see setOrbState/onPointerMove) the
-// plain sphere. Requires KTX2 (Basis Universal) textures + meshopt-compressed
-// geometry, both vendored under /3d/assets/libs/ — see dashboard/static/3d/
-// vendor + libs for what was pulled in and why.
-function createFaceAvatar() {
-  const ktx2Loader = new KTX2Loader()
-    .setTranscoderPath("/3d/assets/libs/basis/")
-    .detectSupport(renderer);
-
-  const loader = new GLTFLoader()
-    .setKTX2Loader(ktx2Loader)
-    .setMeshoptDecoder(MeshoptDecoder);
-
-  loader.load(
-    "/3d/assets/models/facecap.glb",
-    (gltf) => {
-      // gltf.scene is the root "Empty" node, which carries the x10 scale
-      // that (per the model's own node transforms) brings the head to
-      // roughly a 1.9-unit span — a close match for the sphere it's
-      // replacing (ORB_RADIUS 1.1, i.e. ~2.2 unit diameter). Computed from
-      // the glTF's own accessor bounds + node transforms, not eyeballed.
-      faceGroup = gltf.scene;
-      faceGroup.position.set(0, 0.34, 0); // recenters the head's bounding box on the origin
-      faceGroup.userData = { kind: "core", id: "jarvis", name: "Jarvis" };
-      scene.add(faceGroup);
-
-      const head = faceGroup.getObjectByName("mesh_2"); // GLTFLoader's default name for node index 2, the morph-target head mesh
-      if (head?.morphTargetDictionary) {
-        faceMixer = new THREE.AnimationMixer(head);
-        faceClipAction = faceMixer.clipAction(gltf.animations[0]); // the baked facial-performance clip
-        faceClipAction.setLoop(THREE.LoopRepeat, Infinity);
-        faceClipAction.play();
-      }
-
-      // The orb sphere stays in the scene as the state-color glow/anchor
-      // behind the face (and keeps every bit of existing click/label/pulse
-      // logic working untouched) — just made translucent so it reads as an
-      // aura instead of hiding the face.
-      orbMesh.material.transparent = true;
-      orbMesh.material.opacity = 0.28; // scale is handled every frame in animate() once faceGroup is set
-    },
-    undefined,
-    (err) => {
-      // No fallback needed beyond "leave the plain orb sphere as-is" —
-      // it was already fully functional before this avatar existed.
-      console.warn("[3D] Avatar model failed to load, staying on the orb sphere:", err);
-    }
-  );
 }
 
 function createStarfield() {
@@ -490,7 +420,6 @@ function setOrbState(state, opts = {}) {
   stateDotEl.style.background = `#${color.toString(16).padStart(6, "0")}`;
   stateDotEl.style.boxShadow = `0 0 10px #${color.toString(16).padStart(6, "0")}`;
   stateLabelEl.textContent = currentOrbState;
-  if (faceClipAction) faceClipAction.timeScale = STATE_FACE_TIMESCALE[currentOrbState] ?? 0.05;
 }
 
 // ── Navigation state (mirrors dashboard/server.py's apply_navigation) ──
@@ -832,17 +761,13 @@ function onResize() {
 function animate() {
   requestAnimationFrame(animate);
   const t = clock.getElapsedTime();
-  const dt = Math.max(0, t - lastMixerElapsed);
-  lastMixerElapsed = t;
 
   const speed = STATE_PULSE_SPEED[currentOrbState] ?? 1;
   const pulse = 1 + Math.sin(t * speed) * 0.06;
-  const orbBaseScale = faceGroup ? 1.6 : 1; // aura is bigger than the original solid orb once the face is behind it
-  orbMesh.scale.setScalar(pulse * orbBaseScale);
+  orbMesh.scale.setScalar(pulse);
   orbMesh.rotation.y += 0.0025 * (currentOrbState === "thinking" ? 3 : 1);
   orbLight.intensity = 2.6 + Math.sin(t * speed) * 0.8;
   starField.rotation.y += 0.00006;
-  if (faceMixer) faceMixer.update(dt);
   updateOrbits(t);
   updateTween();
   controls.update();

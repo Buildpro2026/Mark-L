@@ -114,25 +114,70 @@ def test_served_page_does_not_use_the_old_breathing_orb_language(monkeypatch):
     assert "breathe" not in html
 
 
-def test_served_page_has_the_face_avatar_widget_wired_into_the_chat_lifecycle(monkeypatch):
-    # Lee reported /ui as "no orb no face no person just a blank board" —
-    # the CEO console rebuild above dropped the old 2D canvas orb and
-    # nothing visual replaced it. This restores a face (reusing the same
-    # rigged-glTF avatar /3d added, see dashboard/static/3d/app.js) as a
-    # persistent sidebar widget, state-driven off the actual Command-tab
-    # chat lifecycle (thinking while a reply is in flight, speaking once
-    # it lands) since this page has no live voice session to key off.
+def test_served_page_has_the_floating_orb_wired_into_the_chat_lifecycle(monkeypatch):
+    # 2026-08-19: Lee said the rigged 3D face was "creepy" and wanted the
+    # original floating breathing orb back, draggable/resizable, no
+    # Three.js/GLTF this time — a plain canvas 2D orb instead.
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert "avatar-canvas" in html
-    assert "window.setAvatarState" in html
-    assert '"three": "/3d/assets/vendor/three.module.js"' in html
-    assert "/3d/assets/vendor/GLTFLoader.js" in html
-    assert "/3d/assets/models/facecap.glb" in html
+    assert "orb-widget" in html
+    assert "orb-canvas" in html
+    assert "window.setOrbState" in html
+    # The old rigged-face pipeline must actually be gone, not just unused.
+    assert "GLTFLoader" not in html
+    assert "KTX2Loader" not in html
+    assert "facecap.glb" not in html
+    assert '"three":' not in html
     # Actually called at the right points in the chat lifecycle, not just defined.
-    assert "setAvatarState('thinking')" in html
-    assert "setAvatarState('speaking')" in html
-    assert "setAvatarState('idle')" in html
+    assert "setOrbState('thinking')" in html
+    assert "setOrbState('speaking')" in html
+    assert "setOrbState('idle')" in html
+
+
+def test_orb_is_draggable_resizable_and_repositions_on_report_change(monkeypatch):
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "orb-resize-handle" in html
+    assert "pointerdown" in html
+    assert "savePosition" in html
+    assert "saveSize" in html
+    assert "window.onReportOpened" in html
+    assert "jarvis_orb_pos" in html
+    assert "jarvis_orb_size" in html
+
+
+def test_orb_has_real_voice_input_and_output(monkeypatch):
+    # Lee's core complaint: "it doesn't respond or wake by voice, I have to
+    # type everything." Confirms SpeechRecognition (mic in) and
+    # speechSynthesis (spoken replies out) are actually wired, with a
+    # graceful no-op fallback for unsupported browsers, not just present
+    # as dead code.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "SpeechRecognition" in html
+    assert "webkitSpeechRecognition" in html
+    assert "window.speechSynthesis" in html
+    assert "window.speakReply" in html
+    assert "orb-continuous-toggle" in html
+    assert "isn't supported in this browser" in html  # graceful degrade, not an error
+
+
+def test_orb_has_its_own_compact_chat_input(monkeypatch):
+    # Lee wants to talk to Jarvis at the orb directly, not have to switch
+    # to the Command report first.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "orb-input" in html
+    assert "orb-input-row" in html
+    assert "window.sendMessage" in html
+
+
+def test_report_picker_replaced_the_old_sidebar_tab_list(monkeypatch):
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "report-picker" in html
+    assert "nav.tabs" not in html
+    assert "approval-badge" in html
 
 
 def test_served_page_has_org_chart_and_live_session_tracker(monkeypatch):
@@ -168,17 +213,3 @@ def test_ui_tasks_endpoint_lists_all_tasks_for_the_org_chart(monkeypatch):
     assert isinstance(body["tasks"], list)
 
 
-def test_face_avatar_assets_are_reachable_through_the_full_headless_app(monkeypatch):
-    # /ui is served by core.headless.app; the avatar assets it references
-    # live under dashboard/static/3d/ and are only reachable because
-    # dashboard/server.py's app is mounted at "/" on the same app (see
-    # core/headless/app.py). Guards against that mount ever changing in a
-    # way that silently 404s these paths for /ui specifically.
-    client = _client(monkeypatch)
-    for path in (
-        "/3d/assets/vendor/GLTFLoader.js",
-        "/3d/assets/vendor/KTX2Loader.js",
-        "/3d/assets/libs/meshopt_decoder.module.js",
-        "/3d/assets/models/facecap.glb",
-    ):
-        assert client.get(path).status_code == 200, path
