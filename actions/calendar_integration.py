@@ -16,9 +16,7 @@ from actions import google_auth
 
 
 def _service():
-    from googleapiclient.discovery import build
-    creds = google_auth.get_credentials()
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    return google_auth.build_service("calendar", "v3")
 
 
 def _ensure_tz(iso_str: str) -> str:

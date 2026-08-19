@@ -591,8 +591,8 @@ _DANGEROUS_ACTIONS = {"restart", "shutdown"}
 
 def _detect_action(description: str) -> dict:
 
-    from google import genai as _genai
-    _client = _genai.Client(api_key=_get_api_key())
+    from core.headless.gemini_client import get_client
+    _client = get_client(_get_api_key())
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
                 ", volume_set, type_text, press_key, reload_n"

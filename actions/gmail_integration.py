@@ -22,9 +22,7 @@ from actions import google_auth
 
 
 def _service():
-    from googleapiclient.discovery import build
-    creds = google_auth.get_credentials()
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return google_auth.build_service("gmail", "v1")
 
 
 def list_messages(query: str = "", max_results: int = 10) -> dict[str, Any]:

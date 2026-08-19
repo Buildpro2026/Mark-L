@@ -1362,8 +1362,8 @@ class JarvisLive:
             "Output ONLY the summary text, nothing else:\n\n" + convo
         )
         try:
-            from google import genai as _genai
-            client = _genai.Client(api_key=_get_api_key())
+            from core.headless.gemini_client import get_client
+            client = get_client(_get_api_key())
             resp   = await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-flash-latest",

@@ -35,6 +35,21 @@ from typing import Any
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
+# Default per-request timeout (seconds) for every Gmail/Calendar API call
+# made through build_service() below. googleapiclient.discovery.build()'s
+# default transport (httplib2.Http(), reached via credentials=) has NO
+# timeout at all — httplib2 falls back to socket.getdefaulttimeout(),
+# which is None (block forever) unless something else in the process set
+# it globally, which nothing here does. Found live during the Phase 3
+# latency investigation: a stalled TCP connection to Google's API had no
+# bound at all, and since the dashboard's chat queue processes one message
+# at a time with no per-turn timeout, a single hung Gmail/Calendar call
+# stalled every other message queued behind it too — not just the one
+# that triggered it. This is almost certainly the real cause behind the
+# "5 to 10 minute" response reports: not slow reasoning, a request that
+# could hang indefinitely, blocking everything queued after it.
+API_TIMEOUT_SECONDS = 30
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 GOOGLE_CONFIG_DIR = BASE_DIR / "config" / "google"
 TOKEN_PATH = GOOGLE_CONFIG_DIR / "token.json"
@@ -119,6 +134,24 @@ def get_credentials() -> Credentials:
     )
 
 
+def build_service(name: str, version: str):
+    """Builds a Gmail/Calendar API service object with an explicit,
+    bounded request timeout (see API_TIMEOUT_SECONDS above) — the one
+    thing build(..., credentials=creds) alone never sets. Use this instead
+    of calling googleapiclient.discovery.build() directly with
+    credentials=; every caller in this codebase (gmail_integration.py,
+    calendar_integration.py, verify_google_auth below) goes through this
+    single choke point so a timeout fix here can't be silently bypassed
+    by a new call site built the old way."""
+    import httplib2
+    import google_auth_httplib2
+    from googleapiclient.discovery import build
+
+    creds = get_credentials()
+    http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=API_TIMEOUT_SECONDS))
+    return build(name, version, http=http, cache_discovery=False)
+
+
 def verify_google_auth() -> dict[str, Any]:
     """Safe, read-only live verification: if a valid token is cached, makes
     ONE cheap real Gmail API call (users.getProfile — returns just the
@@ -132,9 +165,7 @@ def verify_google_auth() -> dict[str, Any]:
     if not status["token_cached"]:
         return {**status, "verified": False, "detail": "No cached token — authorize_interactively() has not been run yet."}
     try:
-        creds = get_credentials()
-        from googleapiclient.discovery import build
-        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        service = build_service("gmail", "v1")
         profile = service.users().getProfile(userId="me").execute()
         return {
             **status, "verified": True,

@@ -170,10 +170,10 @@ def _get_transcript(video_id: str) -> str | None:
 
 
 def _summarize_with_gemini(transcript: str, video_url: str) -> str:
-    from google import genai as _genai
     from google.genai import types
+    from core.headless.gemini_client import get_client
 
-    _client = _genai.Client(api_key=_get_api_key())
+    _client = get_client(_get_api_key())
     max_chars = 80000
     truncated = transcript[:max_chars] + ("..." if len(transcript) > max_chars else "")
     response  = _client.models.generate_content(

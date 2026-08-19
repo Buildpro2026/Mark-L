@@ -133,6 +133,39 @@ def test_get_credentials_raises_when_expired_with_no_refresh_token(monkeypatch):
         google_auth.get_credentials()
 
 
+# ── build_service — every Gmail/Calendar call must be timeout-bounded ───
+# Phase 3 fix: build(..., credentials=creds) alone never sets a timeout —
+# httplib2 defaults to socket.getdefaulttimeout(), which is None (block
+# forever). A stalled connection could hang indefinitely, and since chat
+# messages are processed one at a time, that stalled every later message
+# too. This is what actually explained the reported "5 to 10 minute"
+# response times, not slow reasoning.
+
+def test_build_service_sets_an_explicit_bounded_timeout(monkeypatch):
+    class FakeCreds:
+        valid = True
+        expired = False
+        refresh_token = "rt"
+
+    google_auth.TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    google_auth.TOKEN_PATH.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(google_auth.Credentials, "from_authorized_user_file", staticmethod(lambda *a, **k: FakeCreds()))
+
+    import httplib2
+    captured = {}
+    _orig_init = httplib2.Http.__init__
+
+    def _spy_init(self, *a, **k):
+        captured.update(k)
+        return _orig_init(self, *a, **k)
+
+    monkeypatch.setattr(httplib2.Http, "__init__", _spy_init)
+
+    google_auth.build_service("gmail", "v1")
+    assert captured.get("timeout") == google_auth.API_TIMEOUT_SECONDS
+    assert captured["timeout"] is not None
+
+
 # ── verify_google_auth — safe, real-but-cheap check, no flow triggered ───
 
 def test_verify_google_auth_missing_credential_file():
