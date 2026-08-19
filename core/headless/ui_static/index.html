@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JARVIS</title>
+<!-- Same three.js the /3d command center already uses, served from the
+     same origin (dashboard/server.py is mounted at "/" on this same app) —
+     no separate copy of the ~1MB of vendor/loader files needed here. -->
+<script type="importmap">
+{ "imports": { "three": "/3d/assets/vendor/three.module.js" } }
+</script>
 <style>
   :root {
     --bg: #0a0c10;
@@ -79,6 +85,12 @@
   #sidebar .brand .dot.ok { background: var(--ok); }
   #sidebar .brand .dot.bad { background: var(--bad); }
   #identity-badge { padding: 0 18px 14px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+  /* ── avatar widget: the same face-avatar rig /3d uses, shrunk into the
+     sidebar so it's visible on every tab, not just Command. See
+     window.setAvatarState() near the end of this file. ── */
+  #avatar-wrap { display: flex; justify-content: center; padding: 10px 18px 14px; }
+  #avatar-canvas { width: 108px; height: 108px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #182233, #05080d 72%); border: 1px solid var(--line-strong); }
+  #avatar-state-label { text-align: center; font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin-top: 6px; }
   nav.tabs { display: flex; flex-direction: column; gap: 1px; flex: 1; overflow-y: auto; }
   nav.tabs button {
     background: none; color: var(--muted); border: none; border-radius: 0; text-align: left;
@@ -127,6 +139,41 @@
   .badge.idle { background: rgba(124,132,147,0.18); color: var(--muted); }
   .badge.running { background: rgba(79,140,255,0.18); color: var(--accent); }
   .badge.attn { background: rgba(224,85,92,0.18); color: var(--bad); }
+
+  /* ── Org chart: pure-CSS tree (nested ul/li + pseudo-element connectors),
+     no chart library — same "plain HTML/CSS/JS, no new framework"
+     convention as the rest of this page. ── */
+  #live-now { margin-bottom: 22px; }
+  #live-now .row-list:empty::after,
+  #live-now .row-list .empty { content: ""; }
+  .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; animation: live-pulse 1.4s infinite; flex: none; }
+  @keyframes live-pulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(53,201,135,0.5); } 50% { opacity: 0.55; box-shadow: 0 0 0 4px rgba(53,201,135,0); } }
+  .org-tree, .org-tree ul { list-style: none; margin: 0; padding: 0; }
+  .org-tree { text-align: center; padding-bottom: 8px; overflow-x: auto; }
+  .org-tree ul { display: flex; padding-top: 28px; position: relative; }
+  .org-tree li { display: flex; flex-direction: column; align-items: center; padding: 28px 10px 0; position: relative; }
+  .org-tree li::before, .org-tree li::after {
+    content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 28px;
+    border-top: 1px solid var(--line-strong);
+  }
+  .org-tree li::after { right: auto; left: 50%; border-left: 1px solid var(--line-strong); }
+  .org-tree li:only-child::before, .org-tree li:only-child::after { display: none; }
+  .org-tree li:only-child { padding-top: 0; }
+  .org-tree li:first-child::before, .org-tree li:last-child::after { border: 0 none; }
+  .org-tree li:last-child::before { border-right: 1px solid var(--line-strong); }
+  .org-tree > ul { padding-top: 0; }
+  .org-tree > ul::before { display: none; }
+  .org-tree ul ul::before {
+    content: ""; position: absolute; top: 0; left: 50%; width: 0; height: 28px;
+    border-left: 1px solid var(--line-strong);
+  }
+  .org-node { display: inline-flex; flex-direction: column; gap: 4px; padding: 10px 14px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); min-width: 150px; }
+  .org-node.owner { border-color: var(--accent); background: var(--panel-alt); font-weight: 700; }
+  .org-node.business { border-color: var(--line-strong); font-weight: 600; letter-spacing: 0.02em; }
+  .org-node.agent { align-items: flex-start; text-align: left; max-width: 190px; }
+  .org-node .org-name { font-size: 12.5px; }
+  .org-node .org-what { font-size: 11px; color: var(--muted); line-height: 1.4; }
+  .org-node .org-badges { display: flex; gap: 4px; flex-wrap: wrap; }
 
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
@@ -209,6 +256,12 @@
   <div id="sidebar">
     <div class="brand"><span class="dot" id="conn-dot"></span> JARVIS</div>
     <div id="identity-badge">Executive</div>
+    <div id="avatar-wrap">
+      <div>
+        <canvas id="avatar-canvas"></canvas>
+        <div id="avatar-state-label">idle</div>
+      </div>
+    </div>
     <nav class="tabs">
       <button data-tab="home" class="active">Home</button>
       <button data-tab="command">Command</button>
@@ -298,7 +351,14 @@
     <!-- Agents -->
     <div class="page" id="page-agents">
       <div class="page-head"><h1>Agents</h1></div>
-      <div class="row-list" id="agents-list"><div class="empty">Loading…</div></div>
+      <section class="block" id="live-now">
+        <h2>Live Now</h2>
+        <div class="row-list" id="live-now-list"><div class="empty">Nothing running right now.</div></div>
+      </section>
+      <section class="block">
+        <h2>Org Chart</h2>
+        <div class="org-tree" id="org-tree"><div class="empty">Loading…</div></div>
+      </section>
       <section class="block" style="margin-top:24px">
         <h2>Assign a task</h2>
         <div class="grid2">
@@ -628,6 +688,7 @@ function appendMessage(role, text, toolCalls) {
   div.innerHTML = `<div class="who">${role === 'user' ? 'You' : 'Jarvis'}</div><div>${escapeHtml(text)}</div>${toolsHtml}`;
   wrap.appendChild(div);
   wrap.scrollTop = wrap.scrollHeight;
+  if (role === 'jarvis' && window.setAvatarState) window.setAvatarState('speaking');
 }
 function appendError(text) {
   clearProgress();
@@ -639,6 +700,7 @@ function appendError(text) {
   div.innerHTML = `<div class="who">Jarvis</div><div>${escapeHtml(text)}</div>`;
   wrap.appendChild(div);
   wrap.scrollTop = wrap.scrollHeight;
+  if (window.setAvatarState) window.setAvatarState('idle');
 }
 function showProgress(text) {
   clearProgress();
@@ -661,6 +723,7 @@ async function sendChat() {
   appendMessage('user', message);
   chatHistory.push({ role: 'user', text: message });
   showProgress('Thinking...');
+  if (window.setAvatarState) window.setAvatarState('thinking');
   $('send-btn').disabled = true;
   try {
     const r = await api('/ui/api/chat', { method: 'POST', body: JSON.stringify({ message, history: chatHistory.slice(-20) }) });
@@ -841,24 +904,104 @@ $('refresh-intel-btn').addEventListener('click', loadIntelligence);
 
 /* ── Agents ────────────────────────────────────────────────────────── */
 let agentsCache = [];
+const BUSINESS_LABELS = {
+  buildpro: 'BuildPro', careerrocket: 'CareerRocket Pro', ddf: 'Daily Deal Finders', general: 'System / Cross-Business',
+};
+
+function timeAgo(ts) {
+  if (!ts) return null;
+  const mins = Math.round((Date.now() / 1000 - ts) / 60);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.round(mins / 60)}h ago`;
+}
+
+function agentWhat(agent, runningTask, latestTask) {
+  if (runningTask) return escapeHtml(runningTask.description);
+  if (agent.last_error) return `<span style="color:var(--bad)">error: ${escapeHtml(agent.last_error)}</span>`;
+  if (latestTask) {
+    const ago = timeAgo(latestTask.updated_ts);
+    return `Last: ${escapeHtml(latestTask.description)}${ago ? ' · ' + ago : ''}`;
+  }
+  if (agent.last_run_ts) return `Last ran ${timeAgo(agent.last_run_ts)}`;
+  return 'No activity yet';
+}
+
+function orgAgentNode(agent, runningTask, latestTask) {
+  return `<li><div class="org-node agent">
+    <div class="org-badges">
+      <span class="badge ${agent.permission_level}">${agent.permission_level}</span>
+      <span class="badge ${agent.status === 'running' ? 'running' : (agent.status === 'error' ? 'bad' : 'idle')}">${agent.status}</span>
+    </div>
+    <div class="org-name">${escapeHtml(agent.name)}</div>
+    <div class="org-what">${agentWhat(agent, runningTask, latestTask)}</div>
+  </div></li>`;
+}
+
 async function loadAgents() {
-  const list = $('agents-list');
+  const liveEl = $('live-now-list');
+  const treeEl = $('org-tree');
   const select = $('task-agent');
   try {
-    const r = await api('/ui/api/agents');
-    agentsCache = r.agents || [];
-    list.innerHTML = agentsCache.map(a => `
-      <div class="row">
+    const [agentsRes, tasksRes] = await Promise.all([api('/ui/api/agents'), api('/ui/api/tasks')]);
+    agentsCache = agentsRes.agents || [];
+    const tasks = tasksRes.tasks || [];
+
+    // Newest task per agent overall, and the one actually RUNNING right now
+    // (if any) — tasks arrive newest-first from the backend already.
+    const latestByAgent = {}, runningByAgent = {};
+    for (const t of tasks) {
+      if (!latestByAgent[t.agent_id]) latestByAgent[t.agent_id] = t;
+      if (t.status === 'running' && !runningByAgent[t.agent_id]) runningByAgent[t.agent_id] = t;
+    }
+
+    // ── Live Now ──────────────────────────────────────────────────────
+    const runningAgents = agentsCache.filter(a => runningByAgent[a.id] || a.status === 'running');
+    liveEl.innerHTML = runningAgents.length ? runningAgents.map(a => {
+      const task = runningByAgent[a.id];
+      const startedTs = task ? task.updated_ts : null;
+      return `<div class="row">
         <div class="main">
-          <div class="title">${escapeHtml(a.name)} <span class="badge ${a.permission_level}">${a.permission_level}</span> <span class="badge ${a.status === 'running' ? 'running' : 'idle'}">${a.status}</span></div>
-          <div class="detail">${escapeHtml(a.description)}${a.last_error ? ' · <span style="color:var(--bad)">error: ' + escapeHtml(a.last_error) + '</span>' : ''}</div>
+          <div class="title"><span class="live-dot"></span>${escapeHtml(a.name)}</div>
+          <div class="detail">${task ? escapeHtml(task.description) : 'Running'} · <span class="live-elapsed" data-started="${startedTs || ''}">running</span></div>
         </div>
-      </div>`).join('') || '<div class="empty">No agents registered.</div>';
+      </div>`;
+    }).join('') : '<div class="empty">Nothing running right now.</div>';
+
+    // ── Org chart: Lee (owner) → business → agents ──────────────────────
+    const byBusiness = {};
+    for (const a of agentsCache) (byBusiness[a.business || 'general'] ??= []).push(a);
+    const businessKeys = Object.keys(byBusiness).sort();
+    treeEl.innerHTML = agentsCache.length ? `
+      <ul><li>
+        <div class="org-node owner">Lee</div>
+        <ul>${businessKeys.map(biz => `
+          <li>
+            <div class="org-node business">${escapeHtml(BUSINESS_LABELS[biz] || biz)}</div>
+            <ul>${byBusiness[biz].map(a => orgAgentNode(a, runningByAgent[a.id], latestByAgent[a.id])).join('')}</ul>
+          </li>`).join('')}
+        </ul>
+      </li></ul>
+    ` : '<div class="empty">No agents registered.</div>';
+
     select.innerHTML = agentsCache.map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
   } catch (e) {
-    list.innerHTML = `<div class="empty" style="color:var(--bad)">Failed to load agents: ${escapeHtml(e.message)}</div>`;
+    treeEl.innerHTML = `<div class="empty" style="color:var(--bad)">Failed to load agents: ${escapeHtml(e.message)}</div>`;
+    liveEl.innerHTML = '';
   }
 }
+
+// Ticks independently of the network poll below so "Live Now" elapsed
+// times feel live even between the 10s refreshes.
+setInterval(() => {
+  document.querySelectorAll('.live-elapsed').forEach(el => {
+    const started = parseFloat(el.dataset.started);
+    if (!started) return;
+    const secs = Math.max(0, Math.round(Date.now() / 1000 - started));
+    el.textContent = secs < 60 ? `running ${secs}s` : `running ${Math.floor(secs / 60)}m ${secs % 60}s`;
+  });
+}, 1000);
+setInterval(() => { if ($('page-agents').classList.contains('active')) loadAgents(); }, 10000);
 
 $('assign-task-btn').addEventListener('click', async () => {
   const agent_id = $('task-agent').value;
@@ -1064,6 +1207,95 @@ pollHealth();
 setInterval(pollHealth, 15000);
 setInterval(() => { if ($('shell').classList.contains('active')) { loadTasksAndApprovals(); loadHomePriorities(); } }, 30000);
 checkSession();
+</script>
+
+<script type="module">
+/* ── avatar widget ─────────────────────────────────────────────────────
+   Same rigged face model /3d uses (Face Cap by Bannaflak, bundled with
+   three.js's own examples — see dashboard/static/3d/app.js for the
+   original integration and why it needs GLTFLoader+KTX2Loader+meshopt).
+   This is a standalone, minimal instance: no orbit controls, no nucleus
+   navigation, just a small always-visible face reacting to the actual
+   Command-tab chat lifecycle via window.setAvatarState() below — there's
+   no live voice session on this page (POST /ui/api/chat is
+   request/response, not streaming), so "state" here means idle while
+   nothing's happening, thinking while a reply is in flight, and speaking
+   briefly once the reply lands — not real-time voice state. */
+import * as THREE from "three";
+import { GLTFLoader } from "/3d/assets/vendor/GLTFLoader.js";
+import { KTX2Loader } from "/3d/assets/vendor/KTX2Loader.js";
+import { MeshoptDecoder } from "/3d/assets/libs/meshopt_decoder.module.js";
+
+const STATE_FACE_TIMESCALE = { idle: 0.05, thinking: 0.22, speaking: 1.0 };
+let faceMixer = null, faceClipAction = null, currentState = "idle";
+let speakingTimeout = null;
+
+// Defined synchronously so callers never have to wait on the model load.
+window.setAvatarState = function setAvatarState(state, opts = {}) {
+  currentState = STATE_FACE_TIMESCALE[state] !== undefined ? state : "idle";
+  const label = document.getElementById("avatar-state-label");
+  if (label) label.textContent = currentState;
+  if (faceClipAction) faceClipAction.timeScale = STATE_FACE_TIMESCALE[currentState];
+  clearTimeout(speakingTimeout);
+  if (currentState === "speaking") {
+    // No end-of-speech event to key off (this isn't TTS) — settle back to
+    // idle a few seconds after a reply lands, roughly how long it'd take
+    // to read a short reply.
+    speakingTimeout = setTimeout(() => window.setAvatarState("idle"), opts.holdMs || 4000);
+  }
+};
+
+const canvas = document.getElementById("avatar-canvas");
+if (canvas) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(108, 108, false);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.05, 50);
+  scene.add(new THREE.AmbientLight(0x445566, 1.4));
+  const key = new THREE.PointLight(0x9fe6ff, 2.6, 20);
+  key.position.set(2, 3, 3);
+  scene.add(key);
+
+  const ktx2Loader = new KTX2Loader().setTranscoderPath("/3d/assets/libs/basis/").detectSupport(renderer);
+  new GLTFLoader().setKTX2Loader(ktx2Loader).setMeshoptDecoder(MeshoptDecoder).load(
+    "/3d/assets/models/facecap.glb",
+    (gltf) => {
+      const faceGroup = gltf.scene;
+      scene.add(faceGroup);
+
+      // Auto-frame the camera from the model's actual computed bounding
+      // box instead of hand-picking a distance — robust to this model's
+      // own scale/pivot convention without needing to reverse-engineer it.
+      const box = new THREE.Box3().setFromObject(faceGroup);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3()).length();
+      camera.position.set(center.x, center.y, center.z + Math.max(size, 0.001) * 0.62);
+      camera.lookAt(center);
+      camera.updateProjectionMatrix();
+
+      const head = faceGroup.getObjectByName("mesh_2");
+      if (head?.morphTargetDictionary && gltf.animations[0]) {
+        faceMixer = new THREE.AnimationMixer(head);
+        faceClipAction = faceMixer.clipAction(gltf.animations[0]);
+        faceClipAction.setLoop(THREE.LoopRepeat, Infinity);
+        faceClipAction.timeScale = STATE_FACE_TIMESCALE[currentState];
+        faceClipAction.play();
+      }
+    },
+    undefined,
+    (err) => console.warn("[UI avatar] model failed to load:", err)
+  );
+
+  const clock = new THREE.Clock();
+  (function animate() {
+    requestAnimationFrame(animate);
+    if (faceMixer) faceMixer.update(clock.getDelta());
+    else clock.getDelta(); // keep the clock consistent even before the model's loaded
+    renderer.render(scene, camera);
+  })();
+}
 </script>
 </body>
 </html>

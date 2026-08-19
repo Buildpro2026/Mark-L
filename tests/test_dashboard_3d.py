@@ -43,6 +43,65 @@ def test_three_d_assets_are_served_including_vendored_threejs():
     assert orbit_controls.status_code == 200
 
 
+def test_three_d_nuclei_use_a_spherical_layout_not_a_flat_ring():
+    # Lee asked for the command center to be "more spherical and modern" —
+    # the old ringPositions() put every root nucleus on one flat plane
+    # (y=0 or 0.35). Confirms the actual replacement (sphereDirections,
+    # golden-angle distribution) is what's shipped, plus the orbit/glow
+    # machinery that makes it feel alive rather than static.
+    server = DashboardServer()
+    client = TestClient(server.app, headers=_AUTH_HEADERS)
+    app_js = client.get("/3d/assets/app.js").text
+
+    assert "ringPositions" not in app_js
+    assert "sphereDirections" in app_js
+    assert "GOLDEN_ANGLE" in app_js
+    assert "updateOrbits" in app_js
+    assert "makeGlowSprite" in app_js
+    # Root and child nuclei both use the spherical helper, not just one of them.
+    assert app_js.count("sphereDirections(") >= 3
+
+
+def test_three_d_face_avatar_assets_are_served():
+    # The face-avatar pipeline (app.js loads a rigged glTF head with
+    # morph-target visemes in place of the plain orb sphere) pulls in
+    # GLTFLoader + KTX2Loader + their transitive deps (meshopt, Basis
+    # transcoder) plus the model itself. All of it is static-served from
+    # dashboard/static/3d/ the same way three.module.js already was —
+    # this guards against the exact nested-assets-folder path bug found
+    # while wiring this up (files existed on disk but 404'd because the
+    # mount root and the on-disk path didn't agree).
+    server = DashboardServer()
+    client = TestClient(server.app, headers=_AUTH_HEADERS)
+
+    for path, expected_content_type_prefix in [
+        ("/3d/assets/vendor/GLTFLoader.js", "text/javascript"),
+        ("/3d/assets/vendor/KTX2Loader.js", "text/javascript"),
+        ("/3d/assets/utils/BufferGeometryUtils.js", "text/javascript"),
+        ("/3d/assets/utils/WorkerPool.js", "text/javascript"),
+        ("/3d/assets/libs/meshopt_decoder.module.js", "text/javascript"),
+        ("/3d/assets/libs/ktx-parse.module.js", "text/javascript"),
+        ("/3d/assets/libs/zstddec.module.js", "text/javascript"),
+        ("/3d/assets/libs/basis/basis_transcoder.js", "text/javascript"),
+    ]:
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["content-type"].startswith(expected_content_type_prefix), path
+
+    # GLTFLoader/browsers don't care about the Content-Type header for binary
+    # payloads (fetched as ArrayBuffer), and Python's mimetypes guess for
+    # .wasm/.glb depends on the OS's registered MIME types — not worth
+    # pinning here. Just confirm they're actually served, not 404s.
+    for path in ("/3d/assets/libs/basis/basis_transcoder.wasm", "/3d/assets/models/facecap.glb"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert len(response.content) > 1000, path
+
+    app_js = client.get("/3d/assets/app.js").text
+    assert "/3d/assets/vendor/GLTFLoader.js" in app_js
+    assert "/3d/assets/models/facecap.glb" in app_js
+
+
 def test_three_d_overview_endpoint_returns_module_data():
     server = DashboardServer()
     client = TestClient(server.app, headers=_AUTH_HEADERS)

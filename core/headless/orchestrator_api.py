@@ -66,6 +66,17 @@ def create_task(body: CreateTaskRequest):
     return task.to_public_dict()
 
 
+@router.get("/tasks")
+def list_tasks(agent_id: str | None = None, limit: int = 200):
+    """Every task the orchestrator knows about, newest first — the org
+    chart's "what are they working on" view needs the real task
+    descriptions, not just the coarse running/idle status get_agent_status
+    already exposes."""
+    tasks = orchestrator.list_tasks(agent_id=agent_id)
+    tasks.sort(key=lambda t: t.updated_ts, reverse=True)
+    return {"tasks": [t.to_public_dict() for t in tasks[:limit]]}
+
+
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str):
     task = orchestrator.get_task(task_id)

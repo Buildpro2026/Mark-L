@@ -12,6 +12,9 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "/3d/assets/vendor/OrbitControls.js";
+import { GLTFLoader } from "/3d/assets/vendor/GLTFLoader.js";
+import { KTX2Loader } from "/3d/assets/vendor/KTX2Loader.js";
+import { MeshoptDecoder } from "/3d/assets/libs/meshopt_decoder.module.js";
 
 // ── Auth — bearer token from the same session the /login page issues ────
 // index.html already redirects to /login before this module loads if no
@@ -64,6 +67,19 @@ const STATE_PULSE_SPEED = {
   idle: 0.6, listening: 1.2, thinking: 2.4, speaking: 2.0, interrupted: 6.0,
 };
 
+// How fast the avatar's baked facial-performance clip plays per state.
+// There's no live audio stream reaching this browser page today (voice
+// audio plays server-side/on the desktop app, not here), so this is not
+// true phoneme lip-sync — it's a real captured facial performance (Face
+// Cap by Bannaflak, bundled with three.js's own examples) played back at
+// a state-appropriate rate: nearly frozen at idle, a slow simmer while
+// listening/thinking, full natural motion while speaking. Wiring actual
+// audio-driven visemes would require streaming TTS/Gemini audio to this
+// page, which nothing currently does.
+const STATE_FACE_TIMESCALE = {
+  idle: 0.05, listening: 0.15, thinking: 0.22, speaking: 1.0, interrupted: 0.05,
+};
+
 const NUCLEUS_COLORS = {
   buildpro: 0x00d4ff, ddf: 0x5cffc4, careerrocket: 0xffb85c,
   email: 0x8fb8ff, calendar: 0xff8fd1, files: 0xb98bff,
@@ -73,10 +89,13 @@ const NUCLEUS_COLORS = {
 
 // ── Three.js setup ──────────────────────────────────────────────────────
 let renderer, scene, camera, controls, clock;
-let orbMesh, orbLight, starField;
+let orbMesh, orbLight, orbGlow, starField;
+let faceGroup = null, faceMixer = null, faceClipAction = null;
+let lastMixerElapsed = 0;
 const rootGroup = new THREE.Group();
 const childGroup = new THREE.Group();
-const lineGroup = new THREE.Group();
+const lineGroup = new THREE.Group();      // root nuclei's orbit connectors — geometry updated in place each frame, never cleared by navigation
+const childLineGroup = new THREE.Group(); // rebuilt every showChildrenFor() call, same lifecycle as childGroup
 
 function initThree() {
   try {
@@ -109,13 +128,65 @@ function initThree() {
   key.position.set(10, 12, 8);
   scene.add(key);
 
-  scene.add(rootGroup, childGroup, lineGroup);
+  scene.add(rootGroup, childGroup, lineGroup, childLineGroup);
 
   createStarfield();
   createOrb();
+  createFaceAvatar();
   window.addEventListener("resize", onResize);
   clock = new THREE.Clock();
   return true;
+}
+
+// Loads the human face avatar in place of (visually — the orb sphere stays
+// as the state-color light/click anchor, see setOrbState/onPointerMove) the
+// plain sphere. Requires KTX2 (Basis Universal) textures + meshopt-compressed
+// geometry, both vendored under /3d/assets/libs/ — see dashboard/static/3d/
+// vendor + libs for what was pulled in and why.
+function createFaceAvatar() {
+  const ktx2Loader = new KTX2Loader()
+    .setTranscoderPath("/3d/assets/libs/basis/")
+    .detectSupport(renderer);
+
+  const loader = new GLTFLoader()
+    .setKTX2Loader(ktx2Loader)
+    .setMeshoptDecoder(MeshoptDecoder);
+
+  loader.load(
+    "/3d/assets/models/facecap.glb",
+    (gltf) => {
+      // gltf.scene is the root "Empty" node, which carries the x10 scale
+      // that (per the model's own node transforms) brings the head to
+      // roughly a 1.9-unit span — a close match for the sphere it's
+      // replacing (ORB_RADIUS 1.1, i.e. ~2.2 unit diameter). Computed from
+      // the glTF's own accessor bounds + node transforms, not eyeballed.
+      faceGroup = gltf.scene;
+      faceGroup.position.set(0, 0.34, 0); // recenters the head's bounding box on the origin
+      faceGroup.userData = { kind: "core", id: "jarvis", name: "Jarvis" };
+      scene.add(faceGroup);
+
+      const head = faceGroup.getObjectByName("mesh_2"); // GLTFLoader's default name for node index 2, the morph-target head mesh
+      if (head?.morphTargetDictionary) {
+        faceMixer = new THREE.AnimationMixer(head);
+        faceClipAction = faceMixer.clipAction(gltf.animations[0]); // the baked facial-performance clip
+        faceClipAction.setLoop(THREE.LoopRepeat, Infinity);
+        faceClipAction.play();
+      }
+
+      // The orb sphere stays in the scene as the state-color glow/anchor
+      // behind the face (and keeps every bit of existing click/label/pulse
+      // logic working untouched) — just made translucent so it reads as an
+      // aura instead of hiding the face.
+      orbMesh.material.transparent = true;
+      orbMesh.material.opacity = 0.28; // scale is handled every frame in animate() once faceGroup is set
+    },
+    undefined,
+    (err) => {
+      // No fallback needed beyond "leave the plain orb sphere as-is" —
+      // it was already fully functional before this avatar existed.
+      console.warn("[3D] Avatar model failed to load, staying on the orb sphere:", err);
+    }
+  );
 }
 
 function createStarfield() {
@@ -148,6 +219,9 @@ function createOrb() {
   orbMesh.userData = { kind: "core", id: "jarvis", name: "Jarvis" };
   scene.add(orbMesh);
 
+  orbGlow = makeGlowSprite(STATE_COLORS.idle, ORB_RADIUS * 5);
+  scene.add(orbGlow);
+
   orbLight = new THREE.PointLight(STATE_COLORS.idle, 3.2, 14);
   orbLight.position.set(0, 0, 0);
   scene.add(orbLight);
@@ -179,13 +253,80 @@ function makeLabelSprite(text, color = "#dff6ff", opts = {}) {
   return sprite;
 }
 
-function ringPositions(count, radius, centerY = 0) {
+// Evenly-spaced points on a sphere (golden-angle/Fibonacci-sphere method) —
+// replaces the old flat ring so nuclei genuinely surround the orb in 3D
+// instead of sitting on one flat plane. Returns unit-length direction
+// vectors (not yet scaled by radius) so callers can animate radius/rotation
+// independently — see updateOrbits().
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+function sphereDirections(count) {
+  if (count <= 0) return [];
+  if (count === 1) return [new THREE.Vector3(0, 0, 1)];
   const out = [];
   for (let i = 0; i < count; i++) {
-    const angle = (i / count) * Math.PI * 2;
-    out.push(new THREE.Vector3(Math.cos(angle) * radius, centerY + (i % 2 === 0 ? 0 : 0.35), Math.sin(angle) * radius));
+    const y = 1 - (i / (count - 1)) * 2;          // 1 → -1
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = GOLDEN_ANGLE * i;
+    out.push(new THREE.Vector3(Math.cos(theta) * r, y, Math.sin(theta) * r));
   }
   return out;
+}
+
+// Cheap fake-bloom: an additive-blended radial-gradient sprite behind a
+// mesh reads as a glow without a real postprocessing bloom pass (which
+// would need EffectComposer/RenderPass/UnrealBloomPass vendored — more
+// weight than this scene needs for the effect it buys).
+let _glowTexture = null;
+function _getGlowTexture() {
+  // Shared neutral-white gradient, one canvas for every glow sprite — each
+  // instance tints it via material.color instead of baking a color into
+  // its own texture, so a sprite's glow color can change later (see
+  // setOrbState's orbGlow recolor) without regenerating canvas data.
+  if (_glowTexture) return _glowTexture;
+  const size = 128;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = size; canvasEl.height = size;
+  const ctx = canvasEl.getContext("2d");
+  const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, "rgba(255,255,255,0.8)");
+  grad.addColorStop(0.4, "rgba(255,255,255,0.33)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  _glowTexture = new THREE.CanvasTexture(canvasEl);
+  return _glowTexture;
+}
+function makeGlowSprite(hexColor, scale = 1) {
+  const mat = new THREE.SpriteMaterial({
+    map: _getGlowTexture(), color: hexColor, transparent: true,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(scale, scale, 1);
+  return sprite;
+}
+
+// Root nuclei slowly revolve around the orb like electrons around a
+// nucleus — each mesh keeps its fixed sphereDirections() slot but that
+// slot itself rotates around Y over time. Recomputing the (small) set of
+// connector lines each frame is cheap at this node count (< 10).
+const ORBIT_SPEED_ROOT = 0.045; // radians/sec — a full revolution takes ~2.3 minutes
+function updateOrbits(t) {
+  for (const mesh of rootGroup.children) {
+    const orbit = mesh.userData.orbit;
+    if (!orbit) continue;
+    const angle = t * ORBIT_SPEED_ROOT + orbit.phase;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    // Rotate the base direction around the Y axis.
+    const x = orbit.dir.x * cos - orbit.dir.z * sin;
+    const z = orbit.dir.x * sin + orbit.dir.z * cos;
+    mesh.position.set(x * orbit.radius, orbit.dir.y * orbit.radius, z * orbit.radius);
+    if (orbit.line) {
+      orbit.line.geometry.dispose();
+      orbit.line.geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), mesh.position]);
+    }
+    if (orbit.glow) orbit.glow.position.copy(mesh.position);
+  }
 }
 
 // ── Nucleus meshes ──────────────────────────────────────────────────────
@@ -214,47 +355,65 @@ function clearGroup(group) {
   }
 }
 
-function drawConnection(fromPos, toPos, color = 0x2f5b6e) {
+function drawConnection(fromPos, toPos, color = 0x2f5b6e, group = lineGroup) {
   const geo = new THREE.BufferGeometry().setFromPoints([fromPos, toPos]);
   const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 });
-  lineGroup.add(new THREE.Line(geo, mat));
+  const line = new THREE.Line(geo, mat);
+  group.add(line);
+  return line;
 }
 
 let hierarchyRoot = null;
-const rootMeshes = new Map();     // id -> mesh (root ring)
+const rootMeshes = new Map();     // id -> mesh (root sphere)
 let childMeshes = new Map();      // id -> mesh (currently expanded children)
 let infoObjects = [];             // spawned data objects (files/deals/etc.)
 
 function buildRootRing(hierarchy) {
   hierarchyRoot = hierarchy;
   clearGroup(rootGroup);
+  clearGroup(lineGroup);
   rootMeshes.clear();
   const children = (hierarchy?.children || []).filter(c => c.id !== "jarvis");
-  const positions = ringPositions(children.length, ROOT_RADIUS);
+  const dirs = sphereDirections(children.length);
   children.forEach((node, i) => {
     const color = NUCLEUS_COLORS[node.id] ?? 0x8fa8b8;
     const mesh = makeNucleusMesh(node, NODE_RADIUS, color);
-    mesh.position.copy(positions[i]);
+    const dir = dirs[i];
+    mesh.position.set(dir.x * ROOT_RADIUS, dir.y * ROOT_RADIUS, dir.z * ROOT_RADIUS);
+    const glow = makeGlowSprite(color, NODE_RADIUS * 4.2);
+    glow.position.copy(mesh.position);
+    // Child of rootGroup (not scene directly) so clearGroup(rootGroup)
+    // above disposes it correctly if buildRootRing ever runs again.
+    rootGroup.add(glow);
+    const line = drawConnection(new THREE.Vector3(0, 0, 0), mesh.position, color);
+    // Spread starting phases around the circle so the shell doesn't look
+    // like it's rotating as one rigid disc from every camera angle.
+    mesh.userData.orbit = { dir, radius: ROOT_RADIUS, phase: (i / Math.max(1, children.length)) * Math.PI * 2, line, glow };
     rootGroup.add(mesh);
     rootMeshes.set(node.id, mesh);
-    drawConnection(new THREE.Vector3(0, 0, 0), positions[i], color);
   });
 }
 
 function showChildrenFor(nucleusId, parentPos, children) {
   clearGroup(childGroup);
+  clearGroup(childLineGroup);
   childMeshes = new Map();
   clearInfoObjects();
   if (!children || !children.length) return;
-  const positions = ringPositions(children.length, CHILD_RADIUS, parentPos.y + 1.6).map(p => p.clone().add(new THREE.Vector3(parentPos.x, 0, parentPos.z)));
+  const dirs = sphereDirections(children.length);
   const parentColor = NUCLEUS_COLORS[nucleusId] ?? 0x8fa8b8;
   children.forEach((child, i) => {
     const placeholder = !!child.placeholder;
     const mesh = makeNucleusMesh(child, CHILD_NODE_RADIUS, placeholder ? 0x5a6a78 : parentColor, placeholder);
-    mesh.position.copy(positions[i]);
+    const dir = dirs[i];
+    mesh.position.set(
+      parentPos.x + dir.x * CHILD_RADIUS,
+      parentPos.y + dir.y * CHILD_RADIUS,
+      parentPos.z + dir.z * CHILD_RADIUS
+    );
     childGroup.add(mesh);
     childMeshes.set(child.id, mesh);
-    drawConnection(parentPos, positions[i], parentColor);
+    drawConnection(parentPos, mesh.position, parentColor, childLineGroup);
   });
 }
 
@@ -272,13 +431,15 @@ function clearInfoObjects() {
 // no live data (email/calendar not configured) rather than fabricating any.
 function spawnInfoObjects(kind, items, centerPos) {
   if (!items || !items.length) return;
-  const positions = ringPositions(items.length, CHILD_RADIUS + 1.4, centerPos.y + 1.6)
-    .map(p => p.clone().add(new THREE.Vector3(centerPos.x, 0, centerPos.z)));
-  items.slice(0, 8).forEach((item, i) => {
+  const capped = items.slice(0, 8);
+  const dirs = sphereDirections(capped.length);
+  const radius = CHILD_RADIUS + 1.4;
+  capped.forEach((item, i) => {
     const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
     const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x224455, emissiveIntensity: 0.4, roughness: 0.5 });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.copy(positions[i]);
+    const dir = dirs[i];
+    mesh.position.set(centerPos.x + dir.x * radius, centerPos.y + 1.6 + dir.y * radius, centerPos.z + dir.z * radius);
     mesh.userData = { kind: "info", label: item };
     const label = makeLabelSprite(String(item).slice(0, 20), "#bfe9ff", { scale: 0.6, fontSize: 24 });
     label.position.set(0, 0.45, 0);
@@ -325,9 +486,11 @@ function setOrbState(state, opts = {}) {
   orbMesh.material.color.setHex(color);
   orbMesh.material.emissive.setHex(color);
   orbLight.color.setHex(color);
+  orbGlow.material.color.setHex(color);
   stateDotEl.style.background = `#${color.toString(16).padStart(6, "0")}`;
   stateDotEl.style.boxShadow = `0 0 10px #${color.toString(16).padStart(6, "0")}`;
   stateLabelEl.textContent = currentOrbState;
+  if (faceClipAction) faceClipAction.timeScale = STATE_FACE_TIMESCALE[currentOrbState] ?? 0.05;
 }
 
 // ── Navigation state (mirrors dashboard/server.py's apply_navigation) ──
@@ -669,12 +832,18 @@ function onResize() {
 function animate() {
   requestAnimationFrame(animate);
   const t = clock.getElapsedTime();
+  const dt = Math.max(0, t - lastMixerElapsed);
+  lastMixerElapsed = t;
+
   const speed = STATE_PULSE_SPEED[currentOrbState] ?? 1;
   const pulse = 1 + Math.sin(t * speed) * 0.06;
-  orbMesh.scale.setScalar(pulse);
+  const orbBaseScale = faceGroup ? 1.6 : 1; // aura is bigger than the original solid orb once the face is behind it
+  orbMesh.scale.setScalar(pulse * orbBaseScale);
   orbMesh.rotation.y += 0.0025 * (currentOrbState === "thinking" ? 3 : 1);
   orbLight.intensity = 2.6 + Math.sin(t * speed) * 0.8;
   starField.rotation.y += 0.00006;
+  if (faceMixer) faceMixer.update(dt);
+  updateOrbits(t);
   updateTween();
   controls.update();
   renderer.render(scene, camera);

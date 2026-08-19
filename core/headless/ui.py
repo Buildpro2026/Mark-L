@@ -425,6 +425,11 @@ def ui_create_task(body: CreateTaskRequest):
     return orchestrator_api.create_task(body)
 
 
+@api.get("/tasks")
+def ui_list_tasks(agent_id: str | None = None, limit: int = 200):
+    return orchestrator_api.list_tasks(agent_id=agent_id, limit=limit)
+
+
 @api.get("/tasks/{task_id}")
 def ui_get_task(task_id: str):
     return orchestrator_api.get_task(task_id)
