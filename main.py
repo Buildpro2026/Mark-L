@@ -404,17 +404,23 @@ def _classify_connection_error(err: BaseException, prev_backoff: int = 3) -> tup
     Pure/stateless (no self, no I/O) so it's unit-testable without a running
     event loop or live session — see tests/test_connection_error_reporting.py.
 
-    Three cases, in priority order:
+    Four cases, in priority order:
       1. Audio device errors (raised by _resolve_input_device /
          _resolve_output_device when no usable mic/speaker is found) get a
          specific, actionable message. Previously these fell through to the
          generic branch below with NO ui.write_log call at all — the app
          just retried silently forever with zero visible explanation.
-      2. Network/timeout errors get an escalating backoff (capped at 60s)
+      2. Gemini quota/rate-limit errors (429 / RESOURCE_EXHAUSTED) get an
+         escalating backoff capped at 120s and a message that names the
+         cause. Previously these fell through to the generic branch, which
+         retried every flat 3s against an endpoint that was already
+         rejecting requests — hammering a rate-limited API is the wrong
+         response and only prolongs the outage.
+      3. Network/timeout errors get an escalating backoff (capped at 60s)
          and a plain-English message. Previously this message was
          hardcoded in Turkish regardless of the user's configured language
          — a leftover dev-local string.
-      3. Anything else gets a generic but still visible message instead of
+      4. Anything else gets a generic but still visible message instead of
          silence.
     """
     err_str = str(err)
@@ -425,6 +431,19 @@ def _classify_connection_error(err: BaseException, prev_backoff: int = 3) -> tup
             f"ERR: Audio device problem — {err_str} "
             "Check Windows Sound settings and reconnect your microphone/speakers.",
             3,
+        )
+
+    is_quota_err = (
+        "429" in err_str
+        or "resource_exhausted" in lower
+        or "quota" in lower
+    )
+    if is_quota_err:
+        backoff = min(max(prev_backoff * 2, 30), 120)
+        return (
+            f"ERR: Gemini API quota/rate limit hit (429) — backing off {backoff}s "
+            "before retrying. Check your Gemini API plan/quota if this keeps happening.",
+            backoff,
         )
 
     is_net_err = any(k in err_str for k in (

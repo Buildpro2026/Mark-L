@@ -76,6 +76,31 @@ def test_generic_unrecognized_error_still_produces_a_visible_message():
     assert backoff == 3   # resets, matching prior non-escalating behavior
 
 
+def test_quota_error_gets_escalating_backoff_and_actionable_message():
+    # 429/RESOURCE_EXHAUSTED errors must not hammer the API on a flat 3s
+    # retry — that only prolongs a rate-limit outage. See main.py's
+    # _classify_connection_error docstring, case 2.
+    main = _main()
+    err = Exception("429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'status': 'RESOURCE_EXHAUSTED'}}")
+    msg, backoff = main._classify_connection_error(err, prev_backoff=3)
+    assert msg.startswith("ERR:")
+    assert "quota" in msg.lower() or "429" in msg
+    assert backoff == 30
+
+    _, backoff2 = main._classify_connection_error(err, prev_backoff=30)
+    assert backoff2 == 60
+    _, backoff3 = main._classify_connection_error(err, prev_backoff=120)
+    assert backoff3 == 120   # stays capped
+
+
+def test_quota_error_takes_priority_over_network_substring_match():
+    main = _main()
+    err = Exception("429 RESOURCE_EXHAUSTED: OSError-like transport wrapper")
+    msg, _ = main._classify_connection_error(err, prev_backoff=3)
+    assert not msg.startswith("NET:")
+    assert "quota" in msg.lower() or "429" in msg
+
+
 def test_microphone_check_takes_priority_over_network_substring_match():
     # A mic failure message could in principle also contain a substring the
     # network-error check matches on (e.g. "OSError" appears literally in
