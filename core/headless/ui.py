@@ -68,7 +68,7 @@ STATIC_DIR = Path(__file__).parent / "ui_static"
 INDEX_FILE = STATIC_DIR / "index.html"
 
 COOKIE_NAME = "jarvis_ui_session"
-SESSION_TTL_SECONDS = 12 * 3600
+SESSION_TTL_SECONDS = 365 * 24 * 3600   # Lee's call 2026-08-19: was 12h, too short for a tool left open across a workday
 
 # Best-effort, process-lifetime-only revocation set for logout (see
 # "Session persistence" above) — {token: expiry}. Not a session store:
