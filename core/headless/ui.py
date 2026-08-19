@@ -324,15 +324,17 @@ async def run_chat_turn(
     JARVIS phone/3D command-center UI's typed-command relay) so both
     surfaces run the exact same conversational path.
 
-    If Gemini fails on its very first call this turn (before any tool has
-    executed) and ANTHROPIC_TOKEN is configured, falls back to Claude for
-    the whole turn — found live 2026-08-19: the deployed Gemini key sits
-    on the free tier's 20-requests/day cap, and every chat request fails
-    with a 429 once it's hit. Deliberately does NOT fall back once a tool
-    has already run this turn (Gemini succeeded, then failed on a later
-    round): re-running the turn on a different provider could re-execute
-    an already-completed consequential action (a HubSpot write, a sent
-    email) a second time, which is worse than just surfacing the error.
+    If Gemini fails and ANTHROPIC_TOKEN is configured, falls back to
+    Claude for the rest of the turn — found live 2026-08-19: the deployed
+    Gemini key sits on the free tier's 20-requests/day cap, and once it's
+    hit, a turn's FIRST call often still succeeds (invokes a tool) while
+    the SECOND call (to read that tool's result back) is what 429s — so
+    gating the fallback on "only before any tool ran" turned out to never
+    actually trigger in practice. Instead, any tool call(s) already
+    completed this turn are handed to Claude as plain completed-context
+    (see _run_chat_turn_anthropic) rather than re-executed — Claude
+    continues reasoning from what already happened instead of the turn
+    restarting blind, so a HubSpot write or a sent email never runs twice.
 
     Raises HTTPException on a missing GEMINI_API_KEY, an empty message, or
     a request failure neither provider could serve — callers that don't
@@ -370,7 +372,7 @@ async def run_chat_turn(
                 None, lambda: client.models.generate_content(model=CHAT_MODEL, contents=contents, config=gen_config)
             )
         except Exception as e:
-            if round_num == 0 and not tool_calls_made and config.ANTHROPIC_TOKEN:
+            if config.ANTHROPIC_TOKEN:
                 return await _run_chat_turn_anthropic(message, history, on_status, executor, tool_calls_made)
             # Gemini's own API returns a clean, user-safe error message
             # (e.g. "high demand" 503s) — safe to surface directly, this
@@ -421,8 +423,11 @@ async def _run_chat_turn_anthropic(
     """Claude fallback loop, structurally parallel to run_chat_turn's Gemini
     loop but in Anthropic's content-block shape (tool_use/tool_result
     instead of function_calls/FunctionResponse). Shares the caller's
-    ToolExecutor and tool_calls_made list — see run_chat_turn's docstring
-    for why this only ever runs before any tool has executed yet."""
+    ToolExecutor and tool_calls_made list. If Gemini already completed one
+    or more tool calls earlier this turn before failing, those are handed
+    to Claude as plain completed-context (a "here's what already happened,
+    don't repeat it" note) rather than re-executed — see run_chat_turn's
+    docstring for why."""
     from core.headless.tool_executor import UnknownToolError
     from core.headless.anthropic_client import get_client, gemini_tools_to_anthropic, CHAT_MODEL as ANTHROPIC_CHAT_MODEL
 
@@ -436,6 +441,16 @@ async def _run_chat_turn_anthropic(
         if text:
             messages.append({"role": role, "content": text})
     messages.append({"role": "user", "content": message})
+    if tool_calls_made:
+        already_done = "\n".join(f"- {c['name']}({c['args']}) -> {c['result']}" for c in tool_calls_made)
+        messages.append({
+            "role": "user",
+            "content": (
+                "[System note: before switching to you, the following tool call(s) "
+                "already ran successfully and must NOT be repeated — use these real "
+                f"results to answer:]\n{already_done}"
+            ),
+        })
 
     loop = asyncio.get_event_loop()
 

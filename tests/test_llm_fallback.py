@@ -143,23 +143,53 @@ def test_does_not_fall_back_when_anthropic_not_configured(monkeypatch):
     assert "Gemini request failed" in exc_info.value.detail
 
 
-def test_does_not_fall_back_once_a_gemini_tool_already_executed(monkeypatch):
+def test_falls_back_after_a_gemini_tool_already_ran_without_repeating_it(monkeypatch):
+    # Found live 2026-08-19: once Gemini's daily quota is exhausted, a
+    # turn's first call often still succeeds (invokes a tool) and it's the
+    # SECOND call that 429s — gating the fallback on "only before any tool
+    # ran" turned out to never actually trigger in practice. This confirms
+    # the real behavior: fall back, but tell Claude what already ran
+    # instead of letting it call system_status a second time.
     monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", "fake-anthropic-key-not-real")
     fc = _FakeFunctionCall("system_status", {})
     fake_gemini = _FakeGeminiThenSucceeds(_FakeGeminiResponse(function_calls=[fc]))
     monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: fake_gemini)
 
     from core.headless.tool_executor import ToolExecutor
-    monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
+    execute_calls = []
 
-    # If this silently fell back to Anthropic, this fake would blow up
-    # (get_client not patched) or double-run the tool — either way proves
-    # the guard failed. Deliberately NOT patching anthropic_client here.
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(headless_ui.run_chat_turn("check system status", []))
-    assert exc_info.value.status_code == 502
-    assert "Gemini request failed" in exc_info.value.detail
+    async def _fake_execute(self, name, args):
+        execute_calls.append(name)
+        return "ok"
+    monkeypatch.setattr(ToolExecutor, "execute", _fake_execute)
+
+    captured_messages = {}
+
+    class _CapturingAnthropicClient:
+        class _Messages:
+            def __init__(self, outer):
+                self._outer = outer
+
+            def create(self, model, max_tokens, system, tools, messages):
+                captured_messages["value"] = messages
+                return _FakeAnthropicResponse([_FakeTextBlock("Handled by Claude, no repeat call.")])
+
+        @property
+        def messages(self):
+            return self._Messages(self)
+
+    monkeypatch.setattr("core.headless.anthropic_client.get_client", lambda *a, **k: _CapturingAnthropicClient())
+
+    reply, calls = asyncio.run(headless_ui.run_chat_turn("check system status", []))
+
+    assert reply == "Handled by Claude, no repeat call."
+    # system_status ran exactly once (by Gemini) — Claude was never asked
+    # to call it again, it was just told the result.
+    assert execute_calls == ["system_status"]
+    assert calls == [{"name": "system_status", "args": {}, "result": "ok"}]
+    already_done_note = captured_messages["value"][-1]["content"]
+    assert "system_status" in already_done_note
+    assert "must NOT be repeated" in already_done_note
 
 
 def test_anthropic_fallback_executes_tool_calls_via_the_same_executor(monkeypatch):
