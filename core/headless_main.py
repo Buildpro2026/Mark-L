@@ -14,6 +14,8 @@ every authenticated route returns 503, not open access.
 from __future__ import annotations
 
 import logging
+import platform
+import sys
 
 import uvicorn
 
@@ -24,6 +26,18 @@ from core.startup import print_startup_banner
 
 
 def main() -> None:
+    # See main.py's matching fix for why: the same emoji-laden debug prints
+    # this codebase uses throughout actions/* raise UnicodeEncodeError under
+    # Windows' default console code page. Render's Linux runtime is already
+    # UTF-8, so this only matters when running headless_main.py locally on
+    # Windows (e.g. for testing before deploy) — harmless no-op otherwise.
+    if platform.system() == "Windows":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

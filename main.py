@@ -1,6 +1,25 @@
 import platform as _platform
 import subprocess as _subprocess
 
+# ── Force UTF-8 stdout/stderr on Windows ──────────────────────────────────────
+# Reproduced live during the Phase 2 migration audit: actions/web_search.py's
+# own debug print (an emoji in "[WebSearch] 🔍 mode=...") raised
+# UnicodeEncodeError under Windows' default console code page (cp1252), which
+# can't encode most emoji — and this codebase's print-based debug logging
+# uses emoji throughout main.py and actions/*, not just that one line. A
+# crash in a print() statement takes down whatever tool call triggered it
+# just as surely as a crash in real logic. Reconfiguring here, once, at
+# startup, protects every print/log call in the process instead of stripping
+# emoji from each one individually. No-op (and harmless) on non-Windows,
+# where the default encoding is already UTF-8.
+if _platform.system() == "Windows":
+    import sys as _sys
+    try:
+        _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────
 # This patches Popen itself, so no per-file flag is needed anywhere.
 if _platform.system() == "Windows":
