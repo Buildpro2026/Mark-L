@@ -370,12 +370,24 @@ class _AudioSink:
     devices work fine in callback mode (confirmed live), hence this buffer.
     """
 
-    def __init__(self):
+    def __init__(self, gain: float = 1.0):
         self._buf = bytearray()
         self._lock = threading.Lock()
+        self._gain = max(0.0, min(gain, 2.0))   # 0 = mute, 2.0 = +6dB ceiling before clipping gets harsh
+
+    def set_gain(self, gain: float) -> None:
+        with self._lock:
+            self._gain = max(0.0, min(gain, 2.0))
 
     def write(self, data: bytes) -> None:
         with self._lock:
+            gain = self._gain
+            if gain != 1.0:
+                import numpy as np
+                samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                samples *= gain
+                np.clip(samples, -32768, 32767, out=samples)
+                data = samples.astype(np.int16).tobytes()
             self._buf.extend(data)
 
     def read(self, n: int) -> bytes:
@@ -491,6 +503,65 @@ def _post_session_state(had_error: bool) -> str:
     "waiting to retry after a failure" from "nothing is wrong." Pure
     function so it's unit-testable without driving the full run() loop."""
     return "RECONNECTING" if had_error else "SLEEPING"
+
+
+def _fetch_startup_priorities_sync() -> dict | None:
+    """Runs on a worker thread (mirrors _fetch_news_sync's pattern) —
+    real risk/priority/opportunity counts for the adaptive startup
+    briefing (Phase 4 Part 14). Returns None on any failure rather than
+    raising; the caller's own bounded asyncio.wait_for is what actually
+    protects startup latency, this is just the honest "couldn't get it"
+    signal for when the wait itself times out or something below it
+    breaks."""
+    try:
+        from actions.priorities_engine import get_todays_priorities, ALERT_SENSITIVITY_MIN_SEVERITY
+        from actions import opportunity_engine as opp_engine
+        from memory.preferences_manager import get_preference
+        sensitivity = get_preference("alert_sensitivity", "normal")
+        min_severity = ALERT_SENSITIVITY_MIN_SEVERITY.get(sensitivity, 2)
+        priorities = get_todays_priorities(limit=20, min_severity=min_severity)
+        risks = [p for p in priorities if p["kind"] == "risk"]
+        opportunities = opp_engine.rank_opportunities(limit=20)
+        return {
+            "priority_count": len(priorities),
+            "risk_count": len(risks),
+            "top_risk": risks[0]["title"] if risks else None,
+            "opportunity_count": len(opportunities),
+        }
+    except Exception:
+        return None
+
+
+def _startup_situation_clause(summary: dict | None) -> str:
+    """Turns the real counts above into an instruction for Gemini to
+    speak from — never a fixed script, never fabricated urgency. Three
+    cases: a real high-priority issue (at least one risk), a quiet day
+    (priorities exist but nothing urgent), or nothing notable (including
+    the case the data genuinely couldn't be fetched in time, which is
+    reported as "no notable items" rather than invented). Pure function,
+    unit-testable without a live session."""
+    if not summary:
+        return " Let the user know it's a normal day with nothing especially notable to report."
+    risk_count = summary.get("risk_count", 0)
+    priority_count = summary.get("priority_count", 0)
+    opp_count = summary.get("opportunity_count", 0)
+
+    if risk_count > 0:
+        top = summary.get("top_risk")
+        detail = f" — specifically: {top}" if top else ""
+        return (
+            f" Tell the user directly that you need their attention: there {'is' if risk_count == 1 else 'are'} "
+            f"{risk_count} high-priority issue{'s' if risk_count != 1 else ''} that need looking at{detail}."
+        )
+    if priority_count > 0 or opp_count > 0:
+        parts = []
+        if priority_count:
+            parts.append(f"{priority_count} item{'s' if priority_count != 1 else ''} worth reviewing")
+        if opp_count:
+            parts.append(f"{opp_count} opportunit{'ies' if opp_count != 1 else 'y'} on the board")
+        return f" Mention nothing is urgent, but {' and '.join(parts)}."
+    return " Let the user know it's a quiet day with nothing urgent."
+
 
 from core.headless.tool_registry import TOOL_DECLARATIONS, SESSION_ONLY_TOOLS  # noqa: F401 (SESSION_ONLY_TOOLS used in _execute_tool)
 
@@ -1132,7 +1203,12 @@ class JarvisLive:
         actually feeds PortAudio, on its own thread."""
         device_index, device_name = _resolve_output_device()
         print(f"[JARVIS] 🔊 Selected output device: [{device_index}] {device_name}")
-        sink = _AudioSink()
+        try:
+            from memory.preferences_manager import get_preference
+            gain = float(get_preference("voice_volume", 1.0))
+        except Exception:
+            gain = 1.0
+        sink = _AudioSink(gain=gain)
 
         def _callback(outdata, frames, time_info, status):
             outdata[:] = sink.read(len(outdata))
@@ -1245,6 +1321,16 @@ class JarvisLive:
         # Start fetching news immediately — runs in parallel while phase 1 plays
         loop = asyncio.get_event_loop()
         news_future = loop.run_in_executor(None, _fetch_news_sync, "top world news today")
+        # Same pattern for the real priority/risk picture — a strict, short
+        # timeout below means a slow integration (e.g. Buffer's live check
+        # inside risk detection) can never hold up the "instant" greeting;
+        # it just falls back to a neutral framing instead.
+        priorities_future = loop.run_in_executor(None, _fetch_startup_priorities_sync)
+
+        try:
+            priority_summary = await asyncio.wait_for(asyncio.wrap_future(priorities_future), timeout=1.8)
+        except Exception:
+            priority_summary = None
 
         await asyncio.sleep(0.3)
         if not self.session:
@@ -1267,8 +1353,10 @@ class JarvisLive:
                 f" Also briefly and naturally mention that {_when}: {last['summary']}"
             )
 
+        situation_clause = _startup_situation_clause(priority_summary)
+
         p1 = (
-            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's news now.{session_clause} "
+            f"Greet the user warmly and mention it is {time_str}.{situation_clause}{session_clause} "
             f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
         )
 

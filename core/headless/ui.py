@@ -197,6 +197,60 @@ def ui_brief():
     return status_api.brief()
 
 
+class SettingsUpdateRequest(BaseModel):
+    updates: dict
+
+
+@api.get("/priorities")
+def ui_priorities(limit: int = 8):
+    return status_api.priorities(limit=limit)
+
+
+@api.get("/active-agents")
+def ui_active_agents():
+    return status_api.active_agents()
+
+
+@api.get("/opportunities")
+def ui_opportunities(limit: int = 8):
+    return status_api.opportunities(limit=limit)
+
+
+@api.get("/calendar-snapshot")
+def ui_calendar_snapshot(max_results: int = 10):
+    return status_api.calendar_snapshot(max_results=max_results)
+
+
+@api.get("/buildpro-overview")
+def ui_buildpro_overview():
+    return status_api.buildpro_overview()
+
+
+@api.get("/ddf-overview")
+def ui_ddf_overview():
+    return status_api.ddf_overview()
+
+
+@api.get("/intelligence")
+def ui_intelligence():
+    return status_api.intelligence()
+
+
+@api.get("/settings")
+def ui_get_settings():
+    from core.headless import personalization
+    return personalization.get_all_settings()
+
+
+@api.post("/settings")
+def ui_update_settings(body: SettingsUpdateRequest):
+    from core.headless import personalization
+    try:
+        return personalization.update_settings(body.updates)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []   # [{"role": "user"|"model", "text": "..."}] — kept client-side, not persisted

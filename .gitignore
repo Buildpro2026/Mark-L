@@ -2,6 +2,9 @@ config/api_keys.json
 config/strategic_objective.json
 config/google/
 config/certs/
+config/preferences.json
+config/preferences.corrupt-*.json
+config/preferences.tmp-*
 
 # Personal data, not source code — see docs/MEMORY_SCHEMA.md
 memory/long_term.json
