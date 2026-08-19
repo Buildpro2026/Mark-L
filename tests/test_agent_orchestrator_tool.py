@@ -87,6 +87,14 @@ def test_assign_to_execute_agent_requires_approval_and_never_autoruns():
         assert calls == []
     finally:
         del ao._agents["test_execute_via_tool"]
+        # assign_task() above created a real PENDING_APPROVAL task on the
+        # shared singleton with no way to capture its id from the spoken
+        # response alone — left uncleaned, it silently polluted any later
+        # test in the same session that reads orchestrator.list_tasks()
+        # expecting a clean slate (found via test_priorities_engine.py's
+        # "nothing flagged" test failing only when the full suite ran).
+        for tid in [t.id for t in ao._tasks.values() if t.agent_id == "test_execute_via_tool"]:
+            del ao._tasks[tid]
 
 
 def test_assign_reports_honest_failure_not_task_completed(gmail_not_authorized):

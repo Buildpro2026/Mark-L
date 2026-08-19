@@ -123,6 +123,13 @@ def test_agent_with_no_handler_reports_a_clear_result_instead_of_crashing():
 
 def test_singleton_buildpro_email_monitor_end_to_end(gmail_not_authorized):
     task = ao.orchestrator.assign_task("buildpro_email_monitor", "Check inbox now")
-    assert task.status == ao.TaskStatus.DONE
-    results = ao.orchestrator.get_results("buildpro_email_monitor")
-    assert results and results[-1]["configured"] is False
+    try:
+        assert task.status == ao.TaskStatus.DONE
+        results = ao.orchestrator.get_results("buildpro_email_monitor")
+        assert results and results[-1]["configured"] is False
+    finally:
+        # This runs against the real module-level singleton on purpose
+        # (that's the point of the test) — clean up the task it created
+        # so it doesn't linger in orchestrator._tasks for the rest of the
+        # test session.
+        del ao.orchestrator._tasks[task.id]
