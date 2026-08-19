@@ -24,8 +24,11 @@ from actions import google_auth
 from actions import gmail_integration
 from actions import calendar_integration
 from actions import audit_log
+from actions import daily_deal_finders as ddf
+from actions import buffer_integration
 
 _OVERNIGHT_WINDOW_SECS = 18 * 3600
+_STALE_APPROVAL_SECS = 24 * 3600
 
 
 def _gmail_snapshot(max_results: int = 5) -> dict[str, Any]:
@@ -64,6 +67,66 @@ def _pending_approvals() -> list[dict[str, Any]]:
     ]
 
 
+def _operational_risks() -> list[dict[str, Any]]:
+    """Real, derived risk signals — never fabricated. Every entry here
+    traces back to something already recorded: a stalled approval, an
+    agent's own last_error, a recently failed task, or an integration a
+    revenue-relevant part of the business actually depends on reporting
+    broken. If nothing here fires, the list is honestly empty, not padded
+    with a generic 'no risks identified' filler."""
+    risks: list[dict[str, Any]] = []
+    now = time.time()
+
+    for task in agent_orchestrator.list_tasks():
+        if task.status.value == "pending_approval" and (now - task.updated_ts) > _STALE_APPROVAL_SECS:
+            age_hours = round((now - task.updated_ts) / 3600, 1)
+            risks.append({
+                "kind": "stalled_approval",
+                "detail": f"Task for agent '{task.agent_id}' has been waiting {age_hours}h for approval.",
+                "task_id": task.id,
+            })
+        if task.status.value == "failed" and (now - task.updated_ts) < _OVERNIGHT_WINDOW_SECS:
+            risks.append({
+                "kind": "recent_task_failure",
+                "detail": f"Agent '{task.agent_id}' task failed: {task.error}",
+                "task_id": task.id,
+            })
+
+    for agent in agent_orchestrator.list_agents():
+        if agent.last_error:
+            risks.append({
+                "kind": "agent_error_state",
+                "detail": f"{agent.name} is in an error state: {agent.last_error}",
+                "agent_id": agent.id,
+            })
+
+    # Live check, but bounded (buffer_integration._graphql has a 20s
+    # timeout) — only Buffer actually offers a way to tell "configured but
+    # broken" apart from "not configured" without a network call producing
+    # a false negative; Twilio's own get_status() is presence-only by
+    # design (see check_connection() for the live variant, deliberately
+    # not called here on every brief generation).
+    buffer_status = buffer_integration.verify_buffer()
+    if buffer_status.get("configured") and buffer_status.get("status", "").startswith("UNAVAILABLE"):
+        risks.append({
+            "kind": "integration_broken",
+            "detail": f"Buffer (social publishing) is configured but not working: {buffer_status.get('status')}.",
+        })
+
+    return risks
+
+
+def _ddf_snapshot(limit: int = 5) -> dict[str, Any]:
+    """Real DDF state for the morning brief: today's deliberate high-ticket
+    picks and what's currently trending. Empty lists are honest when the
+    catalog has nothing yet, not filled in with placeholder products."""
+    return {
+        "high_ticket_picks": ddf.select_daily_high_ticket_picks(limit=2),
+        "trending": ddf.get_trending_deals(limit=limit),
+        "todays_deals_count": len(ddf.get_todays_deals(limit=200)),
+    }
+
+
 def _completed_overnight(window_secs: float = _OVERNIGHT_WINDOW_SECS) -> dict[str, Any]:
     cutoff = time.time() - window_secs
     agent_tasks = [
@@ -87,6 +150,9 @@ def generate_brief() -> dict[str, Any]:
     pending_approvals = _pending_approvals()
     overnight = _completed_overnight()
 
+    risks = _operational_risks()
+    ddf_snapshot = _ddf_snapshot()
+
     recommended_actions = list(buildpro["recommended_actions"])
     if pending_approvals:
         recommended_actions.append(
@@ -96,6 +162,14 @@ def generate_brief() -> dict[str, Any]:
         recommended_actions.append(
             "No business opportunities logged yet — consider running the opportunity_scout "
             "or business_research_agent agents."
+        )
+    if risks:
+        recommended_actions.append(
+            f"{len(risks)} operational risk(s) flagged below — worth a look before they compound."
+        )
+    if ddf_snapshot["high_ticket_picks"]:
+        recommended_actions.append(
+            f"DDF has {len(ddf_snapshot['high_ticket_picks'])} high-ticket pick(s) ready for today."
         )
 
     return {
@@ -109,5 +183,7 @@ def generate_brief() -> dict[str, Any]:
         "calendar": _calendar_snapshot(),
         "pending_approvals": pending_approvals,
         "completed_overnight_work": overnight,
+        "risks": risks,
+        "daily_deal_finders": ddf_snapshot,
         "recommended_actions": recommended_actions,
     }

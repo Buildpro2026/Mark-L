@@ -38,6 +38,7 @@ BUSINESSES = {"buildpro", "careerrocket", "ddf", "general"}
 CATEGORIES = {
     "research", "competitors", "market_observations", "experiments",
     "decisions", "outcomes", "revenue", "lessons_learned", "recommendations",
+    "risks",
 }
 
 
