@@ -8,7 +8,14 @@ def test_buildpro_email_monitor_is_a_registered_builtin_agent():
     agent = orch.get_agent("buildpro_email_monitor")
     assert agent is not None
     assert agent.name == "BuildPro Email Monitor"
-    assert agent.status == ao.AgentStatus.REGISTERED
+    # Found live 2026-08-19: this Render tier has no persistent disk, so
+    # every deploy wipes agent status back to "nobody's ever started it" —
+    # Lee's direct complaint was that scheduled automation just never
+    # runs. A scheduled builtin agent with no persisted state now defaults
+    # to IDLE (auto-running) instead of REGISTERED (inert until someone
+    # manually re-starts it after every single restart) — see
+    # AgentOrchestrator.__init__'s is_real_workforce comment.
+    assert agent.status == ao.AgentStatus.IDLE
     assert agent.permission_level == ao.PermissionLevel.SUGGEST
     assert agent.nucleus_id == "buildpro"
 
@@ -31,7 +38,10 @@ def test_to_public_dict_never_leaks_the_handler_callable():
 
 def test_start_and_stop_agent_transitions_status():
     orch = ao.AgentOrchestrator()
-    assert orch.get_agent_status("buildpro_email_monitor") == ao.AgentStatus.REGISTERED
+    # Scheduled builtin agents now default to IDLE with no persisted state
+    # (see the comment on the previous test) — start_agent() on an
+    # already-idle agent is still a legitimate no-op transition.
+    assert orch.get_agent_status("buildpro_email_monitor") == ao.AgentStatus.IDLE
 
     orch.start_agent("buildpro_email_monitor")
     assert orch.get_agent_status("buildpro_email_monitor") == ao.AgentStatus.IDLE

@@ -821,6 +821,7 @@ class AgentOrchestrator:
         # AgentOrchestrator instance built from BUILTIN_AGENTS would share the
         # same mutable objects, so start_agent()/run_task() on one instance
         # would silently corrupt status on every other instance too.
+        is_real_workforce = agents is None
         source = agents if agents is not None else BUILTIN_AGENTS
         self._agents: dict[str, AgentDefinition] = {aid: copy.copy(a) for aid, a in source.items()}
 
@@ -833,6 +834,24 @@ class AgentOrchestrator:
         for agent_id, agent in self._agents.items():
             state = persisted.get(agent_id)
             if not state:
+                # No persisted row — either a genuinely fresh install, or
+                # (found live 2026-08-19: the current Render tier has no
+                # persistent disk, so this is actually the common case,
+                # not the rare one) the whole DB just got wiped by a
+                # redeploy. Either way, a scheduled agent sitting at
+                # REGISTERED forever because nobody manually re-started it
+                # after every single deploy is worse than the alternative:
+                # a scheduled agent defaults to running. Only applies to
+                # the real BUILTIN_AGENTS workforce (is_real_workforce) —
+                # a caller building an AgentOrchestrator from an explicit
+                # custom `agents=` dict (every scheduler test does this)
+                # made a deliberate status choice that must not be
+                # silently overridden. And only when there's truly no
+                # persisted status to honor — a real stop_agent() call,
+                # once persistence actually survives restarts (Oracle),
+                # still wins on the next boot.
+                if is_real_workforce and agent.schedule:
+                    agent.status = AgentStatus.IDLE
                 continue
             try:
                 agent.status = AgentStatus(state["status"])
