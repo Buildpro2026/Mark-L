@@ -46,6 +46,7 @@ import hashlib
 import hmac
 import time
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
@@ -220,7 +221,43 @@ def _chat_tool_declarations() -> list[dict]:
     return [t for t in TOOL_DECLARATIONS if t["name"] not in SESSION_ONLY_TOOLS]
 
 
-async def run_chat_turn(message: str, history: list[dict]) -> tuple[str, list[dict]]:
+def _status_label_for_tool(name: str, args: dict) -> str:
+    """Human-readable, present-tense status line for a tool about to run —
+    what a real UI shows instead of leaving the user staring at nothing
+    while a tool call is in flight. Deliberately only describes what's
+    ACTUALLY about to happen (the tool being called), never a fabricated
+    or generic 'working on it' — see the Phase 3 UX requirement this
+    exists for."""
+    labels = {
+        "web_search": "Researching...",
+        "gmail": "Checking email...",
+        "calendar": "Checking your calendar...",
+        "hubspot": "Checking HubSpot...",
+        "airtable": "Checking Airtable...",
+        "social_post": "Checking Buffer...",
+        "communications": "Checking Twilio...",
+        "browser_control": "Working in the browser...",
+        "buildpro_matching": "Checking BuildPro records...",
+        "daily_deal_finders": "Checking Daily Deal Finders...",
+        "agent_orchestrator": "Checking on agents...",
+        "business_intelligence": "Checking business intelligence...",
+        "opportunity_engine": "Checking opportunities...",
+        "strategic_objective": "Checking the revenue objective...",
+        "ceo_decision": "Reviewing the decision log...",
+        "cloud_status": "Checking the cloud instance...",
+        "file_processor": "Processing the file...",
+        "code_helper": "Working on the code...",
+        "dev_agent": "Building the project...",
+        "system_status": "Checking system status...",
+        "save_memory": "Saving that...",
+    }
+    return labels.get(name, "Waiting on external service...")
+
+
+async def run_chat_turn(
+    message: str, history: list[dict],
+    on_status: Callable[[str], Awaitable[None]] | None = None,
+) -> tuple[str, list[dict]]:
     """One conversational turn through Gemini + the shared ToolExecutor —
     the browser equivalent of what Gemini Live's function-calling already
     does for the desktop voice loop (main.py), using the SAME tool
@@ -241,12 +278,12 @@ async def run_chat_turn(message: str, history: list[dict]) -> tuple[str, list[di
     if not message.strip():
         raise HTTPException(status_code=400, detail="Empty message.")
 
-    from google import genai
     from google.genai import types as gtypes
     from core.headless.context import ToolContext
     from core.headless.tool_executor import ToolExecutor, UnknownToolError
+    from core.headless.gemini_client import get_client
 
-    client = genai.Client(api_key=config.GEMINI_API_KEY)
+    client = get_client(config.GEMINI_API_KEY)
     tools = [gtypes.Tool(function_declarations=_chat_tool_declarations())]
     gen_config = gtypes.GenerateContentConfig(system_instruction=_chat_system_prompt(), tools=tools)
 
@@ -279,6 +316,11 @@ async def run_chat_turn(message: str, history: list[dict]) -> tuple[str, list[di
         contents.append(resp.candidates[0].content)
         for fc in resp.function_calls:
             args = dict(fc.args or {})
+            if on_status is not None:
+                try:
+                    await on_status(_status_label_for_tool(fc.name, args))
+                except Exception:
+                    pass   # a broken status sink must never break the actual turn
             try:
                 result = await executor.execute(fc.name, args)
             except UnknownToolError as e:
@@ -290,6 +332,12 @@ async def run_chat_turn(message: str, history: list[dict]) -> tuple[str, list[di
                 role="user",
                 parts=[gtypes.Part(function_response=gtypes.FunctionResponse(name=fc.name, response={"result": result}))],
             ))
+
+        if on_status is not None and resp.function_calls:
+            try:
+                await on_status("Analyzing results...")
+            except Exception:
+                pass
 
     return (
         "I ran several tool calls but didn't reach a final answer — try rephrasing or breaking the request into smaller steps.",
@@ -353,9 +401,18 @@ def ui_list_events(agent_id: str | None = None, limit: int = 50):
     return orchestrator_api.list_events(agent_id=agent_id, limit=limit)
 
 
+@router.get("")
+@router.get("/")
 def serve_index() -> FileResponse:
-    """Root-path handler — app.py wires GET / to this. Returning the SPA
-    at the bare public URL is the whole point: before this, opening
-    https://jarvis-headless-core.onrender.com/ in a browser 404'd because
-    no route existed there at all."""
+    """Serves the SPA shell at GET /ui (and /ui/ — browsers routinely hit
+    both depending on how the link was typed/clicked).
+
+    Phase 3 fix: this function existed, and its own docstring claimed
+    "app.py wires GET / to this," but nothing actually decorated it as a
+    route — /ui returned a bare 404. That's the literal reason this page
+    was "a fallback surface nothing currently links to": the route to
+    reach it didn't exist. GET / itself intentionally stays owned by
+    dashboard/server.py's phone/3D command-center UI (see app.py's mount
+    comment) — this page lives at /ui specifically, not at the bare
+    public URL."""
     return FileResponse(INDEX_FILE, media_type="text/html")

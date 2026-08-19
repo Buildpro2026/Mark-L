@@ -60,6 +60,8 @@
     .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(99,102,241,0.18); border-bottom-left-radius:4px; }
     .msg-u   { align-self:flex-end;   background:var(--surface); border:1px solid var(--border);        border-bottom-right-radius:4px; }
     .msg-sys { align-self:center; font-size:11px; color:var(--muted); padding:2px 0; background:transparent; border:none; letter-spacing:0.3px; }
+    .msg-progress { align-self:flex-start; background:transparent; border:1px dashed var(--border); color:var(--muted); font-style:italic; animation: pop 0.18s ease, pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity:0.65; } 50% { opacity:1; } }
     .lbl { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; margin-bottom:4px; }
     .msg-j .lbl { color:var(--accent); }
     .msg-u .lbl { color:var(--muted); text-align:right; }
@@ -217,6 +219,7 @@
       const m = JSON.parse(e.data);
       if (m.type === 'log')           append(m.speaker, m.text);
       if (m.type === 'status')        setStatus(m.state);
+      if (m.type === 'progress')      showProgress(m.text);
       if (m.type === 'wake')          sys('Wake word detected — connecting…');
       if (m.type === 'sys')           sys(m.text);
       if (m.type === 'file_received') _onFileReceived(m);
@@ -231,6 +234,7 @@
     }
 
     function append(speaker, text) {
+      clearProgress();
       const d = document.createElement('div');
       if (speaker === 'jarvis') {
         d.className = 'msg msg-j';
@@ -243,7 +247,31 @@
       feed.scrollTop = feed.scrollHeight;
     }
 
+    // Real-time "what is JARVIS actually doing right now" — a request
+    // that legitimately takes a while (a tool call, a slow external API)
+    // shows exactly what's in flight instead of an apparently dead
+    // interface. One line, replaced (never stacked) as new tool calls
+    // start, and cleared the moment the real reply or any other message
+    // arrives — this only ever reflects a tool call that's genuinely
+    // running right now, never a fabricated animation.
+    let _progressEl = null;
+
+    function showProgress(text) {
+      clearProgress();
+      const d = document.createElement('div');
+      d.className = 'msg msg-progress';
+      d.innerHTML = `<div class="lbl">Jarvis</div>${esc(text)}`;
+      feed.appendChild(d);
+      feed.scrollTop = feed.scrollHeight;
+      _progressEl = d;
+    }
+
+    function clearProgress() {
+      if (_progressEl) { _progressEl.remove(); _progressEl = null; }
+    }
+
     function sys(text) {
+      clearProgress();
       const d = document.createElement('div');
       d.className = 'msg msg-sys'; d.textContent = text;
       feed.appendChild(d); feed.scrollTop = feed.scrollHeight;

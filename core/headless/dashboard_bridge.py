@@ -36,8 +36,19 @@ async def run(dashboard_server) -> None:
         text = await dashboard_server._command_queue.get()
         if not text:
             continue
+
+        async def _on_status(label: str, _server=dashboard_server) -> None:
+            # Real, present-tense status only — "Checking HubSpot..." goes
+            # out the instant that tool call actually starts, not a fake
+            # progress animation. See run_chat_turn's on_status contract.
+            # "progress", not "status" — main.py's voice loop already
+            # broadcasts {"type": "status", "state": "active"/"sleeping"}
+            # for the orb's connection state; reusing that type with a
+            # different shape would silently break setStatus(m.state).
+            await _server.broadcast({"type": "progress", "text": label})
+
         try:
-            reply, _tool_calls = await run_chat_turn(text, history)
+            reply, _tool_calls = await run_chat_turn(text, history, on_status=_on_status)
         except HTTPException as e:
             reply = f"Error: {e.detail}"
         except Exception as e:
