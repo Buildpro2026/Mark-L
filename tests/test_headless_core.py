@@ -258,6 +258,39 @@ def test_health_endpoint_responds(headless_client):
     assert '"api_token":' not in json.dumps(body)
 
 
+def test_dashboard_import_failure_degrades_instead_of_crashing_whole_app(monkeypatch):
+    # Phase 2 fix: create_app() used to call DashboardServer() with no
+    # try/except, so a broken dashboard/server.py took the entire headless
+    # process down with it — /health, the tools API, and the orchestrator
+    # API included. A dashboard bug should degrade the UI, not the API.
+    import dashboard.server as dashboard_server_module
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated dashboard/server.py failure")
+
+    monkeypatch.setattr(dashboard_server_module, "DashboardServer", _boom)
+
+    from core.headless import config
+    monkeypatch.setattr(config, "API_TOKEN", "test-dashboard-token-not-a-real-secret")
+    from core.headless.app import create_app
+    app = create_app(start_background_worker=False)
+    client = TestClient(app)
+
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["dashboard_ui_available"] is False
+
+    # Core API routes must still work even though the dashboard failed.
+    resp = client.get("/api/tools", headers={"Authorization": "Bearer test-dashboard-token-not-a-real-secret"})
+    assert resp.status_code == 200
+
+    # The mounted-dashboard fallback route responds instead of 500ing.
+    resp = client.get("/")
+    assert resp.status_code == 503
+
+
 def test_authentication_blocks_unauthorized_api_access(headless_client):
     resp = headless_client.get("/api/orchestrator/agents")
     assert resp.status_code == 401
