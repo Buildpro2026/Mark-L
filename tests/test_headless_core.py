@@ -74,6 +74,11 @@ _BLOCK_SCRIPT = textwrap.dedent(r"""
     import core.headless.orchestrator_api
     import core.headless.tools_api
     import core.headless.obsidian
+    import core.headless.ui
+    import core.headless.status_api
+    import core.headless.personalization
+    import actions.voice_manager
+    import actions.priorities_engine
     print("HEADLESS_IMPORT_OK")
 """)
 
