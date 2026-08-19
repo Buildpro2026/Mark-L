@@ -232,3 +232,73 @@ def upsert_company(name: str, properties: dict[str, Any], approved: bool = False
     if result["ok"]:
         result["action"] = "created"
     return result
+
+
+# ── Files (resume attachments) ──────────────────────────────────────────
+# Separate from _request() above because file upload is multipart/form-data,
+# not JSON — reusing _request()'s hardcoded Content-Type: application/json
+# header would corrupt the multipart boundary. Everything else (token
+# lookup, honest NOT_CONFIGURED/ERROR states, never fabricating a result)
+# matches that function's contract.
+
+def upload_file(file_bytes: bytes, filename: str, approved: bool = False) -> dict[str, Any]:
+    """Uploads a file (e.g. a candidate's resume) to HubSpot's file manager.
+    Returns the file's id/url on success — pass that id to
+    attach_file_note() to actually associate it with a contact record.
+    PRIVATE access (not publicly linkable) since a resume is personal data."""
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": "Uploading a file to HubSpot requires explicit approval."}
+    token = get_hubspot_token()
+    if not token:
+        return {"ok": False, "state": "NOT_CONFIGURED", "detail": "HubSpot isn't configured."}
+    try:
+        resp = requests.post(
+            f"{API_BASE}/files/v3/files",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": (filename, file_bytes)},
+            data={
+                "folderPath": "/candidate-resumes",
+                "options": json.dumps({"access": "PRIVATE", "overwrite": False}),
+            },
+            timeout=30,
+        )
+    except Exception as exc:
+        return {"ok": False, "state": "ERROR", "detail": str(exc)}
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("message", resp.text[:300])
+        except Exception:
+            detail = resp.text[:300]
+        return {"ok": False, "state": "ERROR", "status_code": resp.status_code, "detail": detail}
+    data = resp.json()
+    return {"ok": True, "state": "OK", "file_id": data.get("id"), "url": data.get("url")}
+
+
+def attach_file_note(contact_id: str, file_id: str, note_body: str = "Resume received.", approved: bool = False) -> dict[str, Any]:
+    """Creates a Note engagement carrying the uploaded file and associates
+    it with the contact — HubSpot has no direct "attach this file to this
+    contact" call; a note-with-attachment is the standard way a file shows
+    up on a contact's timeline in the UI."""
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": "Attaching a file to a HubSpot contact requires explicit approval."}
+    import time as _time
+    note_result = _request("POST", "/crm/v3/objects/notes", json={
+        "properties": {
+            "hs_note_body": note_body,
+            "hs_timestamp": int(_time.time() * 1000),
+            "hs_attachment_ids": file_id,
+        },
+    })
+    if not note_result["ok"]:
+        return {"ok": False, "state": note_result["state"], "detail": note_result.get("detail")}
+    note_id = note_result["data"].get("id")
+    assoc_result = _request(
+        "PUT", f"/crm/v4/objects/notes/{note_id}/associations/default/contacts/{contact_id}"
+    )
+    if not assoc_result["ok"]:
+        return {
+            "ok": False, "state": assoc_result["state"],
+            "detail": f"Note {note_id} created but couldn't be linked to contact {contact_id}: {assoc_result.get('detail')}",
+            "note_id": note_id,
+        }
+    return {"ok": True, "state": "OK", "note_id": note_id}

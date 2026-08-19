@@ -60,7 +60,7 @@ def list_messages(query: str = "", max_results: int = 10) -> dict[str, Any]:
 
 
 def get_message(message_id: str) -> dict[str, Any]:
-    """Sender/recipient/subject/date/body for one message id."""
+    """Sender/recipient/subject/date/body/attachments for one message id."""
     service = _service()
     msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
     headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
@@ -73,6 +73,7 @@ def get_message(message_id: str) -> dict[str, Any]:
         "date": headers.get("date"),
         "snippet": msg.get("snippet"),
         "body": _extract_body(msg.get("payload", {})),
+        "attachments": _extract_attachments(msg.get("payload", {})),
         "labels": msg.get("labelIds", []),
     }
 
@@ -88,6 +89,56 @@ def _extract_body(payload: dict[str, Any]) -> str:
         if text:
             return text
     return ""
+
+
+def _extract_attachments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Metadata only (filename/mime type/size/attachment id) — walks the
+    same multipart tree _extract_body does. A part counts as an attachment
+    when Gmail gave it both a filename and a body.attachmentId; inline
+    text/html alternative parts have neither and are correctly skipped.
+    The actual bytes are a separate, larger call — see download_attachment()
+    — so listing attachments to decide "is there a resume here" stays
+    cheap even for a big inbox scan."""
+    found: list[dict[str, Any]] = []
+    filename = payload.get("filename")
+    attachment_id = payload.get("body", {}).get("attachmentId")
+    if filename and attachment_id:
+        found.append({
+            "filename": filename,
+            "mime_type": payload.get("mimeType"),
+            "size": payload.get("body", {}).get("size"),
+            "attachment_id": attachment_id,
+        })
+    for part in payload.get("parts") or []:
+        found.extend(_extract_attachments(part))
+    return found
+
+
+# File extensions that are plausibly a resume/CV — used to filter
+# list_attachments() down to what a candidate-intake flow actually cares
+# about, not every inline image/logo a message happens to carry.
+_RESUME_EXTENSIONS = (".pdf", ".doc", ".docx", ".rtf", ".odt")
+
+
+def is_likely_resume(filename: str) -> bool:
+    return filename.lower().endswith(_RESUME_EXTENSIONS)
+
+
+def download_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
+    """Real bytes for one attachment, base64-decoded. Honest ok=False on
+    any auth/API failure, same convention as every other function here —
+    never returns fabricated/placeholder file content."""
+    try:
+        service = _service()
+        att = service.users().messages().attachments().get(
+            userId="me", messageId=message_id, id=attachment_id
+        ).execute()
+        data = base64.urlsafe_b64decode(att.get("data", ""))
+        return {"ok": True, "data": data, "size": att.get("size")}
+    except RuntimeError as exc:
+        return {"ok": False, "state": "NOT_AUTHORIZED", "detail": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "state": "ERROR", "detail": str(exc)}
 
 
 # Simple, transparent keyword rules — not ML, not inferred intent. Checked

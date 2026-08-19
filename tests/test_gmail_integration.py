@@ -18,11 +18,12 @@ class FakeGmailService:
     """Minimal chain-mock for service.users().messages()/.drafts()...() -
     only implements the exact call shapes gmail_integration.py uses."""
 
-    def __init__(self, messages_list=None, message_by_id=None, draft_result=None, send_result=None):
+    def __init__(self, messages_list=None, message_by_id=None, draft_result=None, send_result=None, attachment_by_id=None):
         self._messages_list = messages_list or {"messages": []}
         self._message_by_id = message_by_id or {}
         self._draft_result = draft_result
         self._send_result = send_result
+        self._attachment_by_id = attachment_by_id or {}
         self.sent_bodies = []
         self.drafted_bodies = []
 
@@ -35,10 +36,18 @@ class FakeGmailService:
     def drafts(self):
         return self
 
+    def attachments(self):
+        return self
+
     def list(self, userId, q=None, maxResults=None):
         return _Execute(self._messages_list)
 
-    def get(self, userId, id, format=None):
+    def get(self, userId, id, format=None, messageId=None):
+        # Same method name serves both messages().get(id=...) and
+        # attachments().get(messageId=..., id=...) — the real googleapiclient
+        # dispatches by which chain called it, dict lookup does the same here.
+        if messageId is not None:
+            return _Execute(self._attachment_by_id[(messageId, id)])
         return _Execute(self._message_by_id[id])
 
     def send(self, userId, body):
@@ -95,6 +104,78 @@ def test_extract_body_walks_multipart_payload():
 def test_extract_body_returns_empty_string_when_no_plain_part():
     payload = {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(b"<p>hi</p>").decode()}}
     assert gmail._extract_body(payload) == ""
+
+
+# ── attachments ────────────────────────────────────────────────────────────
+
+def _payload_with_resume_attachment():
+    return {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"See attached.").decode()}},
+            {
+                "mimeType": "application/pdf", "filename": "resume.pdf",
+                "body": {"attachmentId": "att-1", "size": 12345},
+            },
+            # Inline image with no filename/attachmentId — must be skipped.
+            {"mimeType": "image/png", "body": {"data": "abc"}},
+        ],
+    }
+
+
+def test_extract_attachments_finds_the_named_attachment_and_skips_inline_parts():
+    found = gmail._extract_attachments(_payload_with_resume_attachment())
+    assert len(found) == 1
+    assert found[0]["filename"] == "resume.pdf"
+    assert found[0]["attachment_id"] == "att-1"
+    assert found[0]["mime_type"] == "application/pdf"
+    assert found[0]["size"] == 12345
+
+
+def test_extract_attachments_returns_empty_list_with_no_attachments():
+    payload = {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"hi").decode()}}
+    assert gmail._extract_attachments(payload) == []
+
+
+def test_get_message_includes_attachments(monkeypatch):
+    raw = _raw_message_payload()
+    raw["payload"] = _payload_with_resume_attachment()
+    fake = FakeGmailService(message_by_id={"m1": raw})
+    monkeypatch.setattr(gmail, "_service", lambda: fake)
+
+    msg = gmail.get_message("m1")
+    assert len(msg["attachments"]) == 1
+    assert msg["attachments"][0]["filename"] == "resume.pdf"
+
+
+def test_is_likely_resume():
+    assert gmail.is_likely_resume("resume.pdf") is True
+    assert gmail.is_likely_resume("CV.DOCX") is True
+    assert gmail.is_likely_resume("cover_letter.doc") is True
+    assert gmail.is_likely_resume("headshot.png") is False
+    assert gmail.is_likely_resume("signature.jpg") is False
+
+
+def test_download_attachment_decodes_real_bytes(monkeypatch):
+    raw_bytes = b"%PDF-1.4 fake pdf content"
+    fake = FakeGmailService(attachment_by_id={
+        ("m1", "att-1"): {"data": base64.urlsafe_b64encode(raw_bytes).decode(), "size": len(raw_bytes)},
+    })
+    monkeypatch.setattr(gmail, "_service", lambda: fake)
+
+    r = gmail.download_attachment("m1", "att-1")
+    assert r["ok"] is True
+    assert r["data"] == raw_bytes
+
+
+def test_download_attachment_not_authorized_reports_honestly(monkeypatch):
+    def raise_not_authorized():
+        raise RuntimeError("no token")
+    monkeypatch.setattr(gmail, "_service", raise_not_authorized)
+
+    r = gmail.download_attachment("m1", "att-1")
+    assert r["ok"] is False
+    assert r["state"] == "NOT_AUTHORIZED"
 
 
 def test_list_messages_returns_full_message_details(monkeypatch):

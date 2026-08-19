@@ -1,7 +1,7 @@
 from actions import agent_orchestrator as ao
 
 EXPECTED_AGENT_IDS = {
-    "buildpro_email_monitor", "business_research_agent", "opportunity_scout",
+    "buildpro_email_monitor", "buildpro_candidate_intake", "business_research_agent", "opportunity_scout",
     "buildpro_prospecting_agent", "buildpro_candidate_agent",
     "careerrocket_research_agent", "daily_deal_finder_agent",
     "social_content_agent", "market_intelligence_agent",
@@ -151,3 +151,57 @@ def test_executive_analyst_synthesizes_objective_and_opportunities(monkeypatch, 
     task = orch.assign_task("jarvis_executive_analyst", "executive brief")
     assert task.status == ao.TaskStatus.DONE
     assert "Top Quick Idea" in task.result["summary"]
+
+
+def test_candidate_intake_agent_reports_honestly_when_gmail_not_authorized(monkeypatch):
+    import actions.google_auth as google_auth
+    monkeypatch.setattr(google_auth, "get_credential_status", lambda: {"authorized": False})
+
+    orch = ao.AgentOrchestrator()
+    task = orch.assign_task("buildpro_candidate_intake", "check for new candidates")
+    assert task.status == ao.TaskStatus.DONE
+    assert task.result["configured"] is False
+
+
+def test_candidate_intake_agent_processes_only_candidate_reply_messages(monkeypatch):
+    import actions.google_auth as google_auth
+    import actions.gmail_integration as gmail
+    import actions.candidate_intake as intake
+
+    monkeypatch.setattr(google_auth, "get_credential_status", lambda: {"authorized": True})
+    messages = [
+        {"id": "m1", "sender": "jane@example.com", "subject": "Application - Electrician"},
+        {"id": "m2", "sender": "vendor@service.com", "subject": "Your invoice is ready"},
+    ]
+    monkeypatch.setattr(gmail, "list_messages", lambda query, max_results: {"ok": True, "messages": messages})
+    monkeypatch.setattr(gmail, "classify_message",
+                         lambda m: "candidate_reply" if m["id"] == "m1" else "notification")
+
+    processed_ids = []
+    monkeypatch.setattr(intake, "process_candidate_email",
+                         lambda msg, auto_send_welcome: (
+                             processed_ids.append(msg["id"]),
+                             {"ok": True, "welcome_email_drafted": True, "resume_attached_to_hubspot": False},
+                         )[1])
+
+    orch = ao.AgentOrchestrator()
+    task = orch.assign_task("buildpro_candidate_intake", "check for new candidates")
+
+    assert task.status == ao.TaskStatus.DONE
+    assert processed_ids == ["m1"]  # the notification email (m2) was never processed
+    assert task.result["configured"] is True
+    assert len(task.result["processed"]) == 1
+
+
+def test_candidate_intake_agent_reports_gmail_scan_failure_honestly(monkeypatch):
+    import actions.google_auth as google_auth
+    import actions.gmail_integration as gmail
+
+    monkeypatch.setattr(google_auth, "get_credential_status", lambda: {"authorized": True})
+    monkeypatch.setattr(gmail, "list_messages",
+                         lambda query, max_results: {"ok": False, "state": "ERROR", "detail": "network down"})
+
+    orch = ao.AgentOrchestrator()
+    task = orch.assign_task("buildpro_candidate_intake", "check for new candidates")
+    assert task.status == ao.TaskStatus.DONE
+    assert task.result["error"] == "network down"

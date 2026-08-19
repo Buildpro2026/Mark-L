@@ -95,6 +95,15 @@ API_TOKEN = _env("JARVIS_API_TOKEN")
 HEADLESS_HOST = _env("JARVIS_HEADLESS_HOST", "0.0.0.0")
 HEADLESS_PORT = int(_env("JARVIS_HEADLESS_PORT") or _env("PORT", "8787"))
 
+# This service's own public URL — used to build links this process sends
+# out (e.g. the candidate agreement-signing link in a welcome email, see
+# actions/candidate_intake.py). Same default actions/cloud_bridge.py's
+# JARVIS_CLOUD_URL falls back to; a distinct env var name since that one
+# is read from the desktop side of the bridge, not from inside this
+# process, and the two happening to share a value today isn't guaranteed
+# to stay true (e.g. once the Oracle migration lands).
+PUBLIC_BASE_URL = _env("JARVIS_PUBLIC_URL", "https://jarvis-headless-core.onrender.com").rstrip("/")
+
 
 # ── Obsidian vault (Step 9) ──────────────────────────────────────────────
 # No hardcoded personal path — unset means "no vault configured," and

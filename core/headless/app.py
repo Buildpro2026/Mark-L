@@ -20,6 +20,7 @@ import time
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from core.headless import agreement_routes
 from core.headless import config
 from core.headless import dashboard_bridge
 from core.headless import orchestrator_api
@@ -110,6 +111,10 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     app.include_router(status_api.router, prefix="/api")
     app.include_router(ui.router)
     app.include_router(ui.api)
+    # Public/unauthenticated on purpose — a candidate reaches this from a
+    # plain link in an email, no JARVIS login of their own. See that
+    # module's docstring.
+    app.include_router(agreement_routes.router)
 
     # Everything else — "/", "/login", "/3d", "/ws", "/api/command", etc.
     # — falls through to dashboard/server.py's own FastAPI app, mounted

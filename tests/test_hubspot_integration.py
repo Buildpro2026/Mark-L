@@ -412,3 +412,106 @@ def test_search_companies_not_configured(monkeypatch, tmp_path):
     r = hs.search_companies("Acme")
     assert r["ok"] is False
     assert r["state"] == "NOT_CONFIGURED"
+
+
+# ── Files (resume attachments) ───────────────────────────────────────────
+
+def test_upload_file_refuses_without_approval(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    calls = []
+    monkeypatch.setattr(hs.requests, "post", lambda *a, **k: calls.append(1))
+
+    r = hs.upload_file(b"%PDF-fake-bytes", "resume.pdf")
+    assert r["ok"] is False
+    assert r["state"] == "NOT_APPROVED"
+    assert calls == []
+
+
+def test_upload_file_not_configured(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="")
+    r = hs.upload_file(b"%PDF-fake-bytes", "resume.pdf", approved=True)
+    assert r["ok"] is False
+    assert r["state"] == "NOT_CONFIGURED"
+
+
+def test_upload_file_success_sends_multipart_and_returns_file_id(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["files"] = files
+        captured["data"] = data
+        return _Resp(200, {"id": "file-123", "url": "https://files.hubspot.com/file-123"})
+
+    monkeypatch.setattr(hs.requests, "post", fake_post)
+
+    r = hs.upload_file(b"%PDF-fake-bytes", "resume.pdf", approved=True)
+    assert r["ok"] is True
+    assert r["file_id"] == "file-123"
+    assert r["url"] == "https://files.hubspot.com/file-123"
+    # Real multipart upload, not a JSON body — and never the Content-Type:
+    # application/json header _request() uses everywhere else, which would
+    # corrupt the multipart boundary.
+    assert captured["files"]["file"] == ("resume.pdf", b"%PDF-fake-bytes")
+    assert "Content-Type" not in captured["headers"]
+    assert captured["headers"]["Authorization"] == "Bearer pat-na2-secret"
+
+
+def test_upload_file_reports_api_error_honestly(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    monkeypatch.setattr(hs.requests, "post", lambda *a, **k: _Resp(413, {"message": "File too large"}))
+
+    r = hs.upload_file(b"x" * 10, "resume.pdf", approved=True)
+    assert r["ok"] is False
+    assert r["state"] == "ERROR"
+    assert r["status_code"] == 413
+
+
+def test_attach_file_note_refuses_without_approval(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    calls = []
+    monkeypatch.setattr(hs.requests, "request", lambda *a, **k: calls.append(1))
+
+    r = hs.attach_file_note("contact-1", "file-123")
+    assert r["ok"] is False
+    assert r["state"] == "NOT_APPROVED"
+    assert calls == []
+
+
+def test_attach_file_note_creates_note_and_associates_with_contact(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    calls = []
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        calls.append((method, url, kwargs.get("json")))
+        if method == "POST" and url.endswith("/crm/v3/objects/notes"):
+            return _Resp(200, {"id": "note-1"})
+        return _Resp(200, {})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+
+    r = hs.attach_file_note("contact-1", "file-123", note_body="Resume received.", approved=True)
+    assert r["ok"] is True
+    assert r["note_id"] == "note-1"
+    note_call = next(c for c in calls if c[1].endswith("/crm/v3/objects/notes"))
+    assert note_call[2]["properties"]["hs_attachment_ids"] == "file-123"
+    assoc_call = next(c for c in calls if "associations" in c[1])
+    assert "note-1" in assoc_call[1] and "contact-1" in assoc_call[1]
+
+
+def test_attach_file_note_reports_association_failure_but_keeps_note_id(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        if method == "POST" and url.endswith("/crm/v3/objects/notes"):
+            return _Resp(200, {"id": "note-1"})
+        return _Resp(404, {"message": "contact not found"})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+
+    r = hs.attach_file_note("bad-contact", "file-123", approved=True)
+    assert r["ok"] is False
+    assert r["note_id"] == "note-1"
+    assert "note-1" in r["detail"]

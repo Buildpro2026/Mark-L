@@ -330,6 +330,52 @@ def _buildpro_email_monitor_handler(task: "AgentTask") -> dict:
     return {"summary": result["summary"], "configured": True, "relevant": result["relevant"]}
 
 
+def _buildpro_candidate_intake_handler(task: "AgentTask") -> dict:
+    """The resume-intake automation chain (2026-08-19, Lee's spec): scans
+    for candidate_reply messages the same way buildpro_email_monitor does,
+    but for each one runs the full intake chain (actions/candidate_intake.py)
+    — HubSpot contact created/updated, resume attached when present, and a
+    welcome-packet email drafted (never auto-sent from here; see that
+    module's docstring for why — the representation agreement text is
+    still a placeholder pending Lee's real legal language). SUGGEST-level:
+    HubSpot writes and the local candidate record are safe, reversible CRM
+    organization, not a consequential external action — the one thing that
+    IS consequential (actually sending the welcome email) stays a draft."""
+    from actions import google_auth
+    if not google_auth.get_credential_status().get("authorized"):
+        return {
+            "summary": "Gmail isn't authorized yet — nothing to process. Run the one-time Google sign-in to enable this agent.",
+            "configured": False,
+        }
+    from actions import gmail_integration
+    from actions import candidate_intake
+
+    r = gmail_integration.list_messages(query="is:unread", max_results=15)
+    if not r["ok"]:
+        return {"summary": f"Gmail scan failed ({r.get('state')}): {r.get('detail')}", "configured": True, "error": r.get("detail")}
+
+    processed = []
+    for message in r["messages"]:
+        if gmail_integration.classify_message(message) != "candidate_reply":
+            continue
+        result = candidate_intake.process_candidate_email(message, auto_send_welcome=False)
+        processed.append(result)
+
+    if not processed:
+        return {"summary": f"Scanned {len(r['messages'])} message(s); no new candidate replies to process.", "configured": True, "processed": []}
+
+    drafted = sum(1 for p in processed if p.get("welcome_email_drafted"))
+    resumes = sum(1 for p in processed if p.get("resume_attached_to_hubspot"))
+    return {
+        "summary": (
+            f"Processed {len(processed)} candidate email(s): {drafted} welcome-packet draft(s) created, "
+            f"{resumes} resume(s) attached in HubSpot. Welcome emails are drafts, not sent — review before sending."
+        ),
+        "configured": True,
+        "processed": processed,
+    }
+
+
 def _buildpro_email_responder_handler(task: "AgentTask") -> dict:
     """J4: the real EXECUTE-capable half of the BuildPro Email Monitor
     workflow. buildpro_email_monitor_handler (SUGGEST, above) only ever
@@ -577,6 +623,18 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="buildpro", business="buildpro",
         permission_level=PermissionLevel.SUGGEST, schedule="60m",
         handler=_buildpro_email_monitor_handler,
+    ),
+    "buildpro_candidate_intake": AgentDefinition(
+        id="buildpro_candidate_intake", name="BuildPro Candidate Intake",
+        description=(
+            "Resume-intake chain: for each new candidate email, creates/updates the HubSpot "
+            "contact, attaches their resume when one was sent, and drafts (never auto-sends) "
+            "a welcome-packet email with the representation agreement. SUGGEST-level — the "
+            "HubSpot writes run automatically, the welcome email always stays a draft for review."
+        ),
+        nucleus_id="buildpro", business="buildpro",
+        permission_level=PermissionLevel.SUGGEST, schedule="60m",
+        handler=_buildpro_candidate_intake_handler,
     ),
     "buildpro_email_responder": AgentDefinition(
         id="buildpro_email_responder", name="BuildPro Email Responder",
