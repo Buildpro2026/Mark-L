@@ -79,11 +79,29 @@ def test_ui_api_brief_reachable_after_login(monkeypatch, gmail_not_authorized):
 def test_served_page_contains_the_ceo_operating_system_navigation(monkeypatch):
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    for tab in ("Command", "CEO Brief", "Agents", "Tasks &amp; Approvals", "Activity"):
+    for tab in ("Home", "Command", "CEO Brief", "BuildPro", "Daily Deal Finders", "Intelligence",
+                "Agents", "Tasks &amp; Approvals", "History", "Settings"):
         assert tab in html, f"missing nav tab: {tab}"
     # Real approve/reject wiring, not a placeholder — must call the actual API paths.
     assert "/ui/api/tasks/${id}/approve" in html or "/approve" in html
     assert "/ui/api/tasks/${id}/reject" in html or "/reject" in html
+
+
+def test_served_page_contains_the_four_home_areas(monkeypatch):
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    for area in ("Today's Priorities", "Calendar", "Active Agents", "Opportunities"):
+        assert area in html, f"missing home area: {area}"
+
+
+def test_served_page_contains_real_settings_controls(monkeypatch):
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "set-voice-provider" in html
+    assert "set-voice-speed" in html
+    assert "set-voice-volume" in html
+    assert "identity-picker" in html
+    assert "set-alert-sensitivity" in html
 
 
 def test_served_page_does_not_use_the_old_breathing_orb_language(monkeypatch):

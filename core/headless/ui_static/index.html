@@ -20,6 +20,19 @@
     --bad: #e0555c;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
+  /* Business identity - accent color only. Same environment, same
+     layout, same everything else - per Part 5, business identity is a
+     subtle shift, not a different app. */
+  body[data-identity="buildpro"]     { --accent: #d97b34; }
+  body[data-identity="careerrocket"] { --accent: #8b6cf0; }
+  body[data-identity="ddf"]          { --accent: #35c987; }
+
+  body[data-theme="light"] {
+    --bg: #f4f5f7; --panel: #ffffff; --panel-alt: #f0f1f4;
+    --line: rgba(0,0,0,0.08); --line-strong: rgba(0,0,0,0.16);
+    --text: #1a1d24; --muted: #5a6272; --dim: #8b93a3;
+  }
+
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
@@ -58,30 +71,32 @@
   #shell { display: none; height: 100vh; }
   #shell.active { display: flex; }
   #sidebar {
-    width: 200px; flex: none; background: var(--panel); border-right: 1px solid var(--line);
+    width: 208px; flex: none; background: var(--panel); border-right: 1px solid var(--line);
     display: flex; flex-direction: column; padding: 14px 0;
   }
-  #sidebar .brand { padding: 4px 18px 16px; font-weight: 700; letter-spacing: 0.12em; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  #sidebar .brand { padding: 4px 18px 2px; font-weight: 700; letter-spacing: 0.12em; font-size: 13px; display: flex; align-items: center; gap: 8px; }
   #sidebar .brand .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
   #sidebar .brand .dot.ok { background: var(--ok); }
   #sidebar .brand .dot.bad { background: var(--bad); }
-  nav.tabs { display: flex; flex-direction: column; gap: 1px; flex: 1; }
+  #identity-badge { padding: 0 18px 14px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+  nav.tabs { display: flex; flex-direction: column; gap: 1px; flex: 1; overflow-y: auto; }
   nav.tabs button {
     background: none; color: var(--muted); border: none; border-radius: 0; text-align: left;
-    padding: 9px 18px; font-weight: 500; font-size: 13px; border-left: 2px solid transparent;
+    padding: 8px 18px; font-weight: 500; font-size: 13px; border-left: 2px solid transparent;
     display: flex; justify-content: space-between; align-items: center;
   }
-  nav.tabs button:hover { background: rgba(255,255,255,0.03); color: var(--text); }
-  nav.tabs button.active { background: rgba(79,140,255,0.08); color: var(--text); border-left-color: var(--accent); }
+  nav.tabs button:hover { background: rgba(127,127,127,0.06); color: var(--text); }
+  nav.tabs button.active { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text); border-left-color: var(--accent); }
   nav.tabs button .count { font-size: 11px; background: var(--line-strong); padding: 1px 6px; border-radius: 8px; color: var(--muted); }
   nav.tabs button .count.alert { background: var(--bad); color: #1a0505; }
+  nav.tabs .divider { height: 1px; background: var(--line); margin: 8px 18px; }
   #sidebar-foot { padding: 12px 18px 0; border-top: 1px solid var(--line); margin-top: 8px; }
   #sidebar-foot button { width: 100%; }
 
   #content { flex: 1; overflow-y: auto; padding: 22px 28px 60px; }
   .page { display: none; }
   .page.active { display: block; }
-  .page-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 18px; }
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 8px; }
   .page-head h1 { font-size: 17px; margin: 0; letter-spacing: 0.01em; }
   .page-head .sub { color: var(--muted); font-size: 12px; }
 
@@ -89,6 +104,7 @@
   section.block h2 {
     font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim);
     margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
   }
   .row-list { display: flex; flex-direction: column; }
   .row {
@@ -110,10 +126,11 @@
   .badge.bad { background: rgba(224,85,92,0.18); color: var(--bad); }
   .badge.idle { background: rgba(124,132,147,0.18); color: var(--muted); }
   .badge.running { background: rgba(79,140,255,0.18); color: var(--accent); }
+  .badge.attn { background: rgba(224,85,92,0.18); color: var(--bad); }
 
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-  @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } #sidebar { width: 160px; } }
+  @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } #sidebar { width: 168px; } }
 
   .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
   .stat .num { font-family: var(--mono); font-size: 22px; font-weight: 600; }
@@ -124,12 +141,22 @@
 
   .risk-item { border-left: 2px solid var(--bad); padding: 8px 0 8px 12px; margin-bottom: 8px; font-size: 12px; }
   .risk-item .kind { color: var(--bad); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; font-weight: 700; }
+  .priority-item { border-left: 2px solid var(--line-strong); padding: 8px 0 8px 12px; margin-bottom: 6px; font-size: 13px; }
+  .priority-item.sev-4 { border-left-color: var(--bad); }
+  .priority-item.sev-3 { border-left-color: var(--warn); }
+  .priority-item.sev-2 { border-left-color: var(--accent); }
+
+  /* ── Home: four permanent executive areas ─────────────────────────── */
+  #home-greeting { font-size: 15px; margin-bottom: 20px; color: var(--text); }
+  #home-greeting .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
   /* ── Command (chat) ───────────────────────────────────────────────── */
-  #chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 130px); max-width: 760px; }
-  #transcript { flex: 1; overflow-y: auto; padding: 4px 0 16px; display: flex; flex-direction: column; gap: 10px; }
+  #chat-wrap { display: flex; flex-direction: column; max-width: 760px; }
+  #transcript-wrap.collapsed #transcript { display: none; }
+  #transcript-toggle { cursor: pointer; user-select: none; }
+  #transcript { max-height: calc(100vh - 260px); overflow-y: auto; padding: 4px 0 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 82%; padding: 9px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5; }
-  .msg.user { align-self: flex-end; background: rgba(79,140,255,0.12); border: 1px solid rgba(79,140,255,0.25); }
+  .msg.user { align-self: flex-end; background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
   .msg.jarvis { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); }
   .msg.progress { align-self: flex-start; background: transparent; border: 1px dashed var(--line-strong); color: var(--muted); font-style: italic; }
   .msg .who { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin-bottom: 3px; }
@@ -137,12 +164,32 @@
   .msg.error { border-color: var(--bad); color: #ffb3ba; }
   .chat-input-row { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
   .chat-input-row textarea { flex: 1; resize: none; }
+  .search-row { display: flex; gap: 8px; margin-bottom: 12px; }
 
   #global-error {
     display: none; position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 20;
     background: rgba(224,85,92,0.15); border: 1px solid var(--bad); color: #ffb3ba;
     padding: 8px 16px; border-radius: 6px; font-size: 12px;
   }
+
+  /* ── Settings ──────────────────────────────────────────────────────── */
+  .setting-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--line); gap: 16px; }
+  .setting-row .label { font-size: 13px; }
+  .setting-row .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .setting-row .control { flex: none; width: 200px; }
+  .switch { position: relative; width: 40px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider { position: absolute; inset: 0; background: var(--line-strong); border-radius: 22px; cursor: pointer; transition: background .2s; }
+  .switch .slider::before { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(18px); }
+  .identity-picker { display: flex; gap: 10px; flex-wrap: wrap; }
+  .identity-card {
+    border: 1px solid var(--line-strong); border-radius: 6px; padding: 10px 14px; cursor: pointer;
+    font-size: 12px; text-align: center; width: 110px;
+  }
+  .identity-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .identity-card .swatch { width: 100%; height: 28px; border-radius: 4px; margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -161,12 +208,21 @@
 <div id="shell">
   <div id="sidebar">
     <div class="brand"><span class="dot" id="conn-dot"></span> JARVIS</div>
+    <div id="identity-badge">Executive</div>
     <nav class="tabs">
-      <button data-tab="command" class="active">Command</button>
+      <button data-tab="home" class="active">Home</button>
+      <button data-tab="command">Command</button>
+      <div class="divider"></div>
       <button data-tab="ceo">CEO Brief</button>
+      <button data-tab="buildpro">BuildPro</button>
+      <button data-tab="ddf">DDF</button>
+      <button data-tab="intelligence">Intelligence</button>
+      <div class="divider"></div>
       <button data-tab="agents">Agents</button>
       <button data-tab="tasks">Tasks &amp; Approvals <span class="count" id="approval-count" style="display:none"></span></button>
-      <button data-tab="activity">Activity</button>
+      <button data-tab="history">History</button>
+      <div class="divider"></div>
+      <button data-tab="settings">Settings</button>
       <button data-tab="tools">Tools</button>
     </nav>
     <div id="sidebar-foot"><button class="ghost" id="logout-btn">Log out</button></div>
@@ -174,11 +230,40 @@
 
   <div id="content">
 
+    <!-- Home: the four permanent executive areas -->
+    <div class="page active" id="page-home">
+      <div class="page-head"><h1 id="home-title">Home</h1></div>
+      <div id="home-greeting"></div>
+      <div class="grid2">
+        <section class="block">
+          <h2>Today's Priorities</h2>
+          <div class="row-list" id="home-priorities"><div class="empty">Loading…</div></div>
+        </section>
+        <section class="block">
+          <h2>Calendar</h2>
+          <div class="row-list" id="home-calendar"><div class="empty">Loading…</div></div>
+        </section>
+        <section class="block">
+          <h2>Active Agents</h2>
+          <div class="row-list" id="home-agents"><div class="empty">Loading…</div></div>
+        </section>
+        <section class="block">
+          <h2>Opportunities</h2>
+          <div class="row-list" id="home-opportunities"><div class="empty">Loading…</div></div>
+        </section>
+      </div>
+    </div>
+
     <!-- Command -->
-    <div class="page active" id="page-command">
+    <div class="page" id="page-command">
       <div class="page-head"><h1>Command</h1><span class="sub" id="conn-text"></span></div>
       <div id="chat-wrap">
-        <div id="transcript"><div class="empty">Type a request — "what's pending approval", "check HubSpot", "give me today's DDF picks"…</div></div>
+        <div id="transcript-wrap">
+          <div class="page-head" style="margin-bottom:8px">
+            <span id="transcript-toggle" class="sub">▸ <span id="transcript-toggle-label">Show conversation</span></span>
+          </div>
+          <div id="transcript"><div class="empty">Type a request — "what's pending approval", "check HubSpot", "give me today's DDF picks"…</div></div>
+        </div>
         <div class="chat-input-row">
           <textarea id="chat-input" rows="1" placeholder="Ask Jarvis anything…"></textarea>
           <button id="send-btn">Send</button>
@@ -190,6 +275,24 @@
     <div class="page" id="page-ceo">
       <div class="page-head"><h1>CEO Brief</h1><button class="ghost small" id="refresh-brief-btn">Refresh</button></div>
       <div id="ceo-body"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- BuildPro -->
+    <div class="page" id="page-buildpro">
+      <div class="page-head"><h1>BuildPro</h1><button class="ghost small" id="refresh-buildpro-btn">Refresh</button></div>
+      <div id="buildpro-body"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- DDF -->
+    <div class="page" id="page-ddf">
+      <div class="page-head"><h1>Daily Deal Finders</h1><button class="ghost small" id="refresh-ddf-btn">Refresh</button></div>
+      <div id="ddf-body"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- Intelligence -->
+    <div class="page" id="page-intelligence">
+      <div class="page-head"><h1>Intelligence</h1><button class="ghost small" id="refresh-intel-btn">Refresh</button></div>
+      <div id="intelligence-body"><div class="empty">Loading…</div></div>
     </div>
 
     <!-- Agents -->
@@ -219,10 +322,82 @@
       </section>
     </div>
 
-    <!-- Activity -->
-    <div class="page" id="page-activity">
-      <div class="page-head"><h1>Activity</h1><button class="ghost small" id="refresh-activity-btn">Refresh</button></div>
-      <div class="row-list" id="activity-list"><div class="empty">Loading…</div></div>
+    <!-- History -->
+    <div class="page" id="page-history">
+      <div class="page-head"><h1>History</h1><button class="ghost small" id="refresh-history-btn">Refresh</button></div>
+      <div class="search-row"><input id="history-search" placeholder="Search history…"></div>
+      <div class="row-list" id="history-list"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- Settings -->
+    <div class="page" id="page-settings">
+      <div class="page-head"><h1>Settings</h1><span class="sub">Saved automatically, survives restart</span></div>
+
+      <section class="block">
+        <h2>Business identity</h2>
+        <div class="identity-picker" id="identity-picker"></div>
+      </section>
+
+      <section class="block">
+        <h2>Appearance</h2>
+        <div class="setting-row">
+          <div><div class="label">Theme</div></div>
+          <div class="control"><select id="set-theme"><option value="dark">Dark</option><option value="light">Light</option></select></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="label">Animation intensity</div><div class="sub">How much motion the interface uses</div></div>
+          <div class="control"><select id="set-animation"><option value="minimal">Minimal</option><option value="normal">Normal</option><option value="full">Full</option></select></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="label">Interface density</div></div>
+          <div class="control"><select id="set-density"><option value="compact">Compact</option><option value="normal">Normal</option><option value="spacious">Spacious</option></select></div>
+        </div>
+      </section>
+
+      <section class="block">
+        <h2>Voice</h2>
+        <div class="setting-row">
+          <div><div class="label">Provider</div></div>
+          <div class="control"><select id="set-voice-provider"><option value="gemini">Gemini</option><option value="local">Local (Kokoro)</option><option value="elevenlabs">ElevenLabs</option></select></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="label">Voice</div></div>
+          <div class="control"><select id="set-voice-name"></select></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="label">Speed</div><div class="sub" id="voice-speed-value">1.0x</div></div>
+          <div class="control"><input type="range" id="set-voice-speed" min="0.5" max="2.0" step="0.1"></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="label">Volume</div><div class="sub" id="voice-volume-value">100%</div></div>
+          <div class="control"><input type="range" id="set-voice-volume" min="0" max="1.5" step="0.1"></div>
+        </div>
+        <div class="setting-row"><div class="sub">Speed and provider apply on Gemini's Live voice session and the chat voices; volume applies to the Gemini voice output path only.</div></div>
+      </section>
+
+      <section class="block">
+        <h2>Interface</h2>
+        <div class="setting-row">
+          <div><div class="label">Conversation expanded by default</div><div class="sub">Otherwise Command starts collapsed — you mostly listen, not read</div></div>
+          <div class="control"><label class="switch"><input type="checkbox" id="set-chat-expanded"><span class="slider"></span></label></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="label">Default view on open</div></div>
+          <div class="control"><select id="set-default-view"><option value="home">Home</option><option value="command">Command</option><option value="ceo">CEO Brief</option></select></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="label">Morning briefing</div><div class="sub">Speak a startup briefing when a voice session begins</div></div>
+          <div class="control"><label class="switch"><input type="checkbox" id="set-briefing-enabled"><span class="slider"></span></label></div>
+        </div>
+      </section>
+
+      <section class="block">
+        <h2>Alert sensitivity</h2>
+        <div class="setting-row">
+          <div><div class="label">How much should interrupt you</div><div class="sub">Quiet: only real emergencies. Normal: genuine priorities. High alert: anything worth noting.</div></div>
+          <div class="control"><select id="set-alert-sensitivity"><option value="quiet">Quiet</option><option value="normal">Normal</option><option value="high_alert">High alert</option></select></div>
+        </div>
+      </section>
     </div>
 
     <!-- Tools (developer) -->
@@ -241,6 +416,8 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const IDENTITY_LABELS = { executive: "Executive", buildpro: "BuildPro COS", careerrocket: "Career Rocket Pro", ddf: "Daily Deal Finders" };
+const IDENTITY_COLORS = { executive: "#4f8cff", buildpro: "#d97b34", careerrocket: "#8b6cf0", ddf: "#35c987" };
 
 function showError(msg) {
   const el = $('global-error');
@@ -264,6 +441,10 @@ async function api(path, opts = {}) {
     throw err;
   }
   return body;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML;
 }
 
 /* ── session / login ──────────────────────────────────────────────── */
@@ -291,7 +472,7 @@ function showLogin() {
 function showShell() {
   $('login-screen').style.display = 'none';
   $('shell').classList.add('active');
-  loadAll();
+  loadSettingsAndApply();
 }
 
 $('login-btn').addEventListener('click', async () => {
@@ -313,22 +494,127 @@ $('logout-btn').addEventListener('click', async () => {
 });
 
 /* ── tab navigation ───────────────────────────────────────────────── */
+function switchTab(tabId) {
+  document.querySelectorAll('nav.tabs button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tabId));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + tabId));
+}
 document.querySelectorAll('nav.tabs button[data-tab]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('nav.tabs button[data-tab]').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    $('page-' + btn.dataset.tab).classList.add('active');
-  });
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
-function escapeHtml(s) {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+/* ── Home ──────────────────────────────────────────────────────────── */
+function renderPriorityRow(p) {
+  const kindLabel = { risk: 'Risk', approval: 'Approval needed', followup: 'Follow-up', recommendation: 'Recommendation' }[p.kind] || p.kind;
+  return `<div class="priority-item sev-${p.severity}"><b>${escapeHtml(kindLabel)}</b> — ${escapeHtml(p.title)}</div>`;
+}
+
+async function loadHomePriorities() {
+  const el = $('home-priorities');
+  try {
+    const r = await api('/ui/api/priorities?limit=6');
+    const items = r.priorities || [];
+    el.innerHTML = items.length ? items.map(renderPriorityRow).join('') : '<div class="empty">Nothing urgent right now.</div>';
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadHomeCalendar() {
+  const el = $('home-calendar');
+  try {
+    const snap = await api('/ui/api/calendar-snapshot');
+    if (!snap.available) { el.innerHTML = `<div class="empty">${escapeHtml(snap.reason || 'Calendar not connected.')}</div>`; return; }
+    let html = '';
+    if (snap.conflicts && snap.conflicts.length) {
+      html += snap.conflicts.map(c => `<div class="row"><div class="main"><div class="title" style="color:var(--bad)">Conflict: ${escapeHtml(c.a)} overlaps ${escapeHtml(c.b)}</div></div></div>`).join('');
+    }
+    if (snap.events && snap.events.length) {
+      html += snap.events.map(e => `<div class="row"><div class="main"><div class="title">${escapeHtml(e.summary || 'Untitled')}</div><div class="detail">${escapeHtml(String(e.start || ''))}</div></div></div>`).join('');
+    } else {
+      html += '<div class="empty">Nothing on the calendar today.</div>';
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadHomeAgents() {
+  const el = $('home-agents');
+  try {
+    const r = await api('/ui/api/active-agents');
+    const agents = r.agents || [];
+    el.innerHTML = agents.length ? agents.map(a => `
+      <div class="row"><div class="main"><div class="title">${escapeHtml(a.name)}${a.needs_attention ? ' <span class="badge attn">Needs attention</span>' : ''}</div><div class="detail">${escapeHtml(a.what)}</div></div></div>
+    `).join('') : '<div class="empty">No agents are actively working right now.</div>';
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadHomeOpportunities() {
+  const el = $('home-opportunities');
+  try {
+    const r = await api('/ui/api/opportunities?limit=5');
+    const opps = r.opportunities || [];
+    el.innerHTML = opps.length ? opps.map(o => `
+      <div class="row"><div class="main"><div class="title">${escapeHtml(o.title)}</div><div class="detail">${escapeHtml(o.business)} · score ${o.score}</div></div></div>
+    `).join('') : '<div class="empty">No opportunities logged yet.</div>';
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function renderGreeting() {
+  const el = $('home-greeting');
+  try {
+    const [pr, opp] = await Promise.all([
+      api('/ui/api/priorities?limit=20'),
+      api('/ui/api/opportunities?limit=20'),
+    ]);
+    const priorities = pr.priorities || [];
+    const risks = priorities.filter(p => p.kind === 'risk');
+    const opportunities = opp.opportunities || [];
+    const hour = new Date().getHours();
+    const greeting = hour < 12 ? 'Good morning, Lee.' : hour < 18 ? 'Good afternoon, Lee.' : 'Good evening, Lee.';
+
+    let line, sub;
+    if (risks.length) {
+      line = `${greeting} There ${risks.length === 1 ? 'is one thing' : `are ${risks.length} things`} that need your attention.`;
+      sub = risks.slice(0, 2).map(r => r.title).join(' · ');
+    } else if (priorities.length) {
+      line = `${greeting} Nothing urgent, but ${priorities.length} item${priorities.length === 1 ? '' : 's'} worth a look.`;
+      sub = opportunities.length ? `${opportunities.length} opportunit${opportunities.length === 1 ? 'y' : 'ies'} on the board.` : '';
+    } else {
+      line = `${greeting} Nothing urgent today.`;
+      sub = opportunities.length ? `${opportunities.length} opportunit${opportunities.length === 1 ? 'y' : 'ies'} worth reviewing.` : '';
+    }
+    el.innerHTML = `${escapeHtml(line)}${sub ? `<div class="sub">${escapeHtml(sub)}</div>` : ''}`;
+  } catch (e) {
+    el.innerHTML = '';
+  }
+}
+
+function loadHome() {
+  renderGreeting();
+  loadHomePriorities();
+  loadHomeCalendar();
+  loadHomeAgents();
+  loadHomeOpportunities();
 }
 
 /* ── Command (chat) ───────────────────────────────────────────────── */
 let chatHistory = [];
 let _progressEl = null;
+let _transcriptExpanded = false;
+
+function setTranscriptExpanded(expanded) {
+  _transcriptExpanded = expanded;
+  $('transcript-wrap').classList.toggle('collapsed', !expanded);
+  const arrow = expanded ? '▾' : '▸';
+  $('transcript-toggle').innerHTML = `${arrow} <span id="transcript-toggle-label">${expanded ? 'Hide conversation' : 'Show conversation'}</span>`;
+}
+$('transcript-toggle').addEventListener('click', () => setTranscriptExpanded(!_transcriptExpanded));
 
 function appendMessage(role, text, toolCalls) {
   clearProgress();
@@ -371,18 +657,16 @@ async function sendChat() {
   const message = input.value.trim();
   if (!message) return;
   input.value = ''; input.style.height = 'auto';
+  if (!_transcriptExpanded) setTranscriptExpanded(true);
   appendMessage('user', message);
   chatHistory.push({ role: 'user', text: message });
   showProgress('Thinking...');
   $('send-btn').disabled = true;
   try {
-    // Chat via HTTP has no incremental status stream — the "Thinking..."
-    // placeholder is honest about being the only real signal this path
-    // can show (a request genuinely is in flight) until it resolves.
     const r = await api('/ui/api/chat', { method: 'POST', body: JSON.stringify({ message, history: chatHistory.slice(-20) }) });
     chatHistory.push({ role: 'model', text: r.reply });
     appendMessage('jarvis', r.reply, r.tool_calls);
-    loadActivity();
+    loadHistory();
   } catch (e) {
     appendError(e.message);
   } finally {
@@ -475,6 +759,86 @@ async function loadBrief() {
 }
 $('refresh-brief-btn').addEventListener('click', loadBrief);
 
+/* ── BuildPro ──────────────────────────────────────────────────────── */
+async function loadBuildPro() {
+  const el = $('buildpro-body');
+  try {
+    const b = await api('/ui/api/buildpro-overview');
+    el.innerHTML = `
+      <div class="grid3" style="margin-bottom:22px">
+        <div class="stat"><div class="num">${(b.candidates || []).length}</div><div class="lbl">Candidates</div></div>
+        <div class="stat"><div class="num">${(b.clients || []).length}</div><div class="lbl">Clients</div></div>
+        <div class="stat"><div class="num">${(b.jobs || []).length}</div><div class="lbl">Open jobs</div></div>
+      </div>
+      <section class="block">
+        <h2>Recommended actions</h2>
+        <div class="row-list">${(b.recommended_actions || []).map(r => `<div class="row"><div class="main"><div class="title">${escapeHtml(r)}</div></div></div>`).join('') || '<div class="empty">Nothing flagged.</div>'}</div>
+      </section>
+      <div class="grid2">
+        <section class="block">
+          <h2>Recent candidates</h2>
+          <div class="row-list">${(b.candidates || []).slice(0, 10).map(c => `<div class="row"><div class="main"><div class="title">${escapeHtml(c.name)}</div><div class="detail">${escapeHtml(c.title || c.specialty || '')}</div></div></div>`).join('') || '<div class="empty">No candidates on file.</div>'}</div>
+        </section>
+        <section class="block">
+          <h2>Recent clients</h2>
+          <div class="row-list">${(b.clients || []).slice(0, 10).map(c => `<div class="row"><div class="main"><div class="title">${escapeHtml(c.name)}</div><div class="detail">${escapeHtml(c.status || '')}</div></div></div>`).join('') || '<div class="empty">No clients on file.</div>'}</div>
+        </section>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+$('refresh-buildpro-btn').addEventListener('click', loadBuildPro);
+
+/* ── DDF ───────────────────────────────────────────────────────────── */
+function dealRow(p) {
+  return `<div class="row"><div class="main"><div class="title">${escapeHtml(p.name)}</div><div class="detail">$${p.current_price ?? p.price ?? ''} · ${escapeHtml(p.category || '')}</div></div></div>`;
+}
+async function loadDDF() {
+  const el = $('ddf-body');
+  try {
+    const d = await api('/ui/api/ddf-overview');
+    el.innerHTML = `
+      <section class="block">
+        <h2>Today's high-ticket picks</h2>
+        <div class="row-list">${(d.high_ticket_picks || []).map(dealRow).join('') || '<div class="empty">No high-ticket picks ready today.</div>'}</div>
+      </section>
+      <div class="grid2">
+        <section class="block"><h2>Today's deals</h2><div class="row-list">${(d.todays_deals || []).map(dealRow).join('') || '<div class="empty">Nothing posted today yet.</div>'}</div></section>
+        <section class="block"><h2>Trending</h2><div class="row-list">${(d.trending || []).map(dealRow).join('') || '<div class="empty">Nothing trending yet.</div>'}</div></section>
+        <section class="block"><h2>This week's hottest</h2><div class="row-list">${(d.this_weeks_hottest || []).map(dealRow).join('') || '<div class="empty">Nothing ranked yet this week.</div>'}</div></section>
+        <section class="block"><h2>You might have missed</h2><div class="row-list">${(d.you_might_have_missed || []).map(dealRow).join('') || '<div class="empty">Nothing older to surface yet.</div>'}</div></section>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+$('refresh-ddf-btn').addEventListener('click', loadDDF);
+
+/* ── Intelligence ──────────────────────────────────────────────────── */
+async function loadIntelligence() {
+  const el = $('intelligence-body');
+  try {
+    const d = await api('/ui/api/intelligence');
+    const counts = d.summary && d.summary.counts_by_category ? d.summary.counts_by_category : (d.summary || {});
+    el.innerHTML = `
+      <section class="block">
+        <h2>Opportunities (cross-business, ranked)</h2>
+        <div class="row-list">${(d.opportunities || []).map(o => `<div class="row"><div class="main"><div class="title">${escapeHtml(o.title)}</div><div class="detail">${escapeHtml(o.business)} · ${escapeHtml(o.opp_type)} · score ${o.score}</div></div></div>`).join('') || '<div class="empty">No opportunities logged yet.</div>'}</div>
+      </section>
+      <section class="block">
+        <h2>Recent research &amp; findings</h2>
+        <div class="row-list">${(d.recent_entries || []).map(e => `<div class="row"><div class="main"><div class="title">${escapeHtml(e.title)}</div><div class="detail">${escapeHtml(e.category)} · ${escapeHtml(e.business)}</div></div></div>`).join('') || '<div class="empty">Nothing logged yet.</div>'}</div>
+      </section>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+$('refresh-intel-btn').addEventListener('click', loadIntelligence);
+
 /* ── Agents ────────────────────────────────────────────────────────── */
 let agentsCache = [];
 async function loadAgents() {
@@ -514,8 +878,6 @@ async function loadTasksAndApprovals() {
   const recentEl = $('recent-tasks-list');
   try {
     const r = await api('/ui/api/events?limit=100');
-    // Events don't carry full task state; pull pending approvals via the brief instead,
-    // which already exposes to_public_dict() rows for anything PENDING_APPROVAL.
     const brief = await api('/ui/api/brief');
     const approvals = brief.pending_approvals || [];
     const countBadge = $('approval-count');
@@ -545,27 +907,123 @@ async function loadTasksAndApprovals() {
 $('refresh-tasks-btn').addEventListener('click', loadTasksAndApprovals);
 
 async function approveTask(id) {
-  try { await api(`/ui/api/tasks/${id}/approve`, { method: 'POST' }); loadTasksAndApprovals(); loadActivity(); }
+  try { await api(`/ui/api/tasks/${id}/approve`, { method: 'POST' }); loadTasksAndApprovals(); loadHistory(); loadHomePriorities(); }
   catch (e) { showError(e.message); }
 }
 async function rejectTask(id) {
-  try { await api(`/ui/api/tasks/${id}/reject`, { method: 'POST' }); loadTasksAndApprovals(); }
+  try { await api(`/ui/api/tasks/${id}/reject`, { method: 'POST' }); loadTasksAndApprovals(); loadHomePriorities(); }
   catch (e) { showError(e.message); }
 }
 
-/* ── Activity ──────────────────────────────────────────────────────── */
-async function loadActivity() {
-  const list = $('activity-list');
+/* ── History (renamed Activity, now searchable) ───────────────────── */
+let _historyCache = [];
+function renderHistory(filterText) {
+  const list = $('history-list');
+  const needle = (filterText || '').trim().toLowerCase();
+  const items = needle
+    ? _historyCache.filter(a => `${a.source} ${a.message || a.kind || ''}`.toLowerCase().includes(needle))
+    : _historyCache;
+  list.innerHTML = items.length ? items.map(a => `
+    <div class="row"><div class="main"><div class="title"><span class="badge idle">${escapeHtml(a.source || '')}</span> ${escapeHtml(a.message || a.kind || '')}</div></div></div>
+  `).join('') : '<div class="empty">No matching history.</div>';
+}
+async function loadHistory() {
   try {
-    const r = await api('/ui/api/activity?limit=40');
-    const items = r.activity || [];
-    list.innerHTML = items.length ? items.map(a => `
-      <div class="row"><div class="main"><div class="title"><span class="badge idle">${escapeHtml(a.source || '')}</span> ${escapeHtml(a.message || a.kind || '')}</div></div></div>
-    `).join('') : '<div class="empty">No recent activity.</div>';
+    const r = await api('/ui/api/activity?limit=100');
+    _historyCache = r.activity || [];
+    renderHistory($('history-search').value);
   } catch (e) {
-    list.innerHTML = `<div class="empty" style="color:var(--bad)">Failed to load activity: ${escapeHtml(e.message)}</div>`;
+    $('history-list').innerHTML = `<div class="empty" style="color:var(--bad)">Failed to load: ${escapeHtml(e.message)}</div>`;
   }
 }
+$('refresh-history-btn').addEventListener('click', loadHistory);
+$('history-search').addEventListener('input', (e) => renderHistory(e.target.value));
+
+/* ── Settings ──────────────────────────────────────────────────────── */
+function applyAppearance(settings) {
+  document.body.dataset.identity = settings.business_identity || 'executive';
+  document.body.dataset.theme = settings.theme || 'dark';
+  $('identity-badge').textContent = IDENTITY_LABELS[settings.business_identity] || 'Executive';
+}
+
+function renderIdentityPicker(selected) {
+  const el = $('identity-picker');
+  el.innerHTML = Object.keys(IDENTITY_LABELS).map(id => `
+    <div class="identity-card ${id === selected ? 'selected' : ''}" data-identity="${id}">
+      <div class="swatch" style="background:${IDENTITY_COLORS[id]}"></div>
+      ${escapeHtml(IDENTITY_LABELS[id])}
+    </div>
+  `).join('');
+  el.querySelectorAll('.identity-card').forEach(card => {
+    card.addEventListener('click', async () => {
+      try {
+        const result = await api('/ui/api/settings', { method: 'POST', body: JSON.stringify({ updates: { business_identity: card.dataset.identity } }) });
+        applyAppearance(result);
+        renderIdentityPicker(card.dataset.identity);
+      } catch (e) { showError(e.message); }
+    });
+  });
+}
+
+async function loadSettingsAndApply() {
+  try {
+    const s = await api('/ui/api/settings');
+    applyAppearance(s);
+    renderIdentityPicker(s.business_identity);
+    $('set-theme').value = s.theme;
+    $('set-animation').value = s.animation_intensity;
+    $('set-density').value = s.interface_density;
+    $('set-voice-provider').value = s.voice_provider;
+    populateVoiceOptions(s.available_voices, s.voice_name);
+    $('set-voice-speed').value = s.voice_speed;
+    $('voice-speed-value').textContent = s.voice_speed.toFixed(1) + 'x';
+    $('set-voice-volume').value = s.voice_volume;
+    $('voice-volume-value').textContent = Math.round(s.voice_volume * 100) + '%';
+    $('set-chat-expanded').checked = s.chat_expanded_by_default;
+    $('set-default-view').value = s.default_view;
+    $('set-briefing-enabled').checked = s.startup_briefing_enabled;
+    $('set-alert-sensitivity').value = s.alert_sensitivity;
+
+    setTranscriptExpanded(!!s.chat_expanded_by_default);
+    switchTab(s.default_view || 'home');
+  } catch (e) {
+    showError('Failed to load settings: ' + e.message);
+  }
+  loadAll();
+}
+
+function populateVoiceOptions(voices, selected) {
+  const sel = $('set-voice-name');
+  sel.innerHTML = (voices || []).map(v => `<option value="${v}" ${v === selected ? 'selected' : ''}>${v}</option>`).join('');
+}
+
+async function saveSetting(updates) {
+  try {
+    const result = await api('/ui/api/settings', { method: 'POST', body: JSON.stringify({ updates }) });
+    applyAppearance(result);
+    return result;
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+$('set-theme').addEventListener('change', (e) => saveSetting({ theme: e.target.value }));
+$('set-animation').addEventListener('change', (e) => saveSetting({ animation_intensity: e.target.value }));
+$('set-density').addEventListener('change', (e) => saveSetting({ interface_density: e.target.value }));
+$('set-voice-provider').addEventListener('change', async (e) => {
+  await saveSetting({ voice_provider: e.target.value });
+  const s = await api('/ui/api/settings');
+  populateVoiceOptions(s.available_voices, s.voice_name);
+});
+$('set-voice-name').addEventListener('change', (e) => saveSetting({ voice_name: e.target.value }));
+$('set-voice-speed').addEventListener('input', (e) => { $('voice-speed-value').textContent = parseFloat(e.target.value).toFixed(1) + 'x'; });
+$('set-voice-speed').addEventListener('change', (e) => saveSetting({ voice_speed: parseFloat(e.target.value) }));
+$('set-voice-volume').addEventListener('input', (e) => { $('voice-volume-value').textContent = Math.round(parseFloat(e.target.value) * 100) + '%'; });
+$('set-voice-volume').addEventListener('change', (e) => saveSetting({ voice_volume: parseFloat(e.target.value) }));
+$('set-chat-expanded').addEventListener('change', (e) => { saveSetting({ chat_expanded_by_default: e.target.checked }); });
+$('set-default-view').addEventListener('change', (e) => saveSetting({ default_view: e.target.value }));
+$('set-briefing-enabled').addEventListener('change', (e) => saveSetting({ startup_briefing_enabled: e.target.checked }));
+$('set-alert-sensitivity').addEventListener('change', (e) => saveSetting({ alert_sensitivity: e.target.value }));
 
 /* ── Tools (developer) ────────────────────────────────────────────── */
 async function loadTools() {
@@ -592,15 +1050,19 @@ $('run-tool-btn').addEventListener('click', async () => {
 
 /* ── boot ──────────────────────────────────────────────────────────── */
 function loadAll() {
+  loadHome();
   loadBrief();
+  loadBuildPro();
+  loadDDF();
+  loadIntelligence();
   loadAgents();
   loadTasksAndApprovals();
-  loadActivity();
+  loadHistory();
   loadTools();
 }
 pollHealth();
 setInterval(pollHealth, 15000);
-setInterval(() => { if ($('shell').classList.contains('active')) loadTasksAndApprovals(); }, 30000);
+setInterval(() => { if ($('shell').classList.contains('active')) { loadTasksAndApprovals(); loadHomePriorities(); } }, 30000);
 checkSession();
 </script>
 </body>
