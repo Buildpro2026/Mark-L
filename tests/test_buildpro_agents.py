@@ -3,6 +3,7 @@ import pytest
 from actions import agent_orchestrator as ao
 from actions import buildpro_data as bd
 from actions import hubspot_integration as hubspot
+from core.headless import config as _hc
 
 
 @pytest.fixture(autouse=True)
@@ -11,6 +12,11 @@ def _isolate(monkeypatch, tmp_path):
     cfg_path = tmp_path / "api_keys.json"
     cfg_path.write_text('{"hubspot_token": "test-token"}', encoding="utf-8")
     monkeypatch.setattr(hubspot, "CONFIG_PATH", cfg_path)
+    # get_token() checks core.headless.config.HUBSPOT_TOKEN (the real env
+    # var) FIRST, before ever reading CONFIG_PATH — on a dev machine with
+    # a real .env this silently ignored the empty-token override in
+    # test_prospecting_agent_not_configured below.
+    monkeypatch.setattr(_hc, "HUBSPOT_TOKEN", None)
 
 
 def _task(description=""):

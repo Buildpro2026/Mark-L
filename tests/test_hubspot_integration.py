@@ -1,12 +1,17 @@
 import json
 
 from actions import hubspot_integration as hs
+from core.headless import config as _hc
 
 
 def _isolate(monkeypatch, tmp_path, token=""):
     cfg_path = tmp_path / "api_keys.json"
     cfg_path.write_text(json.dumps({"hubspot_token": token}), encoding="utf-8")
     monkeypatch.setattr(hs, "CONFIG_PATH", cfg_path)
+    # get_token() checks core.headless.config.HUBSPOT_TOKEN (the real env
+    # var) FIRST, before ever reading CONFIG_PATH — on a dev machine with
+    # a real .env this silently ignored the token=... arg above.
+    monkeypatch.setattr(_hc, "HUBSPOT_TOKEN", token or None)
 
 
 class _Resp:

@@ -1,6 +1,7 @@
 import json
 
 from actions import buffer_integration as buf
+from core.headless import config as _hc
 
 
 def _isolate(monkeypatch, tmp_path, token=""):
@@ -11,6 +12,10 @@ def _isolate(monkeypatch, tmp_path, token=""):
     # same channel_id/text ("c1"/"hello"), and without this they'd trip
     # each other's duplicate-post detection via the real shared database.
     monkeypatch.setattr(buf, "DB_PATH", tmp_path / "test_buffer.db")
+    # get_token() checks core.headless.config.BUFFER_TOKEN (the real env
+    # var) FIRST, before ever reading CONFIG_PATH — on a dev machine with
+    # a real .env this silently ignored the token=... arg above.
+    monkeypatch.setattr(_hc, "BUFFER_TOKEN", token or None)
 
 
 class _Resp:

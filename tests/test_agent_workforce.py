@@ -121,9 +121,14 @@ def test_prospecting_agent_reports_honestly_when_hubspot_not_configured(monkeypa
     import json
     import actions.hubspot_integration as hubspot
     import actions.buildpro_data as bd
+    from core.headless import config as _hc
     cfg_path = tmp_path / "api_keys.json"
     cfg_path.write_text(json.dumps({"hubspot_token": ""}), encoding="utf-8")
     monkeypatch.setattr(hubspot, "CONFIG_PATH", cfg_path)
+    # get_token() checks core.headless.config.HUBSPOT_TOKEN (the real env
+    # var) FIRST — on a dev machine with a real .env this silently ignored
+    # the empty-token config file above.
+    monkeypatch.setattr(_hc, "HUBSPOT_TOKEN", None)
     monkeypatch.setattr(bd, "DB_PATH", tmp_path / "agent_test.db")
 
     orch = ao.AgentOrchestrator()

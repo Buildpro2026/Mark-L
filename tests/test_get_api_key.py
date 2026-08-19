@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -10,6 +12,18 @@ def load_module(name, relative_path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gemini_env(monkeypatch):
+    # _get_api_key() checks core.headless.config.GEMINI_API_KEY (sourced
+    # from the real GEMINI_API_KEY env var) BEFORE ever reading
+    # API_CONFIG_PATH — on a dev machine with a real .env this made every
+    # test in this file silently exercise the env-var branch instead of
+    # the config-file branch under test, regardless of what config_dict
+    # said. Force the env-var branch off so these tests are hermetic.
+    from core.headless import config as _hc
+    monkeypatch.setattr(_hc, "GEMINI_API_KEY", None)
 
 
 def _main_with_config(tmp_path, config_dict):

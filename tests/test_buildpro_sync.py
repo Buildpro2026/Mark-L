@@ -3,6 +3,7 @@ import pytest
 from actions import buildpro_sync as sync
 from actions import buildpro_data as bd
 from actions import hubspot_integration as hubspot
+from core.headless import config as _hc
 
 
 @pytest.fixture(autouse=True)
@@ -11,6 +12,11 @@ def _isolate(monkeypatch, tmp_path):
     cfg_path = tmp_path / "api_keys.json"
     cfg_path.write_text('{"hubspot_token": "test-token"}', encoding="utf-8")
     monkeypatch.setattr(hubspot, "CONFIG_PATH", cfg_path)
+    # get_token() checks core.headless.config.HUBSPOT_TOKEN (the real env
+    # var) FIRST, before ever reading CONFIG_PATH — on a dev machine with
+    # a real .env this silently ignored every CONFIG_PATH override below,
+    # including the two "not configured" tests that write an empty token.
+    monkeypatch.setattr(_hc, "HUBSPOT_TOKEN", None)
 
 
 def _contact(cid, first="Jane", last="Doe", email="jane@example.com", phone="+15551234567"):

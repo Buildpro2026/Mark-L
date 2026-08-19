@@ -30,6 +30,16 @@ def _main():
     return load_module("jarvis_main_key_safety", "main.py")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_gemini_env(monkeypatch):
+    # _get_api_key() checks core.headless.config.GEMINI_API_KEY (the real
+    # GEMINI_API_KEY env var) before ever reading API_CONFIG_PATH — on a
+    # dev machine with a real .env this silently short-circuited the
+    # config-file tests below regardless of what fake_path contained.
+    from core.headless import config as _hc
+    monkeypatch.setattr(_hc, "GEMINI_API_KEY", None)
+
+
 def test_llm_client_module_no_longer_exists():
     # Confirms the dead module was actually removed, not just unreferenced.
     assert not (ROOT / "core" / "llm_client.py").exists()
