@@ -254,7 +254,23 @@ class ToolExecutor:
                         )
                     elif task.status.value == "done":
                         summary = task.result.get("summary") if isinstance(task.result, dict) else task.result
-                        result = f"Task completed: {summary}"
+                        # "done" means the handler ran and honestly reported an
+                        # outcome in task.result — NOT that the underlying
+                        # action succeeded. An EXECUTE-level handler (e.g.
+                        # buildpro_email_responder) can complete normally while
+                        # reporting a real send/write failure inside that
+                        # result dict. Don't say "Task completed" over a
+                        # result that says otherwise.
+                        succeeded = True
+                        if isinstance(task.result, dict):
+                            for key in ("sent", "ok", "success"):
+                                if key in task.result:
+                                    succeeded = bool(task.result[key])
+                                    break
+                        result = (
+                            f"Task completed: {summary}" if succeeded
+                            else f"Task did not succeed: {summary}"
+                        )
                     elif task.status.value == "failed":
                         result = f"Task failed: {task.error}"
                     else:

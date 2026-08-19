@@ -89,6 +89,34 @@ def test_assign_to_execute_agent_requires_approval_and_never_autoruns():
         del ao._agents["test_execute_via_tool"]
 
 
+def test_assign_reports_honest_failure_not_task_completed(gmail_not_authorized):
+    # Phase 2 fix: a handler that returns normally (task.status == DONE)
+    # while its result dict says the underlying action actually failed
+    # (e.g. buildpro_email_responder's real Gmail send failing) used to be
+    # phrased to Lee/Gemini as "Task completed: <failure text>" — a
+    # contradiction that reads as success. Must say it did not succeed.
+    main, live = _new_live()
+    live.ui = _ui_stub()
+    live._dashboard = None
+    live._loop = None
+
+    ao = main.agent_orchestrator
+    from actions.agent_orchestrator import AgentDefinition, PermissionLevel
+    ao._agents["test_soft_failure_via_tool"] = AgentDefinition(
+        id="test_soft_failure_via_tool", name="Test Soft Failure", description="x",
+        nucleus_id="system", permission_level=PermissionLevel.SUGGEST,
+        handler=lambda task: {"summary": "Couldn't send draft (ERROR): not found", "sent": False},
+    )
+    try:
+        fc = _make_fc(action="assign", agent_id="test_soft_failure_via_tool", task="send it")
+        response = _run(live._execute_tool(fc))
+        result = response.response["result"]
+        assert "did not succeed" in result.lower()
+        assert "task completed:" not in result.lower()
+    finally:
+        del ao._agents["test_soft_failure_via_tool"]
+
+
 def test_unknown_agent_id_reports_a_clear_error_not_a_crash():
     main, live = _new_live()
     live.ui = _ui_stub()
