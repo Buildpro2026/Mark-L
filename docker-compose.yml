@@ -1,0 +1,63 @@
+# Reference compose file for running JARVIS headless on Oracle Cloud (or
+# any Docker host). Secrets are NOT in this file - they come from a
+# local .env file on the host (docker compose reads it automatically),
+# which must never be committed. See docs/ORACLE_DEPLOYMENT.md.
+services:
+  jarvis:
+    build: .
+    restart: unless-stopped
+    # Bound to localhost only, not published to the public interface.
+    # Caddy reaches this container over Docker's internal network
+    # (reverse_proxy jarvis:8787 below) regardless of any host port
+    # mapping - this exists purely so `curl localhost:8787/health`
+    # works for debugging directly on the VM, and specifically so a
+    # misconfigured Oracle security list can't accidentally expose the
+    # raw app port to the internet the way a "8787:8787" mapping would.
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      - JARVIS_HEADLESS_HOST=0.0.0.0
+      - JARVIS_HEADLESS_PORT=8787
+      - JARVIS_API_TOKEN=${JARVIS_API_TOKEN}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ANTHROPIC_TOKEN=${ANTHROPIC_TOKEN}
+      - HUBSPOT_TOKEN=${HUBSPOT_TOKEN}
+      - BUFFER_TOKEN=${BUFFER_TOKEN}
+      - AIRTABLE_TOKEN=${AIRTABLE_TOKEN}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_FROM_NUMBER=${TWILIO_FROM_NUMBER}
+      - GOOGLE_TOKEN_JSON=${GOOGLE_TOKEN_JSON}
+      - GOOGLE_CLIENT_SECRET_JSON=${GOOGLE_CLIENT_SECRET_JSON}
+      - JARVIS_DATA_DIR=/app/data
+      - JARVIS_OBSIDIAN_VAULT_PATH=${JARVIS_OBSIDIAN_VAULT_PATH:-}
+    volumes:
+      - jarvis_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # Reverse proxy that terminates HTTPS and forwards to the app on the
+  # container network - Oracle Cloud doesn't give free managed TLS the
+  # way Render did, Caddy gets an automatic Let's Encrypt certificate
+  # for free with no manual renewal work.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - jarvis
+
+volumes:
+  jarvis_data:
+  caddy_data:
+  caddy_config:

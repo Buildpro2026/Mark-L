@@ -1,0 +1,6 @@
+# Replace with the real domain pointed at the Oracle instance's public
+# IP before first run - Caddy requests a Let's Encrypt certificate for
+# whatever hostname is listed here, so a bare IP address won't get TLS.
+your-domain.example.com {
+    reverse_proxy jarvis:8787
+}
