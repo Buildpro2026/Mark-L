@@ -712,7 +712,10 @@ TOOL_DECLARATIONS = [
             "Actions: 'add_candidate' (adds or updates a candidate record "
             "— deduplicated by email, so adding the same person twice "
             "just updates them, never creates a duplicate; local write "
-            "only, always safe), 'score' (scores one candidate against "
+            "only, always safe), 'add_job' (adds a job opening, optionally "
+            "linked to an existing client by name — needed before "
+            "candidate/job matching can find anything; local write only, "
+            "always safe), 'score' (scores one candidate against "
             "one job by id, informational only), 'match_job' (scores "
             "every candidate against one job and stores the results), "
             "'match_candidate' (scores one candidate against every open "
@@ -722,14 +725,20 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":         {"type": "STRING", "description": "add_candidate | score | match_job | match_candidate | top_matches"},
+                "action":         {"type": "STRING", "description": "add_candidate | add_job | score | match_job | match_candidate | top_matches"},
                 "name":           {"type": "STRING", "description": "Candidate full name, for 'add_candidate'"},
                 "email":          {"type": "STRING", "description": "Candidate email — the dedup key, for 'add_candidate'"},
-                "title":          {"type": "STRING", "description": "Candidate's job title/role, for 'add_candidate'"},
-                "specialty":      {"type": "STRING", "description": "Candidate's specialty/trade, for 'add_candidate'"},
+                "title":          {"type": "STRING", "description": "Candidate's job title/role for 'add_candidate', or the job title for 'add_job'"},
+                "specialty":      {"type": "STRING", "description": "Specialty/trade, for 'add_candidate' or 'add_job'"},
                 "years_experience": {"type": "INTEGER", "description": "Years of experience, for 'add_candidate'"},
                 "skills":         {"type": "STRING", "description": "Comma-separated skills, for 'add_candidate'"},
-                "location":       {"type": "STRING", "description": "Candidate location, for 'add_candidate'"},
+                "location":       {"type": "STRING", "description": "Location, for 'add_candidate' or 'add_job'"},
+                "client_name":    {"type": "STRING", "description": "Existing client's name to link this job to, for 'add_job' (optional — matched by name; if ambiguous or not found, the job is still saved and JARVIS says so)"},
+                "description":    {"type": "STRING", "description": "Job description, for 'add_job'"},
+                "required_skills": {"type": "STRING", "description": "Comma-separated required skills, for 'add_job'"},
+                "min_years_experience": {"type": "INTEGER", "description": "Minimum years of experience required, for 'add_job'"},
+                "compensation":   {"type": "STRING", "description": "Pay/compensation, for 'add_job'"},
+                "employment_type": {"type": "STRING", "description": "e.g. full-time, contract, for 'add_job'"},
                 "candidate_id":   {"type": "INTEGER", "description": "Target candidate id, for 'score'/'match_candidate'/'top_matches'"},
                 "job_id":         {"type": "INTEGER", "description": "Target job id, for 'score'/'match_job'/'top_matches'"},
                 "min_score":      {"type": "NUMBER", "description": "Only store/return matches at or above this score (0-100), for 'match_job'/'match_candidate' (optional)"},

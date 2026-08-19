@@ -696,6 +696,42 @@ class ToolExecutor:
                         None, lambda: buildpro_data.upsert_candidate(cand_name, email=args.get("email", "") or "", **fields)
                     )
                     result = f"Candidate {action_taken} (id {cand_id})."
+            elif bmaction == "add_job":
+                job_title = (args.get("title") or "").strip()
+                if not job_title:
+                    result = "I need the job title."
+                else:
+                    client_id = None
+                    ambiguous = False
+                    client_name = (args.get("client_name") or "").strip()
+                    if client_name:
+                        clients = await loop.run_in_executor(None, lambda: buildpro_data.list_clients(limit=200))
+                        needle = client_name.lower()
+                        matches = [c for c in clients if needle in (c.get("name") or "").lower()]
+                        if len(matches) == 1:
+                            client_id = matches[0]["id"]
+                        elif len(matches) > 1:
+                            ambiguous = True
+                            names = ", ".join(m["name"] for m in matches[:5])
+                            result = f"That matches more than one client ({names}) — give me the exact name or the client id."
+
+                    if not ambiguous:
+                        fields = {}
+                        for key in ("description", "location", "specialty", "required_skills", "compensation", "employment_type"):
+                            if args.get(key):
+                                fields[key] = args[key]
+                        if args.get("min_years_experience") is not None:
+                            fields["min_years_experience"] = int(args["min_years_experience"])
+                        job_id = await loop.run_in_executor(
+                            None, lambda: buildpro_data.add_job(job_title, client_id=client_id, **fields)
+                        )
+                        if client_id:
+                            client_note = f" for {client_name}"
+                        elif client_name:
+                            client_note = f" — no client matched '{client_name}', saved without one"
+                        else:
+                            client_note = ""
+                        result = f"Job added (id {job_id}): {job_title}{client_note}."
             elif bmaction == "score":
                 candidate_id = args.get("candidate_id")
                 job_id = args.get("job_id")

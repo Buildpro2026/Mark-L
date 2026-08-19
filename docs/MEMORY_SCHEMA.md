@@ -1,5 +1,33 @@
 # Memory & Configuration Schema
 
+## Where each kind of state lives (read this before adding a new store)
+
+JARVIS has five separate layers of state on purpose — the risk with a
+system like this is quietly growing a second place that answers the same
+question a different way. Before adding a new file, table, or store, check
+whether one of these five already owns that kind of fact:
+
+| Layer | What it holds | Where |
+|---|---|---|
+| Runtime/session memory | The current conversation only — never written to disk | In-process (`JarvisLive._session_log`, chat `history` lists) |
+| Long-term personal memory | Facts Lee has told JARVIS directly (identity, preferences, projects, relationships, wishes, notes) | `memory/long_term.json` via `memory/memory_manager.py` |
+| Operational databases | Structured business data JARVIS generates or syncs itself: agent tasks/events, BuildPro candidates/clients/jobs/matches, DDF products/posts, business-intelligence entries, opportunities, audit log | `data/jarvis2.db` (SQLite) |
+| External business systems | The source of truth for anything that also lives in a real external tool — Gmail, Google Calendar, HubSpot, Airtable, Buffer, Twilio | Those services themselves; JARVIS reads/writes through their APIs and never re-stores a shadow copy as its own truth |
+| Founder/company knowledge (future) | Goals, priorities, SOPs, prior decisions, research notes — anything that belongs in Lee's own written knowledge base | An Obsidian vault, via `core/headless/obsidian.py` |
+
+The Obsidian layer (`core/headless/obsidian.py`) is a working, tested-by-hand
+filesystem interface — path-traversal-safe reads, and approval-gated writes
+that refuse to silently overwrite an existing note — but it is **not yet
+wired to any LLM tool**. That's deliberate: it's the seam a future
+retrieval/knowledge layer plugs into, not a replacement for
+`memory/long_term.json` (which stays the place for facts Lee states
+directly in conversation) or `data/jarvis2.db` (which stays the place for
+structured records JARVIS itself generates). Wiring it up as a tool is a
+product decision — whether Lee wants JARVIS reading/writing his real vault
+— not a technical one; the groundwork is ready when that decision is made.
+
+## Personal memory vs. credentials
+
 Two separate persistent JSON files, deliberately never mixed:
 
 | File | Holds | Git status |

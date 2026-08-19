@@ -115,6 +115,95 @@ def test_add_candidate_reports_updated_on_dedup(monkeypatch):
     assert "updated" in response.response["result"].lower()
 
 
+# ── add_job (local write, ungated — needed before matching can find anything) ─
+
+def test_add_job_without_title_is_refused(monkeypatch):
+    main, _ = _new_live()
+    live = _live(main)
+    called = {"n": 0}
+    monkeypatch.setattr(main.buildpro_data, "add_job",
+                         lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+
+    response = _run(live._execute_tool(_make_fc(action="add_job")))
+    assert called["n"] == 0
+    assert "title" in response.response["result"].lower()
+
+
+def test_add_job_forwards_fields_with_no_client(monkeypatch):
+    main, _ = _new_live()
+    live = _live(main)
+    captured = {}
+
+    def _fake_add_job(title, client_id=None, **fields):
+        captured.update(title=title, client_id=client_id, fields=fields)
+        return 7
+
+    monkeypatch.setattr(main.buildpro_data, "add_job", _fake_add_job)
+
+    response = _run(live._execute_tool(_make_fc(
+        action="add_job", title="Electrician", location="Houston, TX",
+        min_years_experience=3,
+    )))
+
+    assert captured["title"] == "Electrician"
+    assert captured["client_id"] is None
+    assert captured["fields"]["location"] == "Houston, TX"
+    assert captured["fields"]["min_years_experience"] == 3
+    assert "job added" in response.response["result"].lower()
+    assert "id 7" in response.response["result"].lower()
+
+
+def test_add_job_resolves_single_matching_client_by_name(monkeypatch):
+    main, _ = _new_live()
+    live = _live(main)
+    monkeypatch.setattr(main.buildpro_data, "list_clients",
+                         lambda limit=200: [{"id": 42, "name": "Acme Construction"}, {"id": 43, "name": "Other Co"}])
+    captured = {}
+
+    def _fake_add_job(title, client_id=None, **fields):
+        captured.update(title=title, client_id=client_id)
+        return 8
+
+    monkeypatch.setattr(main.buildpro_data, "add_job", _fake_add_job)
+
+    response = _run(live._execute_tool(_make_fc(action="add_job", title="Plumber", client_name="Acme")))
+    assert captured["client_id"] == 42
+    assert "for acme" in response.response["result"].lower()
+
+
+def test_add_job_ambiguous_client_name_is_refused_without_writing(monkeypatch):
+    main, _ = _new_live()
+    live = _live(main)
+    monkeypatch.setattr(main.buildpro_data, "list_clients",
+                         lambda limit=200: [{"id": 1, "name": "Acme Construction"}, {"id": 2, "name": "Acme Roofing"}])
+    called = {"n": 0}
+    monkeypatch.setattr(main.buildpro_data, "add_job",
+                         lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+
+    response = _run(live._execute_tool(_make_fc(action="add_job", title="Plumber", client_name="Acme")))
+    assert called["n"] == 0
+    assert "more than one client" in response.response["result"].lower()
+
+
+def test_add_job_no_matching_client_still_saves_job_honestly(monkeypatch):
+    main, _ = _new_live()
+    live = _live(main)
+    monkeypatch.setattr(main.buildpro_data, "list_clients", lambda limit=200: [{"id": 1, "name": "Acme Construction"}])
+    captured = {}
+
+    def _fake_add_job(title, client_id=None, **fields):
+        captured.update(title=title, client_id=client_id)
+        return 9
+
+    monkeypatch.setattr(main.buildpro_data, "add_job", _fake_add_job)
+
+    response = _run(live._execute_tool(_make_fc(action="add_job", title="Plumber", client_name="Nonexistent Co")))
+    assert captured["client_id"] is None
+    result = response.response["result"].lower()
+    assert "job added" in result
+    assert "no client matched" in result
+
+
 # ── score (informational, never automated decision) ──────────────────
 
 def test_score_without_ids_is_refused(monkeypatch):
