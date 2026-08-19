@@ -110,6 +110,9 @@ OBSIDIAN_VAULT_PATH = _env("JARVIS_OBSIDIAN_VAULT_PATH")
 # None of these have a default value — an unset credential means that
 # integration reports NOT_CONFIGURED, never a fabricated success.
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
+# Text-chat fallback only (core/headless/ui.py::run_chat_turn) when Gemini
+# fails before any tool has executed this turn — see anthropic_client.py.
+ANTHROPIC_TOKEN = _env("ANTHROPIC_TOKEN")
 AIRTABLE_TOKEN = _env("AIRTABLE_TOKEN")
 HUBSPOT_TOKEN = _env("HUBSPOT_TOKEN")
 BUFFER_TOKEN = _env("BUFFER_TOKEN")
@@ -130,6 +133,7 @@ def summarize() -> dict:
         "headless_host": HEADLESS_HOST,
         "headless_port": HEADLESS_PORT,
         "gemini_api_key_env_set": bool(GEMINI_API_KEY),
+        "anthropic_token_env_set": bool(ANTHROPIC_TOKEN),
         "airtable_token_env_set": bool(AIRTABLE_TOKEN),
         "hubspot_token_env_set": bool(HUBSPOT_TOKEN),
         "buffer_token_env_set": bool(BUFFER_TOKEN),

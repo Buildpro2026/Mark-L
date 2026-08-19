@@ -153,6 +153,39 @@ def test_classify_uncategorized_when_nothing_matches():
     assert gmail.classify_message(msg) == "uncategorized"
 
 
+def test_classify_candidate_reply_from_body_with_generic_subject():
+    # The bug Lee reported: a generic subject ("Hi there") with the real
+    # signal only in the body used to fall through to "uncategorized"
+    # because classify_message() never looked past subject+sender.
+    msg = {
+        "subject": "Hi there",
+        "sender": "jane@example.com",
+        "body": "Hi, I saw your posting and I'm attaching my resume for the electrician role.",
+    }
+    assert gmail.classify_message(msg) == "candidate_reply"
+
+
+def test_classify_client_inquiry_from_snippet_with_generic_subject():
+    msg = {
+        "subject": "Question",
+        "sender": "someone@construction.com",
+        "snippet": "Could you send me a quote for a project starting next month?",
+    }
+    assert gmail.classify_message(msg) == "client_inquiry"
+
+
+def test_classify_body_is_capped_so_a_long_quoted_thread_cant_dominate():
+    # A keyword sitting way past the 2000-char cap (e.g. deep in a quoted
+    # thread or legal signature) should not flip classification — this is
+    # a cap, not a promise to scan an unbounded amount of quoted history.
+    msg = {
+        "subject": "Hello",
+        "sender": "friend@example.com",
+        "body": ("x" * 2500) + "resume",
+    }
+    assert gmail.classify_message(msg) == "uncategorized"
+
+
 # ── create_draft (real capability, never sends) ──────────────────────────
 
 def test_create_draft_succeeds_and_never_calls_send(monkeypatch):

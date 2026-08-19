@@ -324,9 +324,20 @@ async def run_chat_turn(
     JARVIS phone/3D command-center UI's typed-command relay) so both
     surfaces run the exact same conversational path.
 
+    If Gemini fails on its very first call this turn (before any tool has
+    executed) and ANTHROPIC_TOKEN is configured, falls back to Claude for
+    the whole turn — found live 2026-08-19: the deployed Gemini key sits
+    on the free tier's 20-requests/day cap, and every chat request fails
+    with a 429 once it's hit. Deliberately does NOT fall back once a tool
+    has already run this turn (Gemini succeeded, then failed on a later
+    round): re-running the turn on a different provider could re-execute
+    an already-completed consequential action (a HubSpot write, a sent
+    email) a second time, which is worse than just surfacing the error.
+
     Raises HTTPException on a missing GEMINI_API_KEY, an empty message, or
-    a Gemini request failure — callers that don't want that (e.g. the
-    dashboard bridge, which just wants a reply string) should catch it."""
+    a request failure neither provider could serve — callers that don't
+    want that (e.g. the dashboard bridge, which just wants a reply string)
+    should catch it."""
     if not config.GEMINI_API_KEY:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on this server.")
     if not message.strip():
@@ -353,12 +364,14 @@ async def run_chat_turn(
     tool_calls_made: list[dict] = []
     loop = asyncio.get_event_loop()
 
-    for _ in range(_MAX_TOOL_CALL_ROUNDS):
+    for round_num in range(_MAX_TOOL_CALL_ROUNDS):
         try:
             resp = await loop.run_in_executor(
                 None, lambda: client.models.generate_content(model=CHAT_MODEL, contents=contents, config=gen_config)
             )
         except Exception as e:
+            if round_num == 0 and not tool_calls_made and config.ANTHROPIC_TOKEN:
+                return await _run_chat_turn_anthropic(message, history, on_status, executor, tool_calls_made)
             # Gemini's own API returns a clean, user-safe error message
             # (e.g. "high demand" 503s) — safe to surface directly, this
             # is never a secret-bearing string.
@@ -388,6 +401,79 @@ async def run_chat_turn(
             ))
 
         if on_status is not None and resp.function_calls:
+            try:
+                await on_status("Analyzing results...")
+            except Exception:
+                pass
+
+    return (
+        "I ran several tool calls but didn't reach a final answer — try rephrasing or breaking the request into smaller steps.",
+        tool_calls_made,
+    )
+
+
+async def _run_chat_turn_anthropic(
+    message: str, history: list[dict],
+    on_status: Callable[[str], Awaitable[None]] | None,
+    executor: "ToolExecutor",  # noqa: F821 — imported by the caller before this runs
+    tool_calls_made: list[dict],
+) -> tuple[str, list[dict]]:
+    """Claude fallback loop, structurally parallel to run_chat_turn's Gemini
+    loop but in Anthropic's content-block shape (tool_use/tool_result
+    instead of function_calls/FunctionResponse). Shares the caller's
+    ToolExecutor and tool_calls_made list — see run_chat_turn's docstring
+    for why this only ever runs before any tool has executed yet."""
+    from core.headless.tool_executor import UnknownToolError
+    from core.headless.anthropic_client import get_client, gemini_tools_to_anthropic, CHAT_MODEL as ANTHROPIC_CHAT_MODEL
+
+    client = get_client(config.ANTHROPIC_TOKEN)
+    tools = gemini_tools_to_anthropic(_chat_tool_declarations())
+
+    messages: list[dict] = []
+    for turn in history[-20:]:
+        role = "assistant" if turn.get("role") == "model" else "user"
+        text = str(turn.get("text") or "")
+        if text:
+            messages.append({"role": role, "content": text})
+    messages.append({"role": "user", "content": message})
+
+    loop = asyncio.get_event_loop()
+
+    for _ in range(_MAX_TOOL_CALL_ROUNDS):
+        try:
+            resp = await loop.run_in_executor(
+                None, lambda: client.messages.create(
+                    model=ANTHROPIC_CHAT_MODEL, max_tokens=2048,
+                    system=_chat_system_prompt(), tools=tools, messages=messages,
+                )
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Anthropic request failed (after Gemini also failed): {e}")
+
+        tool_uses = [b for b in resp.content if b.type == "tool_use"]
+        if not tool_uses:
+            return "".join(b.text for b in resp.content if b.type == "text"), tool_calls_made
+
+        messages.append({"role": "assistant", "content": resp.content})
+        tool_results = []
+        for tu in tool_uses:
+            args = dict(tu.input or {})
+            if on_status is not None:
+                try:
+                    await on_status(_status_label_for_tool(tu.name, args))
+                except Exception:
+                    pass
+            try:
+                result = await executor.execute(tu.name, args)
+            except UnknownToolError as e:
+                result = f"Error: {e}"
+            except Exception as e:
+                result = f"Error: {tu.name} failed — {e}"
+            tool_calls_made.append({"name": tu.name, "args": args, "result": result})
+            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(result)})
+        messages.append({"role": "user", "content": tool_results})
+
+        if on_status is not None and tool_uses:
             try:
                 await on_status("Analyzing results...")
             except Exception:

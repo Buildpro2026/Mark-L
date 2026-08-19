@@ -5,6 +5,7 @@ google-genai
 google-generativeai
 google-auth-oauthlib
 google-api-python-client
+anthropic
 pillow
 requests
 beautifulsoup4

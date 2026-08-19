@@ -91,8 +91,8 @@ def _extract_body(payload: dict[str, Any]) -> str:
 
 
 # Simple, transparent keyword rules — not ML, not inferred intent. Checked
-# against "subject sender" lowercased; first match wins; nothing matching
-# returns "uncategorized" rather than guessing.
+# against "subject sender snippet body" lowercased; first match wins;
+# nothing matching returns "uncategorized" rather than guessing.
 _CLASSIFICATION_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("candidate_reply", ("resume", "cv", "interview", "application", "re: application")),
     ("client_inquiry", ("project", "quote", "bid", "estimate", "proposal")),
@@ -101,11 +101,22 @@ _CLASSIFICATION_RULES: list[tuple[str, tuple[str, ...]]] = [
 
 
 def classify_message(message: dict[str, Any]) -> str:
-    """Rule-based classification over subject/sender keywords. Returns one
-    of the labels above, or 'uncategorized' — never a fabricated label."""
+    """Rule-based classification over subject/sender/body keywords. Returns
+    one of the labels above, or 'uncategorized' — never a fabricated label.
+
+    Originally checked subject+sender only. Real candidate/client emails
+    routinely have a generic subject line ("Hi", "Following up", a forwarded
+    thread with no keyword in it) with the actual signal — "attached is my
+    resume", "requesting a quote for..." — sitting in the message body.
+    get_message() already extracts body/snippet (see _extract_body above);
+    this just actually uses them instead of leaving real signal unread.
+    Body is capped so a long quoted thread or signature block can't drown
+    out the check with irrelevant boilerplate."""
     subject = (message.get("subject") or "").lower()
     sender = (message.get("sender") or "").lower()
-    haystack = f"{subject} {sender}"
+    snippet = (message.get("snippet") or "").lower()
+    body = (message.get("body") or "")[:2000].lower()
+    haystack = f"{subject} {sender} {snippet} {body}"
     for label, keywords in _CLASSIFICATION_RULES:
         if any(keyword in haystack for keyword in keywords):
             return label
