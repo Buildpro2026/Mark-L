@@ -462,7 +462,65 @@
       });
     }
 
+    // ── Browser speech-to-text (preferred path) ─────────────────────────────
+    // The PCM-over-WebSocket path below (_doMicPcmRelay) only produces a
+    // reply when something drains _phone_audio_queue with real audio
+    // transcription — locally that's main.py's live Gemini Live session;
+    // the cloud-only deployment (core/headless/dashboard_bridge.py) has no
+    // such consumer, so on Render that path silently records audio nobody
+    // ever reads. The browser's own SpeechRecognition needs no server-side
+    // audio pipeline at all — it transcribes locally and sends plain text
+    // through the exact same /api/command path doSend() already uses,
+    // which dashboard_bridge.py DOES drain in the cloud (and main.py's
+    // _process_dashboard_commands() already drained locally) — so this
+    // works identically whether JARVIS is running locally or on Render.
+    const _SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let _recognizer = null, _recognizing = false;
+
+    function _sendCommandText(text) {
+      if (!text) return;
+      append('user', text);
+      const enc  = _encrypt(text);
+      const body = enc ? { enc } : { text };
+      _authFetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    }
+
+    function _startBrowserSpeech() {
+      _recognizer = new _SpeechRecognitionAPI();
+      _recognizer.lang = 'en-US';
+      _recognizer.interimResults = false;
+      _recognizer.maxAlternatives = 1;
+      _recognizer.onstart = () => {
+        _recognizing = true;
+        micBtn.innerHTML = '⏹';
+        micBtn.title = 'Listening — tap to stop';
+        micBtn.classList.add('recording');
+        toast('🎤 Listening');
+      };
+      _recognizer.onerror = () => { _recognizing = false; _micIdle(); };
+      _recognizer.onend = () => { _recognizing = false; _micIdle(); };
+      _recognizer.onresult = (event) => {
+        const text = event.results[0][0].transcript;
+        _sendCommandText(text);
+      };
+      try { _recognizer.start(); } catch (_) { /* already started */ }
+    }
+
     async function doMic() {
+      if (_recognizing) { _recognizer && _recognizer.stop(); return; }
+      if (_SpeechRecognitionAPI) { _startBrowserSpeech(); return; }
+      await _doMicPcmRelay();
+    }
+
+    // ── Real-time Voice — PCM16 WebSocket → Gemini Live (fallback path,
+    // used only when the browser has no SpeechRecognition support — e.g.
+    // Firefox — and requires a live desktop main.py session to actually
+    // produce a reply; see the comment above doMic()) ──────────────────────
+    async function _doMicPcmRelay() {
       if (_voiceWs) { _stopVoice(); return; }
 
       if (!navigator.mediaDevices?.getUserMedia) {
