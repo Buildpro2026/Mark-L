@@ -144,8 +144,23 @@ def download_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
 # Simple, transparent keyword rules — not ML, not inferred intent. Checked
 # against "subject sender snippet body" lowercased; first match wins;
 # nothing matching returns "uncategorized" rather than guessing.
+# Found live 2026-08-19, running the candidate-intake chain against a
+# real inbox: bare "cv" and "application" false-matched a Skool newsletter
+# (a tracking-URL substring happened to contain "cv") and a Render.com
+# welcome email ("cloud application platform"). Once body text got scanned
+# too (see classify_message's own history), a whole email's worth of copy
+# is exposed to a 2-letter/common-word match, not just a short subject
+# line. Specific phrases fix both: they still catch the real case (Bryan
+# Brady's actual subject was "...Resume Attached") while excluding
+# "application" used as an unrelated noun and "cv" as an accidental
+# substring — a random tracking string essentially never contains "my cv"
+# or "cv attached" as connected words.
 _CLASSIFICATION_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("candidate_reply", ("resume", "cv", "interview", "application", "re: application")),
+    ("candidate_reply", (
+        "my resume", "resume attached", "attached resume", "attached my resume", "attached is my resume",
+        "my cv", "cv attached", "attached cv", "attached my cv",
+        "job application", "re: application", "interview",
+    )),
     ("client_inquiry", ("project", "quote", "bid", "estimate", "proposal")),
     ("notification", ("no-reply", "noreply", "notification", "do-not-reply")),
 ]

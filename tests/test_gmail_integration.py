@@ -234,6 +234,34 @@ def test_classify_uncategorized_when_nothing_matches():
     assert gmail.classify_message(msg) == "uncategorized"
 
 
+def test_classify_does_not_false_positive_on_application_as_a_generic_word():
+    # Found live 2026-08-19: a Render.com welcome email ("cloud application
+    # platform") got classified candidate_reply and created a real HubSpot
+    # contact. Bare "application" is too generic once body text is scanned.
+    msg = {
+        "subject": "Ready to ship with Render?",
+        "sender": "hello@render.com",
+        "body": "Welcome! Render gives you a fast, reliable cloud application platform that scales with you.",
+    }
+    assert gmail.classify_message(msg) == "uncategorized"
+
+
+def test_classify_does_not_false_positive_on_cv_inside_a_tracking_url():
+    # Found live 2026-08-19: a Skool newsletter got classified
+    # candidate_reply because a base64-ish tracking-link substring
+    # happened to contain the two letters "cv". Bare "cv" is too short to
+    # safely substring-match against a whole email body/URL soup. Sender
+    # is a plain address here (not noreply@) so the notification rule
+    # can't mask what's actually being tested: that "cv" alone no longer
+    # triggers candidate_reply.
+    msg = {
+        "subject": "1 event happening tomorrow",
+        "sender": "events@skool.com",
+        "body": "Click here: https://skool.com/t/bdnm9-2finiup5jloaxcxg27utjtdhbjzp13p6e3jxsnwk-2bktrhbx-2fcwcvhop7n0eiqnih4iv2knyb57xdjor0kzmxvnij9yy5x",
+    }
+    assert gmail.classify_message(msg) == "uncategorized"
+
+
 def test_classify_candidate_reply_from_body_with_generic_subject():
     # The bug Lee reported: a generic subject ("Hi there") with the real
     # signal only in the body used to fall through to "uncategorized"
