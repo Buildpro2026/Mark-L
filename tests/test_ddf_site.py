@@ -29,8 +29,9 @@ def _sample(**overrides):
 # ── all 12 required pages exist and render ─────────────────────────────
 
 @pytest.mark.parametrize("path", [
-    "/", "/todays-deals", "/trending", "/best-sellers", "/high-ticket",
-    "/categories", "/amazon", "/tiktok-shop", "/about", "/affiliate-disclosure", "/contact",
+    "/", "/todays-deals", "/trending", "/this-week", "/best-sellers", "/high-ticket",
+    "/you-might-have-missed", "/categories", "/amazon", "/tiktok-shop",
+    "/about", "/affiliate-disclosure", "/contact",
 ])
 def test_static_page_returns_200(path):
     client = _client()
@@ -200,3 +201,47 @@ def test_trending_and_best_sellers_endpoints_return_200():
     client = _client()
     assert client.get("/api/deals/trending").status_code == 200
     assert client.get("/api/deals/best-sellers").status_code == 200
+
+
+# ── Phase 3: high-ticket picks / You Might Have Missed / this week ──────
+
+def test_high_ticket_picks_endpoint_returns_at_most_two_by_default():
+    for i in range(5):
+        ddf.save_product(_sample(product_id=f"p{i}", name=f"Product {i}", current_price=150.0 + i, approved=True))
+    client = _client()
+    r = client.get("/api/deals/high-ticket-picks")
+    assert r.status_code == 200
+    assert len(r.json()["deals"]) == 2
+
+
+def test_home_page_shows_high_ticket_picks_and_missed_sections():
+    client = _client()
+    html = client.get("/").text
+    assert "High-Ticket Picks" in html
+    assert "You Might Have Missed" in html
+    assert "This Week's Hottest" in html
+
+
+def test_you_might_have_missed_endpoint_excludes_named_product():
+    from datetime import datetime, timedelta, timezone
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    ddf.save_product(_sample(product_id="p1", published_date=yesterday, approved=True))
+    ddf.save_product(_sample(product_id="p2", name="Other", published_date=yesterday, approved=True))
+    client = _client()
+    r = client.get("/api/deals/you-might-have-missed?exclude=p1")
+    ids = {d["product_id"] for d in r.json()["deals"]}
+    assert "p1" not in ids
+    assert "p2" in ids
+
+
+def test_this_week_endpoint_returns_200_with_empty_catalog():
+    client = _client()
+    r = client.get("/api/deals/this-week")
+    assert r.status_code == 200
+    assert r.json() == {"deals": []}
+
+
+def test_product_detail_js_renders_missed_strip():
+    js = _client().get("/static/js/site.js").text
+    assert "renderMissedStrip" in js
+    assert "you-might-have-missed" in js

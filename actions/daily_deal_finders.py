@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,43 @@ from core.headless.config import DATA_DIR
 BASE_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = DATA_DIR / "jarvis2.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Product lifecycle. `approved` (the original 0/1 gate list_products() and
+# ddf_site already filter on) stays as a simple derived flag so none of
+# that existing code has to change — it's just True for PUBLISHED and
+# everything after. `status` is the real state, and the only thing
+# set_product_status() lets a caller move it through in order; you can't
+# jump from DISCOVERED straight to WINNER by mistake.
+STATUS_DISCOVERED = "discovered"
+STATUS_EVALUATED = "evaluated"
+STATUS_SCORED = "scored"
+STATUS_APPROVED = "approved_pending_publish"
+STATUS_PUBLISHED = "published"
+STATUS_TRACKING = "tracking"
+STATUS_WINNER = "winner"
+STATUS_UNDERPERFORMER = "underperformer"
+STATUS_RETIRED = "retired"
+
+PRODUCT_STATUSES = (
+    STATUS_DISCOVERED, STATUS_EVALUATED, STATUS_SCORED, STATUS_APPROVED,
+    STATUS_PUBLISHED, STATUS_TRACKING, STATUS_WINNER, STATUS_UNDERPERFORMER,
+    STATUS_RETIRED,
+)
+
+# Which statuses a given status may move to next. Not a strict single-file
+# chain: TRACKING can resolve to either WINNER or UNDERPERFORMER, both of
+# which can move to RETIRED, and a human can always retire something early.
+_STATUS_TRANSITIONS = {
+    STATUS_DISCOVERED: {STATUS_EVALUATED, STATUS_RETIRED},
+    STATUS_EVALUATED: {STATUS_SCORED, STATUS_RETIRED},
+    STATUS_SCORED: {STATUS_APPROVED, STATUS_RETIRED},
+    STATUS_APPROVED: {STATUS_PUBLISHED, STATUS_RETIRED},
+    STATUS_PUBLISHED: {STATUS_TRACKING, STATUS_RETIRED},
+    STATUS_TRACKING: {STATUS_WINNER, STATUS_UNDERPERFORMER, STATUS_RETIRED},
+    STATUS_WINNER: {STATUS_RETIRED},
+    STATUS_UNDERPERFORMER: {STATUS_RETIRED, STATUS_TRACKING},
+    STATUS_RETIRED: set(),
+}
 
 # Currently-approved affiliate retailers. Target/Walmart are deliberately
 # NOT here yet — save_product()/validate_retailer() reject them outright
@@ -88,8 +125,31 @@ def _connect() -> sqlite3.Connection:
         "revenue": "REAL DEFAULT 0",
         "commission_rate": "REAL",
         "slug": "TEXT",
+        # Phase 3 — canonical product record extension for the DDF
+        # commerce-platform architecture. All additive, all optional;
+        # nothing here breaks an existing row that predates these columns.
+        "subcategory": "TEXT",
+        "merchant": "TEXT",
+        "affiliate_network": "TEXT",
+        "estimated_commission": "REAL",
+        "product_rating": "REAL",
+        "tags": "TEXT",
+        "status": "TEXT",
+        "status_updated": "TEXT",
+        "published_date": "TEXT",
     })
     _ensure_columns(conn, "posts", {"clicks": "INTEGER DEFAULT 0"})
+    # Backfill status for rows written before this column existed, so
+    # nothing sits at NULL forever — derived honestly from the flag that
+    # already existed (approved), never guessed at.
+    conn.execute(
+        "UPDATE products SET status = ? WHERE status IS NULL AND approved = 1",
+        (STATUS_PUBLISHED,),
+    )
+    conn.execute(
+        "UPDATE products SET status = ? WHERE status IS NULL AND (approved = 0 OR approved IS NULL)",
+        (STATUS_DISCOVERED,),
+    )
     conn.commit()
     return conn
 
@@ -162,6 +222,93 @@ def discover_product(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return product
 
 
+def set_product_status(product_id: str, new_status: str) -> dict[str, Any]:
+    """Moves a product to a new lifecycle status. Refuses an invalid status
+    name and a transition that isn't in _STATUS_TRANSITIONS (e.g. jumping
+    straight from 'discovered' to 'winner') rather than silently allowing
+    it — the same enforced-not-just-conventional pattern
+    validate_retailer() uses for the retailer allowlist.
+
+    `approved` (the flag list_products()/ddf_site already filter on) is
+    kept in sync automatically: True from PUBLISHED onward, so nothing
+    downstream needs to know about `status` to keep working.
+    published_date is stamped the first time a product reaches PUBLISHED,
+    and never overwritten by a later status change."""
+    if new_status not in PRODUCT_STATUSES:
+        raise ValueError(f"Unknown product status: {new_status!r}. Valid: {list(PRODUCT_STATUSES)}")
+
+    conn = _connect()
+    row = conn.execute("SELECT status, published_date FROM products WHERE product_id = ?", (product_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return {"ok": False, "detail": f"No product with id {product_id!r}."}
+
+    current = row["status"] or STATUS_DISCOVERED
+    allowed = _STATUS_TRANSITIONS.get(current, set())
+    if new_status != current and new_status not in allowed:
+        conn.close()
+        return {
+            "ok": False,
+            "detail": f"Can't move a product from {current!r} to {new_status!r}. "
+                      f"Allowed next step(s): {sorted(allowed) or 'none (terminal state)'}.",
+        }
+
+    now = datetime.now(timezone.utc).isoformat()
+    is_approved = 1 if new_status in (STATUS_PUBLISHED, STATUS_TRACKING, STATUS_WINNER, STATUS_UNDERPERFORMER) else 0
+    published_date = row["published_date"]
+    if new_status == STATUS_PUBLISHED and not published_date:
+        published_date = now
+
+    conn.execute(
+        "UPDATE products SET status = ?, status_updated = ?, approved = ?, published_date = ? WHERE product_id = ?",
+        (new_status, now, is_approved, published_date, product_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "product_id": product_id, "status": new_status}
+
+
+def advance_to_published(product_id: str, approved: bool = False) -> dict[str, Any]:
+    """Walks a product through the internal, non-public lifecycle stages
+    automatically (discovered -> evaluated -> scored -> approved_pending_
+    publish — none of these make anything visible externally, so none of
+    them need Lee's approval) and stops right before PUBLISHED unless
+    approved=True is passed, matching the same explicit-approval contract
+    every other consequential action in this codebase uses (gmail_
+    integration.send_email, calendar_integration.create_event, etc.).
+
+    This is what 'JARVIS, publish this product to DDF' actually calls —
+    a single request that does all the safe bookkeeping and then either
+    stops at the approval gate or completes it, rather than making Lee
+    walk four separate status transitions by hand."""
+    product = get_product(product_id)
+    if product is None:
+        return {"ok": False, "detail": f"No product with id {product_id!r}."}
+
+    current = product.get("status") or STATUS_DISCOVERED
+    safe_chain = [STATUS_EVALUATED, STATUS_SCORED, STATUS_APPROVED]
+    try:
+        start_idx = safe_chain.index(current) + 1 if current in safe_chain else 0
+    except ValueError:
+        start_idx = 0
+    for step in safe_chain[start_idx:]:
+        result = set_product_status(product_id, step)
+        if not result["ok"]:
+            return result
+        current = step
+
+    if current == STATUS_PUBLISHED:
+        return {"ok": True, "product_id": product_id, "status": STATUS_PUBLISHED, "already_published": True}
+
+    if not approved:
+        return {
+            "ok": False, "state": "NOT_APPROVED", "product_id": product_id, "status": current,
+            "detail": "Product is ready to publish and needs approval — call publish again with approved=True.",
+        }
+
+    return set_product_status(product_id, STATUS_PUBLISHED)
+
+
 def validate_retailer(retailer: str | None) -> None:
     """Raises ValueError for Target/Walmart (or anything else not yet
     approved) rather than silently accepting it — enforcement, not just
@@ -224,11 +371,38 @@ def save_product(product: dict[str, Any]) -> dict[str, Any]:
         # different unnamed products saved within the same second would
         # otherwise collide on this PRIMARY KEY and silently overwrite.
         product_id = _find_duplicate_product_id(conn, product) or f"manual-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    # INSERT OR REPLACE fully replaces the row on a product_id conflict —
+    # any column not explicitly passed this time would otherwise silently
+    # reset to its default. Fine for score/slug (meant to be recomputed),
+    # not fine for lifecycle status or accumulated performance data: a
+    # routine "update the price" re-save must never quietly revert a
+    # PUBLISHED product back to DISCOVERED or wipe its view/click history.
+    existing = conn.execute(
+        "SELECT status, status_updated, published_date, views, affiliate_clicks, conversions, revenue "
+        "FROM products WHERE product_id = ?", (product_id,)
+    ).fetchone()
+
     product_record = dict(product)
     product_record["product_id"] = product_id
     product_record["score"] = score_product(product)
     product_record["discovery_date"] = product_record.get("discovery_date") or datetime.now(timezone.utc).isoformat()
     product_record["slug"] = product_record.get("slug") or _slugify(product_record.get("name", ""), product_id)
+
+    if existing is not None:
+        product_record.setdefault("status", existing["status"])
+        product_record["status_updated"] = product_record.get("status_updated") or existing["status_updated"]
+        product_record["published_date"] = product_record.get("published_date") or existing["published_date"]
+        for field in ("views", "affiliate_clicks", "conversions", "revenue"):
+            if field not in product:
+                product_record[field] = existing[field]
+    if "status" not in product_record:
+        # Backward compatibility: save_product(approved=True) predates the
+        # status column and is still how every current caller (the DDF
+        # agent, ddf_site, existing tests) marks a product publishable —
+        # treat it as the PUBLISHED status it always meant, rather than
+        # silently ignoring it now that status exists.
+        product_record["status"] = STATUS_PUBLISHED if product_record.get("approved") else STATUS_DISCOVERED
+    is_approved = 1 if product_record["status"] in (STATUS_PUBLISHED, STATUS_TRACKING, STATUS_WINNER, STATUS_UNDERPERFORMER) else 0
 
     original_price = product_record.get("original_price")
     current_price = product_record.get("current_price", product_record.get("price"))
@@ -237,9 +411,18 @@ def save_product(product: dict[str, Any]) -> dict[str, Any]:
     else:
         product_record.setdefault("discount_pct", None)
 
+    if product_record.get("estimated_commission") is None and current_price and product_record.get("commission_rate"):
+        product_record["estimated_commission"] = round(float(current_price) * float(product_record["commission_rate"]), 2)
+    else:
+        product_record.setdefault("estimated_commission", None)
+
     social_platforms = product_record.get("social_platforms_posted")
     if isinstance(social_platforms, list):
         social_platforms = ",".join(social_platforms)
+
+    tags = product_record.get("tags")
+    if isinstance(tags, list):
+        tags = ",".join(str(t).strip() for t in tags if str(t).strip())
 
     conn.execute(
         """
@@ -249,8 +432,10 @@ def save_product(product: dict[str, Any]) -> dict[str, Any]:
             historical_performance, affiliate_url, discovery_date, score, approved, notes,
             description, retailer, original_price, current_price, discount_pct,
             affiliate_source, date_posted, social_platforms_posted, views, affiliate_clicks,
-            conversions, revenue, commission_rate, slug
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            conversions, revenue, commission_rate, slug, subcategory, merchant,
+            affiliate_network, estimated_commission, product_rating, tags, status,
+            status_updated, published_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             product_record.get("id") or product_id,
@@ -272,7 +457,7 @@ def save_product(product: dict[str, Any]) -> dict[str, Any]:
             product_record.get("affiliate_url") or product_record.get("url"),
             product_record.get("discovery_date"),
             product_record.get("score"),
-            1 if product_record.get("approved") else 0,
+            is_approved,
             json.dumps(product_record.get("notes", {})) if isinstance(product_record.get("notes"), dict) else product_record.get("notes"),
             product_record.get("description"),
             (product_record.get("retailer") or "").strip().lower() or None,
@@ -288,10 +473,20 @@ def save_product(product: dict[str, Any]) -> dict[str, Any]:
             float(product_record.get("revenue") or 0),
             product_record.get("commission_rate"),
             product_record.get("slug"),
+            product_record.get("subcategory"),
+            product_record.get("merchant"),
+            product_record.get("affiliate_network"),
+            product_record.get("estimated_commission"),
+            product_record.get("product_rating"),
+            tags,
+            product_record.get("status"),
+            product_record.get("status_updated"),
+            product_record.get("published_date"),
         ),
     )
     conn.commit()
     conn.close()
+    product_record["approved"] = is_approved
     return product_record
 
 
@@ -353,6 +548,149 @@ def get_top_products(limit: int = 5) -> list[dict[str, Any]]:
     rows = conn.execute("SELECT * FROM products ORDER BY score DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+# ── performance ranking — combines post-publish signals, not just the ──────
+# ── pre-publish discovery score() above ─────────────────────────────────────
+
+def _recency_factor(iso_date: str | None, half_life_days: float = 5.0) -> float:
+    """1.0 for something published/discovered right now, decaying by half
+    every `half_life_days`. Missing or unparseable dates score 0 — a
+    ranking input, never a hard failure."""
+    if not iso_date:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(str(iso_date).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return 0.0
+    age_days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400)
+    return 0.5 ** (age_days / half_life_days)
+
+
+def rank_products(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Performance ranking for already-published products. Combines
+    recency, engagement (views/clicks), real conversion rate, revenue,
+    trend velocity, discount, and commission into one comparable
+    `rank_score` (attached to each returned dict, highest first).
+
+    Deliberately a transparent weighted formula, not a black box or a
+    learned model, per the instruction not to over-engineer this before
+    the basic commerce loop is proven out. A product with 0 clicks/views
+    scores low on engagement honestly — nothing here assumes an average
+    or fabricates a signal that was never actually recorded."""
+    import math
+
+    weights = {
+        "recency": 0.25, "engagement": 0.20, "conversion": 0.15,
+        "revenue": 0.15, "trend": 0.15, "discount": 0.05, "commission": 0.05,
+    }
+    ranked = []
+    for p in products:
+        views = float(p.get("views") or 0)
+        clicks = float(p.get("affiliate_clicks") or 0)
+        conversions = float(p.get("conversions") or 0)
+        revenue = float(p.get("revenue") or 0)
+        trend = min(max(float(p.get("trend_strength") or 0), 0.0), 1.0)
+        discount = min(max(float(p.get("discount_pct") or 0) / 100.0, 0.0), 1.0)
+        commission_rate = min(max(float(p.get("commission_rate") or 0), 0.0), 1.0)
+        recency = _recency_factor(p.get("published_date") or p.get("discovery_date"))
+
+        # log1p compresses outliers so one viral product doesn't make
+        # every other product's engagement score read as zero by contrast.
+        engagement = min(math.log1p(views + clicks * 3) / math.log1p(1000), 1.0)
+        conversion_rate = (conversions / clicks) if clicks > 0 else 0.0
+        revenue_factor = min(math.log1p(revenue) / math.log1p(500), 1.0)
+
+        rank_score = 100 * (
+            recency * weights["recency"]
+            + engagement * weights["engagement"]
+            + conversion_rate * weights["conversion"]
+            + revenue_factor * weights["revenue"]
+            + trend * weights["trend"]
+            + discount * weights["discount"]
+            + commission_rate * weights["commission"]
+        )
+        p = dict(p)
+        p["rank_score"] = round(rank_score, 2)
+        ranked.append(p)
+    ranked.sort(key=lambda r: r["rank_score"], reverse=True)
+    return ranked
+
+
+def select_daily_high_ticket_picks(limit: int = 2, min_price: float = 100.0) -> list[dict[str, Any]]:
+    """The standing 'two high-ticket products a day' operating requirement.
+    Deliberately NOT just the two most expensive products — combines price
+    with demand, trend momentum, product rating, and estimated commission
+    per sale, so a picked product is something people actually want and
+    that pays meaningfully, not just an expensive item nobody will buy.
+
+    Only draws from products already past raw discovery (SCORED or later)
+    so an unvetted find never gets promoted straight to a high-ticket
+    placement, and excludes RETIRED products."""
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM products WHERE (current_price >= ? OR price >= ?) "
+        "AND status NOT IN (?, ?, ?) ORDER BY current_price DESC LIMIT 50",
+        (min_price, min_price, STATUS_DISCOVERED, STATUS_EVALUATED, STATUS_RETIRED),
+    ).fetchall()
+    conn.close()
+    candidates = [dict(r) for r in rows]
+    if not candidates:
+        return []
+
+    def _high_ticket_value(p: dict[str, Any]) -> float:
+        price = float(p.get("current_price") or p.get("price") or 0)
+        demand = min(max(float(p.get("demand") or 0), 0.0), 100.0)
+        trend = min(max(float(p.get("trend_strength") or 0), 0.0), 1.0)
+        commission_rate = float(p.get("commission_rate") or 0)
+        est_commission = float(p.get("estimated_commission") or (price * commission_rate))
+        rating = min(max(float(p.get("product_rating") or 0), 0.0), 5.0) / 5.0
+        return (
+            min(est_commission, 200) * 0.40
+            + demand * 0.25
+            + trend * 100 * 0.20
+            + rating * 100 * 0.15
+        )
+
+    candidates.sort(key=_high_ticket_value, reverse=True)
+    return candidates[:limit]
+
+
+def get_you_might_have_missed(exclude_product_id: str | None = None, days: int = 14, limit: int = 10) -> list[dict[str, Any]]:
+    """Products published in the last `days` (default 14) but NOT today —
+    the point is surfacing things a visitor arriving today wouldn't
+    otherwise see on a same-day feed. Ranked by rank_products() so this is
+    'the best of what you missed,' not an arbitrary older list."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = _connect()
+    q = (
+        "SELECT * FROM products WHERE approved = 1 AND published_date IS NOT NULL "
+        "AND published_date >= ? AND published_date NOT LIKE ?"
+    )
+    params: list[Any] = [since, f"{today}%"]
+    if exclude_product_id:
+        q += " AND product_id != ?"
+        params.append(exclude_product_id)
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return rank_products([dict(r) for r in rows])[:limit]
+
+
+def get_this_weeks_hottest(limit: int = 10) -> list[dict[str, Any]]:
+    """Published or discovered in the last 7 days, ranked by real
+    performance (rank_products), not just recency or trend_strength alone."""
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM products WHERE approved = 1 "
+        "AND (published_date >= ? OR (published_date IS NULL AND discovery_date >= ?))",
+        (since, since),
+    ).fetchall()
+    conn.close()
+    return rank_products([dict(r) for r in rows])[:limit]
 
 
 # ── website-facing catalog queries — never fabricate results, empty is honest ──

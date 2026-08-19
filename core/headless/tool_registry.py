@@ -697,6 +697,52 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "daily_deal_finders",
+        "description": (
+            "Daily Deal Finders product catalog: add products, move them "
+            "toward publication, and pull today's picks. 'add_product' "
+            "records a new discovered product — local only, always safe, "
+            "never visible publicly by itself. 'publish' walks a product "
+            "through the internal review stages and then either stops and "
+            "asks for approval, or (with approved=true, only on Lee's "
+            "explicit instruction) makes it live on the public site — "
+            "this is the consequential step, never call it with "
+            "approved=true unless Lee actually said to publish. "
+            "'high_ticket_picks' reports today's two high-ticket "
+            "selections. 'you_might_have_missed' and 'this_weeks_hottest' "
+            "surface older but still-strong products. 'status' reports "
+            "one product's current lifecycle stage. Posting about a "
+            "published product on social media is a separate step — use "
+            "the social_post tool for that, this tool only manages the "
+            "product catalog itself."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "add_product | publish | status | high_ticket_picks | you_might_have_missed | this_weeks_hottest"},
+                "product_id": {"type": "STRING", "description": "Target product id, for 'publish'/'status'. Omit on 'add_product' to auto-generate one."},
+                "name": {"type": "STRING", "description": "Product name, for 'add_product'"},
+                "category": {"type": "STRING", "description": "Product category, for 'add_product'"},
+                "subcategory": {"type": "STRING", "description": "Product subcategory, for 'add_product'"},
+                "price": {"type": "NUMBER", "description": "Current price, for 'add_product'"},
+                "original_price": {"type": "NUMBER", "description": "Original/pre-discount price, for 'add_product' (optional)"},
+                "url": {"type": "STRING", "description": "Product page URL, for 'add_product'"},
+                "affiliate_url": {"type": "STRING", "description": "Affiliate link, for 'add_product' (optional, falls back to url)"},
+                "image_url": {"type": "STRING", "description": "Product image URL, for 'add_product' (optional)"},
+                "retailer": {"type": "STRING", "description": "amazon | tiktok_shop — no other retailer is approved yet, for 'add_product'"},
+                "merchant": {"type": "STRING", "description": "Merchant/brand name, for 'add_product' (optional)"},
+                "affiliate_network": {"type": "STRING", "description": "Affiliate network name, for 'add_product' (optional)"},
+                "commission_rate": {"type": "NUMBER", "description": "Commission rate as a fraction e.g. 0.08 for 8%, for 'add_product' (optional)"},
+                "product_rating": {"type": "NUMBER", "description": "Product rating out of 5, for 'add_product' (optional)"},
+                "description": {"type": "STRING", "description": "Product description, for 'add_product' (optional)"},
+                "tags": {"type": "STRING", "description": "Comma-separated tags, for 'add_product' (optional)"},
+                "approved": {"type": "BOOLEAN", "description": "Must be true to actually publish, for 'publish' — only set true on Lee's explicit instruction"},
+                "limit": {"type": "INTEGER", "description": "Max results, for the read-only actions (default varies)"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "buildpro_matching",
         "description": (
             "BuildPro Recruiting: candidate records and candidate-to-job "

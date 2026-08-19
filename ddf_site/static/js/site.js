@@ -145,7 +145,34 @@ async function renderProductDetail(containerId, slug) {
         ctaBtn.textContent = "LINK COMING SOON";
       }
     }
+
+    renderMissedStrip(deal.product_id);
   } catch (err) {
     el.innerHTML = `<div class="empty-state">This deal is temporarily unavailable.</div>`;
+  }
+}
+
+async function renderMissedStrip(currentProductId) {
+  // "You Might Have Missed" — surfaced right where a visitor is already
+  // looking at one product, not just buried on its own page. Renders
+  // nothing at all (no empty-state box) when there's genuinely nothing
+  // to show yet, so a young catalog doesn't advertise its own emptiness
+  // on every single product page.
+  const host = document.getElementById("product-detail");
+  if (!host) return;
+  try {
+    const resp = await fetch(`/api/deals/you-might-have-missed?exclude=${encodeURIComponent(currentProductId)}&limit=6`);
+    const data = await resp.json();
+    const deals = data.deals || [];
+    if (deals.length === 0) return;
+    const strip = document.createElement("div");
+    strip.className = "missed-strip";
+    strip.innerHTML = `
+      <div class="section-title"><h2>You Might Have Missed</h2></div>
+      <div class="deal-grid">${deals.map(dealCardHtml).join("")}</div>
+    `;
+    host.after(strip);
+  } catch (err) {
+    // silent — this is a supplementary strip, never blocks the main page
   }
 }

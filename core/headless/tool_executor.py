@@ -51,6 +51,7 @@ from actions import hubspot_integration
 from actions import buffer_integration
 from actions import buildpro_data
 from actions import buildpro_matching
+from actions import daily_deal_finders as ddf
 from actions import google_auth
 from actions import business_intelligence as biz_intel
 from actions import opportunity_engine as opp_engine
@@ -792,6 +793,92 @@ class ToolExecutor:
                     )
             else:
                 result = f"Unknown buildpro_matching action: {bmaction}"
+
+        elif name == "daily_deal_finders":
+            daction = (args.get("action") or "").strip().lower()
+            if daction == "add_product":
+                pname = (args.get("name") or "").strip()
+                price = args.get("price")
+                if not pname or price is None:
+                    result = "I need at least the product name and price to add it."
+                else:
+                    payload = {
+                        "name": pname,
+                        "source": args.get("source") or "manual",
+                        "category": args.get("category") or "",
+                        "price": float(price),
+                        "current_price": float(price),
+                        "url": args.get("url") or "",
+                    }
+                    for key in ("subcategory", "affiliate_url", "image_url", "retailer",
+                                "merchant", "affiliate_network", "description", "tags",
+                                "product_id"):
+                        if args.get(key):
+                            payload[key] = args[key]
+                    if args.get("original_price") is not None:
+                        payload["original_price"] = float(args["original_price"])
+                    if args.get("commission_rate") is not None:
+                        payload["commission_rate"] = float(args["commission_rate"])
+                    if args.get("product_rating") is not None:
+                        payload["product_rating"] = float(args["product_rating"])
+                    try:
+                        saved = await loop.run_in_executor(None, lambda: ddf.save_product(payload))
+                        result = (
+                            f"Added to DDF (id {saved['product_id']}, status {saved['status']}): {pname}. "
+                            "Not visible on the site yet — call 'publish' when it's ready."
+                        )
+                    except ValueError as e:
+                        result = str(e)
+            elif daction == "publish":
+                pid = (args.get("product_id") or "").strip()
+                if not pid:
+                    result = "I need the product id to publish."
+                else:
+                    approved = bool(args.get("approved", False))
+                    r = await loop.run_in_executor(None, lambda: ddf.advance_to_published(pid, approved=approved))
+                    audit_log.record(
+                        "ddf_publish_product", execution_status="succeeded" if r.get("ok") else "not_approved" if r.get("state") == "NOT_APPROVED" else "failed",
+                        result={"product_id": pid}, error=None if r.get("ok") else r.get("detail"),
+                        external_system="ddf_site", reference_id=pid,
+                    )
+                    if r.get("ok") and r.get("already_published"):
+                        result = f"{pid} is already published."
+                    elif r.get("ok"):
+                        result = f"Published {pid} — it's live on the site now."
+                    elif r.get("state") == "NOT_APPROVED":
+                        result = f"{pid} is reviewed and ready — needs your explicit approval to actually go live."
+                    else:
+                        result = f"Couldn't publish {pid}: {r.get('detail')}"
+            elif daction == "status":
+                pid = (args.get("product_id") or "").strip()
+                if not pid:
+                    result = "I need the product id."
+                else:
+                    product = await loop.run_in_executor(None, lambda: ddf.get_product(pid))
+                    result = f"{pid}: {product['status']}" if product else f"No product found with id {pid}."
+            elif daction == "high_ticket_picks":
+                limit = int(args.get("limit") or 2)
+                picks = await loop.run_in_executor(None, lambda: ddf.select_daily_high_ticket_picks(limit=limit))
+                result = (
+                    "; ".join(f"{p['name']} (${p.get('current_price')}, id {p['product_id']})" for p in picks)
+                    if picks else "No high-ticket candidates ready yet — nothing past review stage is priced $100+."
+                )
+            elif daction == "you_might_have_missed":
+                limit = int(args.get("limit") or 10)
+                missed = await loop.run_in_executor(None, lambda: ddf.get_you_might_have_missed(limit=limit))
+                result = (
+                    "; ".join(f"{p['name']} (id {p['product_id']}, score {p['rank_score']})" for p in missed)
+                    if missed else "Nothing published yet outside of today."
+                )
+            elif daction == "this_weeks_hottest":
+                limit = int(args.get("limit") or 10)
+                hottest = await loop.run_in_executor(None, lambda: ddf.get_this_weeks_hottest(limit=limit))
+                result = (
+                    "; ".join(f"{p['name']} (id {p['product_id']}, score {p['rank_score']})" for p in hottest)
+                    if hottest else "Nothing published in the last 7 days yet."
+                )
+            else:
+                result = f"Unknown daily_deal_finders action: {daction}"
 
         elif name == "proactive_settings":
             paction = (args.get("action") or "status").strip().lower()

@@ -44,8 +44,10 @@ NAV_LINKS = [
     ("/", "Home"),
     ("/todays-deals", "Today's Deals"),
     ("/trending", "Trending"),
+    ("/this-week", "This Week"),
     ("/best-sellers", "Best Sellers"),
     ("/high-ticket", "High-Ticket"),
+    ("/you-might-have-missed", "You Might Have Missed"),
     ("/categories", "Categories"),
     ("/amazon", "Amazon"),
     ("/tiktok-shop", "TikTok Shop"),
@@ -123,13 +125,22 @@ class DDFSiteServer:
               <h1>Real deals, worth your time.</h1>
               <p>Hand-picked daily deals from Amazon and TikTok Shop — updated as we find them. No fake discounts, no fabricated prices.</p>
             </div>
-            <div class="section-title"><h2>Today's Deals</h2><span class="sub"><a href="/todays-deals">See all</a></span></div>
+            <div class="section-title"><h2>Today's High-Ticket Picks</h2><span class="sub"><a href="/high-ticket">See all high-ticket</a></span></div>
+            <div id="high-ticket-picks-grid" class="deal-grid"></div>
+            <div class="section-title" style="margin-top:36px"><h2>Today's Deals</h2><span class="sub"><a href="/todays-deals">See all</a></span></div>
             <div id="today-grid" class="deal-grid"></div>
             <div class="section-title" style="margin-top:36px"><h2>Trending</h2><span class="sub"><a href="/trending">See all</a></span></div>
             <div id="trending-grid" class="deal-grid"></div>
+            <div class="section-title" style="margin-top:36px"><h2>This Week's Hottest</h2><span class="sub"><a href="/this-week">See all</a></span></div>
+            <div id="this-week-grid" class="deal-grid"></div>
+            <div class="section-title" style="margin-top:36px"><h2>You Might Have Missed</h2><span class="sub"><a href="/you-might-have-missed">See all</a></span></div>
+            <div id="missed-grid" class="deal-grid"></div>
             <script>
+              renderDealGrid("high-ticket-picks-grid", "/api/deals/high-ticket-picks", "No high-ticket picks ready yet — check back soon.");
               renderDealGrid("today-grid", "/api/deals/today", "No deals posted yet today — check back soon.");
               renderDealGrid("trending-grid", "/api/deals/trending", "Nothing trending yet.");
+              renderDealGrid("this-week-grid", "/api/deals/this-week", "Nothing hot enough to rank yet this week.");
+              renderDealGrid("missed-grid", "/api/deals/you-might-have-missed", "Nothing older to surface yet.");
             </script>
             """
             return _shell("Home", content, "/")
@@ -160,6 +171,20 @@ class DDFSiteServer:
             return _listing_page(
                 "High-Ticket Deals", "Bigger purchases, bigger savings.",
                 "/api/deals/high-ticket", "/high-ticket", "No high-ticket deals yet.",
+            )
+
+        @app.get("/this-week", response_class=HTMLResponse)
+        async def this_week():
+            return _listing_page(
+                "This Week's Hottest", "The best of the last 7 days, ranked by real performance.",
+                "/api/deals/this-week", "/this-week", "Nothing hot enough to rank yet this week.",
+            )
+
+        @app.get("/you-might-have-missed", response_class=HTMLResponse)
+        async def you_might_have_missed_page():
+            return _listing_page(
+                "You Might Have Missed", "Still worth a look — from the last couple of weeks, not just today.",
+                "/api/deals/you-might-have-missed", "/you-might-have-missed", "Nothing older to surface yet — check back after a few days of deals.",
             )
 
         @app.get("/categories", response_class=HTMLResponse)
@@ -273,6 +298,21 @@ class DDFSiteServer:
         @app.get("/api/deals/high-ticket")
         async def api_deals_high_ticket(min_price: float = 100.0, limit: int = 20):
             return JSONResponse({"deals": ddf.get_high_ticket_deals(min_price=min_price, limit=limit)})
+
+        @app.get("/api/deals/high-ticket-picks")
+        async def api_deals_high_ticket_picks(limit: int = 2):
+            # The deliberate daily selection (demand/trend/commission, not
+            # just price) — distinct from /api/deals/high-ticket above,
+            # which is the broader "browse everything $100+" page.
+            return JSONResponse({"deals": ddf.select_daily_high_ticket_picks(limit=limit)})
+
+        @app.get("/api/deals/you-might-have-missed")
+        async def api_you_might_have_missed(exclude: str | None = None, limit: int = 12):
+            return JSONResponse({"deals": ddf.get_you_might_have_missed(exclude_product_id=exclude, limit=limit)})
+
+        @app.get("/api/deals/this-week")
+        async def api_this_weeks_hottest(limit: int = 20):
+            return JSONResponse({"deals": ddf.get_this_weeks_hottest(limit=limit)})
 
         @app.get("/api/categories")
         async def api_categories():
