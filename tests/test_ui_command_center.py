@@ -185,6 +185,28 @@ def test_orb_tts_does_not_have_the_speak_once_then_silent_bug(monkeypatch):
     assert "clearTimeout(window._orbSpeakingFallback)" in set_orb_state_body.group(1)
 
 
+def test_orb_tts_unlocks_on_a_real_user_gesture_for_safari(monkeypatch):
+    # Second report from Lee, after the fix above: "he goes from listening
+    # to thinking and idle" — voice commands specifically never spoke.
+    # Safari requires speak() to happen within "real" user-gesture
+    # activation, and a voice command's actual speak() call happens after
+    # mic click -> recognition.onresult (async) -> await fetch (async) ->
+    # speak — activation has long expired by then, so Safari silently
+    # drops it. Fix: a near-silent utterance spoken synchronously inside
+    # the real click handlers (mic button, send form) unlocks speech
+    # synthesis for the rest of the page session.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "function unlockSpeechSynthesis()" in html
+    assert 'micBtn?.addEventListener("click", unlockSpeechSynthesis)' in html
+    assert 'orbInputRow.addEventListener("submit", unlockSpeechSynthesis)' in html
+    # Also waits for the async voice list before actually speaking, and
+    # logs the real error to the console instead of failing silently.
+    assert "function whenVoicesReady(cb)" in html
+    assert "voiceschanged" in html
+    assert "console.warn(\"[Jarvis orb] speechSynthesis failed:\"" in html
+
+
 def test_orb_controls_are_always_visible_with_text_labels(monkeypatch):
     # Lee reported "the buttons are confusing" — hover-to-reveal icons with
     # only a title="" tooltip aren't discoverable. Each control now has a

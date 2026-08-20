@@ -1597,16 +1597,58 @@ checkSession();
   // alive; (2) calling speak() in the same tick as cancel() can silently
   // no-op — a zero-delay setTimeout defers to the next tick and avoids it.
   let currentUtterance = null;
+
+  // Safari specifically requires speak() to happen while the page still
+  // has "real" user-gesture activation — and by the time a voice command
+  // gets here (mic click -> recognition.onresult, itself async -> await
+  // fetch(/ui/api/chat) -> THEN speak), that activation has long expired,
+  // so Safari silently drops the utterance: no error, onstart never
+  // fires, and the orb just falls through its fallback timer straight to
+  // idle — exactly "listening -> thinking -> idle, never speaks." The
+  // fix: speak a near-silent utterance synchronously inside the actual
+  // click handler (mic button / send button), which "unlocks" speech
+  // synthesis for the rest of the page session — same trick sites use to
+  // unlock <audio> autoplay. Safe to call repeatedly; only the first
+  // call in a session actually does anything.
+  let synthesisUnlocked = false;
+  function unlockSpeechSynthesis() {
+    if (synthesisUnlocked || !window.speechSynthesis) return;
+    synthesisUnlocked = true;
+    const primer = new SpeechSynthesisUtterance(" ");
+    primer.volume = 0;
+    window.speechSynthesis.speak(primer);
+  }
+  micBtn?.addEventListener("click", unlockSpeechSynthesis);
+  orbInputRow.addEventListener("submit", unlockSpeechSynthesis);
+
+  // Chrome/Firefox load voices asynchronously — speak() called before the
+  // first 'voiceschanged' event can silently fail on some builds. If the
+  // list is already empty, wait for it once (capped so a browser that
+  // never fires the event can't hang a reply forever).
+  function whenVoicesReady(cb) {
+    if (!window.speechSynthesis) return cb();
+    if (window.speechSynthesis.getVoices().length > 0) return cb();
+    let done = false;
+    const finish = () => { if (!done) { done = true; cb(); } };
+    window.speechSynthesis.addEventListener("voiceschanged", finish, { once: true });
+    setTimeout(finish, 800);
+  }
+
   window.speakReply = function speakReply(text) {
     if (!voiceOn || !window.speechSynthesis || !text) return;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.resume(); // Chrome can leave the engine "paused" after a tab loses focus, silently blocking every speak() after that until resumed
-    const utterance = new SpeechSynthesisUtterance(text);
-    currentUtterance = utterance; // pin — see comment above
-    utterance.onstart = () => { _speaking = true; window.setOrbState("speaking"); };
-    utterance.onend = () => { _speaking = false; currentUtterance = null; window.setOrbState("idle"); };
-    utterance.onerror = () => { _speaking = false; currentUtterance = null; window.setOrbState("idle"); };
-    setTimeout(() => window.speechSynthesis.speak(utterance), 0);
+    whenVoicesReady(() => {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume(); // Chrome can leave the engine "paused" after a tab loses focus, silently blocking every speak() after that until resumed
+      const utterance = new SpeechSynthesisUtterance(text);
+      currentUtterance = utterance; // pin — see comment above
+      utterance.onstart = () => { _speaking = true; window.setOrbState("speaking"); };
+      utterance.onend = () => { _speaking = false; currentUtterance = null; window.setOrbState("idle"); };
+      utterance.onerror = (e) => {
+        _speaking = false; currentUtterance = null; window.setOrbState("idle");
+        console.warn("[Jarvis orb] speechSynthesis failed:", e.error || e);
+      };
+      setTimeout(() => window.speechSynthesis.speak(utterance), 0);
+    });
   };
 })();
 </script>
