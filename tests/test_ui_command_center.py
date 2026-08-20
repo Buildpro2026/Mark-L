@@ -162,6 +162,43 @@ def test_orb_has_real_voice_input_and_output(monkeypatch):
     assert "isn't supported in this browser" in html  # graceful degrade, not an error
 
 
+def test_orb_tts_does_not_have_the_speak_once_then_silent_bug(monkeypatch):
+    # Lee reported: "he spoke once and now he doesn't... goes from thinking
+    # to idle, never speaks." Two real Chrome speechSynthesis footguns
+    # together explain that: (1) an utterance with no reference beyond the
+    # local variable that created it can be garbage-collected mid-speech;
+    # (2) calling speak() in the same tick as cancel() can silently no-op.
+    # Also: the "speaking" fallback timer (visual pulse when voice replies
+    # are off) must be cancelled once real onstart fires, or it forces the
+    # orb back to idle mid-sentence on any reply that takes over 2.5s to read.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    # (1) utterance is pinned to a variable that outlives the function call.
+    assert "currentUtterance = utterance" in html
+    # (2) speak() deferred to the next tick, not called synchronously after cancel().
+    assert "setTimeout(() => window.speechSynthesis.speak(utterance), 0)" in html
+    # The fallback timer is cleared on every setOrbState call, not just
+    # conditionally — this is what stops it firing after real TTS takes over.
+    import re
+    set_orb_state_body = re.search(r"window\.setOrbState = function setOrbState\(state\) \{(.*?)\n  \};", html, re.S)
+    assert set_orb_state_body is not None
+    assert "clearTimeout(window._orbSpeakingFallback)" in set_orb_state_body.group(1)
+
+
+def test_orb_controls_are_always_visible_with_text_labels(monkeypatch):
+    # Lee reported "the buttons are confusing" — hover-to-reveal icons with
+    # only a title="" tooltip aren't discoverable. Each control now has a
+    # permanent text caption and isn't gated behind a hover-only opacity.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "orb-caption" in html
+    assert ">Talk<" in html
+    assert ">Always on<" in html
+    assert ">Voice reply<" in html
+    # The old hover-gated opacity rules for #orb-controls must actually be gone.
+    assert "#orb-widget:hover #orb-controls" not in html
+
+
 def test_orb_has_its_own_compact_chat_input(monkeypatch):
     # Lee wants to talk to Jarvis at the orb directly, not have to switch
     # to the Command report first.
