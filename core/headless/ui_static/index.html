@@ -67,7 +67,7 @@
   #login-error { color: var(--bad); font-size: 12px; min-height: 1.2em; margin-top: 10px; }
   .field-label { display: block; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
 
-  /* ── shell: sidebar + content ─────────────────────────────────────── */
+  /* ── shell: orb-first command space ───────────────────────────────── */
   #shell { display: none; height: 100vh; }
   #shell.active { display: flex; }
   #sidebar {
@@ -241,7 +241,7 @@
      whenever a different report opens so it never sits on top of what
      you're reading. --orb-state-color drives the glow/pulse color;
      JS sets it per idle/listening/thinking/speaking/interrupted. */
-  :root { --orb-size: 128px; --orb-state-color: #4b6b7c; }
+  :root { --orb-size: 260px; --orb-state-color: #4b6b7c; }
   #orb-widget {
     position: fixed; z-index: 60; display: flex; flex-direction: column; align-items: center; gap: 10px;
     left: var(--orb-x, calc(100vw - 128px - 32px)); top: var(--orb-y, calc(100vh - 128px - 32px));
@@ -289,7 +289,63 @@
   #orb-state-label {
     font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
   }
-  @media (max-width: 640px) { #orb-widget { --orb-size: 92px !important; } }
+  @media (max-width: 640px) { #orb-widget { --orb-size: 112px !important; } }
+
+  /* The executive information remains available, but it now lives as a
+     quiet, contextual "lens" around JARVIS instead of a conventional
+     sidebar dashboard. All existing page ids and API bindings stay intact. */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+    background: radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--accent) 15%, transparent), transparent 26%),
+                radial-gradient(circle at 18% 16%, rgba(255,255,255,.035), transparent 25%), var(--bg);
+  }
+  #shell.active { display: grid; grid-template-rows: 64px minmax(0, 1fr); }
+  #sidebar {
+    width: auto; min-height: 64px; border-right: 0; border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(16px);
+    padding: 0 24px; flex-direction: row; align-items: center; gap: 16px;
+  }
+  #sidebar .brand { padding: 0; font-size: 12px; }
+  #identity-badge { padding: 0; margin-right: auto; }
+  #report-picker-wrap { padding: 0; width: min(230px, 34vw); }
+  #report-picker-wrap .field-label { display: none; }
+  #report-picker { padding: 8px 34px 8px 12px; background-color: color-mix(in srgb, var(--panel-alt) 86%, transparent); }
+  #approval-badge { margin: 0; padding: 7px 10px; white-space: nowrap; }
+  #sidebar-foot { padding: 0; margin: 0; border: 0; }
+  #sidebar-foot button { width: auto; padding: 7px 10px; }
+  #content { padding: clamp(24px, 5vh, 56px) clamp(20px, 7vw, 120px) 90px; max-width: 1320px; width: 100%; margin: 0 auto; }
+  .page-head { max-width: 780px; margin-left: auto; margin-right: auto; }
+  .page-head h1 { font-size: 11px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
+  .page.active { animation: lens-arrive .34s ease both; }
+  @keyframes lens-arrive { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+  #page-home { min-height: calc(100vh - 180px); padding-top: min(28vh, 260px); }
+  #page-home .page-head { display: none; }
+  #home-greeting { max-width: 540px; margin: 0 auto 28px; text-align: center; font-size: 16px; }
+  #page-home .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 980px; margin: 0 auto; }
+  #page-home section.block, .page:not(#page-home) section.block, .page:not(#page-home) .row-list, #chat-wrap, #buildpro-body, #ddf-body, #intelligence-body, #ceo-body {
+    background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--line); border-radius: 18px;
+    backdrop-filter: blur(12px); padding: 16px 18px; box-shadow: 0 20px 70px rgba(0,0,0,.13);
+  }
+  #page-home section.block { margin: 0; min-height: 135px; }
+  #page-home section.block h2 { border: 0; color: var(--accent); }
+  .page:not(#page-home) { max-width: 900px; margin: 0 auto; }
+  .page:not(#page-home) section.block { margin-bottom: 18px; }
+  #chat-wrap { max-width: 780px; }
+  #buildpro-body, #ddf-body, #intelligence-body, #ceo-body { padding: 18px; }
+  #orb-widget { left: var(--orb-x, calc(50vw - var(--orb-size) / 2)); top: var(--orb-y, 96px); }
+  #orb-canvas { cursor: grab; }
+  #orb-input-row input { font-size: 13px; padding: 10px 15px; }
+  #orb-state-label { color: var(--accent); }
+  @media (max-width: 760px) {
+    #shell.active { grid-template-rows: auto minmax(0, 1fr); }
+    #sidebar { padding: 10px 14px; flex-wrap: wrap; gap: 8px; }
+    #identity-badge { margin-right: 0; }
+    #report-picker-wrap { width: 170px; margin-left: auto; }
+    #approval-badge-text, #sidebar-foot { display: none; }
+    #content { padding: 180px 16px 44px; }
+    #page-home { padding-top: 0; }
+    #page-home .grid2 { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -1432,7 +1488,9 @@ checkSession();
     let pos;
     try { pos = JSON.parse(localStorage.getItem("jarvis_orb_pos") || "null"); } catch (e) { pos = null; }
     if (pos && typeof pos.x === "number") applyPosition(pos.x, pos.y);
-    else applyPosition(window.innerWidth - (savedSize || 128) - 32, window.innerHeight - (savedSize || 128) - 32);
+    // Start JARVIS in the center of the command space. A saved position is
+    // always respected, so this changes the first-run experience only.
+    else applyPosition((window.innerWidth - (savedSize || 260)) / 2, 92);
     orbCssSize = sizeCanvas();
   })();
 
@@ -1477,7 +1535,7 @@ checkSession();
   });
   resizeHandle.addEventListener("pointermove", (e) => {
     if (!resizing) return;
-    const next = clamp(resizeStartSize + (e.clientX - resizeStartX), 72, 220);
+    const next = clamp(resizeStartSize + (e.clientX - resizeStartX), 112, 360);
     document.documentElement.style.setProperty("--orb-size", next + "px");
     orbCssSize = sizeCanvas();
   });

@@ -31,6 +31,18 @@ def test_ui_root_serves_the_spa_shell_without_login(monkeypatch):
     assert "login-screen" in r.text
 
 
+def test_bare_public_url_opens_the_orb_first_surface(monkeypatch):
+    """The deployed service should no longer land people in the old console.
+
+    /3d remains an explicit secondary surface; this only verifies the primary
+    browser entry point now leads to the voice-first executive UI.
+    """
+    client = _client(monkeypatch)
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 307
+    assert r.headers["location"] == "/ui"
+
+
 def test_ui_session_reports_not_authenticated_without_a_cookie(monkeypatch):
     client = _client(monkeypatch)
     r = client.get("/ui/session")
@@ -270,5 +282,4 @@ def test_ui_tasks_endpoint_lists_all_tasks_for_the_org_chart(monkeypatch):
     body = r.json()
     assert "tasks" in body
     assert isinstance(body["tasks"], list)
-
 

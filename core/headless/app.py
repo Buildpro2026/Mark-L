@@ -3,12 +3,11 @@ a live Gemini Live session. Assembles the health check, tool-execution API,
 and Agent Orchestrator API behind one app object; core/headless_main.py is
 the process entry point that actually serves it plus the background worker.
 
-The bare public URL (see the dashboard mount at the bottom of create_app)
-serves the ORIGINAL JARVIS interface — dashboard/server.py's login/pairing
-flow, phone command-center (app.html), and 3D spatial command center
-(/3d) — not a bespoke replacement UI. core/headless/ui.py's own generic
-SPA stays mounted at /ui as a fallback surface (nothing currently links to
-it) rather than being deleted outright.
+The bare public URL opens the orb-first executive surface at /ui. Its
+conversation, approvals, agents, business data, and settings are backed by
+the same headless APIs as the rest of the service. dashboard/server.py's
+phone command center and 3D spatial command center remain available at their
+explicit routes, including /3d.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ import sqlite3
 import time
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from core.headless import agreement_routes
 from core.headless import config
@@ -116,13 +115,24 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     # module's docstring.
     app.include_router(agreement_routes.router)
 
-    # Everything else — "/", "/login", "/3d", "/ws", "/api/command", etc.
+    # The orb-first executive surface is now the primary browser entry point.
+    # The original phone dashboard and spatial command center remain mounted
+    # below at their existing explicit paths (/3d and its APIs).
+    @app.get("/", include_in_schema=False)
+    def primary_jarvis_ui():
+        if dashboard_server is None:
+            return JSONResponse(
+                {"error": "dashboard UI failed to load — check server logs", "status": "degraded"},
+                status_code=503,
+            )
+        return RedirectResponse(url="/ui", status_code=307)
+
+    # Everything else — "/login", "/3d", "/ws", "/api/command", etc.
     # — falls through to dashboard/server.py's own FastAPI app, mounted
     # last so the explicit routes above (/health, /api/tools*, /api/status,
     # /api/orchestrator/*, /ui/*) are matched first and never shadowed by
-    # it. This is what makes the bare public URL serve the ORIGINAL JARVIS
-    # phone/3D command-center UI instead of core/headless/ui.py's generic
-    # SPA (still reachable at /ui as a fallback — see module docstring).
+    # it. The bare public URL is handled by primary_jarvis_ui above; these
+    # routes remain available as supporting JARVIS surfaces.
     if dashboard_server is not None:
         app.mount("/", dashboard_server.app)
     else:
