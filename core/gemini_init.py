@@ -72,13 +72,13 @@ def configure_gemini_for_live_audio() -> bool:
     
     Prerequisites:
     - google-generativeai library installed
-    - GOOGLE_API_KEY environment variable set OR
+    - GEMINI_API_KEY environment variable set OR
     - gemini_api_key in config/api_keys.json
     """
-    api_key = os.getenv("GOOGLE_API_KEY") or get_gemini_api_key()
+    api_key = os.getenv("GEMINI_API_KEY") or get_gemini_api_key()
     
     if not api_key:
-        print("[Gemini Live] ✗ No API key found. Set GOOGLE_API_KEY env var or add gemini_api_key to config/api_keys.json")
+        print("[Gemini Live] ✗ No API key found. Set GEMINI_API_KEY env var or add gemini_api_key to config/api_keys.json")
         return False
     
     try:
@@ -148,12 +148,12 @@ def initialize_gemini():
     """
     print("\n[Gemini] Starting initialization sequence...")
     
-    api_key = os.getenv("GOOGLE_API_KEY") or get_gemini_api_key()
+    api_key = os.getenv("GEMINI_API_KEY") or get_gemini_api_key()
     
     if not api_key:
         print("[Gemini] ✗ FATAL: No API key configured")
         print("[Gemini] ℹ️  Configure one of:")
-        print("   1. Set GOOGLE_API_KEY environment variable")
+        print("   1. Set GEMINI_API_KEY environment variable")
         print("   2. Add 'gemini_api_key' to config/api_keys.json")
         return False
     
