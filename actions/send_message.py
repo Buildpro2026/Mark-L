@@ -7,9 +7,9 @@ from pathlib import Path
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE    = 0.06
+    pyautogui.PAUSE = 0.06
     _PYAUTOGUI = True
-except ImportError:
+except (ImportError, KeyError):
     _PYAUTOGUI = False
 
 try:
