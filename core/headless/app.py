@@ -62,15 +62,6 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     # failure here is logged and the core API stays up in a degraded mode
     # instead of crash-looping the whole process.
     dashboard_server = None
-    try:
-        from dashboard.server import DashboardServer
-        dashboard_server = DashboardServer()
-    except Exception:
-        logger.exception(
-            "dashboard/server.py failed to load — /health, the tools API, and the "
-            "orchestrator API stay up, but the phone/3D command-center UI at '/' "
-            "will not be available until this is fixed."
-        )
     app.state.dashboard_server = dashboard_server
 
     if start_background_worker:
