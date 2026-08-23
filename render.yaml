@@ -21,7 +21,7 @@ services:
     name: jarvis-headless-core
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-headless.txt
     startCommand: python -m core.headless_main
     healthCheckPath: /health
     envVars:
