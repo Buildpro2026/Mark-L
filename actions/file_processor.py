@@ -32,12 +32,12 @@ def _get_api_key() -> str:
 
 
 def _gemini_client():
-    from core.headless.gemini_client import get_client
-    _c = get_client(_get_api_key())
+    from google import genai
+    _c = genai.Client(api_key=_get_api_key())
 
     class _W:
         def generate_content(self, contents):
-            return _c.models.generate_content(model="gemini-flash-latest", contents=contents)
+            return _c.models.generate_content(model="gemini-2.5-flash", contents=contents)
 
     return _W()
 

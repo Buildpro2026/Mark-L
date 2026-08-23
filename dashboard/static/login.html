@@ -137,9 +137,9 @@
     <div class="logo"><em>J</em>ARVIS</div>
     <div class="sub">Remote Access</div>
     <p id="reconnecting">Reconnecting…</p>
-    <p class="hint">Press <strong style="color:var(--text)">Remote Control</strong> in the JARVIS desktop app to get a QR code or session key — or, for the cloud instance, paste your JARVIS API token.</p>
+    <p class="hint">Press <strong style="color:var(--text)">Remote Control</strong> in the JARVIS desktop app to get a QR code or session key.</p>
     <div class="key-wrap">
-      <input class="key-input" id="key" type="text"
+      <input class="key-input" id="key" type="text" maxlength="6"
              autocomplete="off" autocorrect="off" spellcheck="false"
              placeholder="· · · · · ·">
     </div>
@@ -149,20 +149,10 @@
       🎤 <strong style="color:var(--text)">Voice commands:</strong> open
       <code>chrome://flags</code> on your phone, search
       <code>Insecure origins treated as secure</code>, add your JARVIS URL, tap Relaunch.
-      This device stays signed in after connecting once — you won't need to enter this again.
     </p>
   </div>
 
   <script>
-    // Where to send the browser after a successful login — defaults to
-    // the phone dashboard ('/'), but /3d redirects here with ?next=/3d
-    // when it finds no session token, so login should bounce back there
-    // instead of always landing on the phone UI.
-    function _next() {
-      const raw = new URLSearchParams(location.search).get('next');
-      return (raw && raw.startsWith('/')) ? raw : '/';
-    }
-
     // Try auto-reconnect with stored device token (set on first QR login)
     (async function() {
       const devTok = localStorage.getItem('jarvis_device_token');
@@ -176,9 +166,9 @@
         });
         const d = await r.json();
         if (d.ok && d.token) {
-          localStorage.setItem('jarvis_key', d.key);
-          localStorage.setItem('jarvis_token', d.token);
-          location.replace(_next());
+          sessionStorage.setItem('jarvis_key', d.key);
+          sessionStorage.setItem('jarvis_token', d.token);
+          location.replace('/');
           return;
         }
       } catch (_) {}
@@ -190,22 +180,15 @@
     const inp = document.getElementById('key');
     inp.focus();
 
-    // A desktop-generated pairing key is always exactly 6 chars from a
-    // fixed charset, so it's safe to auto-uppercase/filter/auto-submit
-    // while typing. A pasted JARVIS API token is much longer and can
-    // contain characters that charset would strip — leave it untouched
-    // once the field grows past 6 chars, and require an explicit submit.
     inp.addEventListener('input', () => {
-      if (inp.value.length <= 6) {
-        inp.value = inp.value.toUpperCase().replace(/[^A-Z2-9]/g, '');
-        if (inp.value.length === 6) doLogin();
-      }
+      inp.value = inp.value.toUpperCase().replace(/[^A-Z2-9]/g, '');
+      if (inp.value.length === 6) doLogin();
     });
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 
     async function doLogin() {
       const key = inp.value.trim();
-      if (!key) { shake(); return; }
+      if (key.length < 6) { shake(); return; }
       let data;
       try {
         const r = await fetch('/login', {
@@ -219,13 +202,9 @@
         shake(); return;
       }
       if (data.ok && data.token) {
-        // Only a real 6-char pairing key doubles as the AES content-
-        // encryption seed (see app.html's _encReady) — a pasted API
-        // token has no such shared session key, so leave jarvis_key
-        // unset and let the phone UI fall back to plaintext-over-HTTPS.
-        if (key.length === 6) localStorage.setItem('jarvis_key', key);
-        localStorage.setItem('jarvis_token', data.token);
-        location.href = _next();
+        sessionStorage.setItem('jarvis_key', key);
+        sessionStorage.setItem('jarvis_token', data.token);
+        location.href = '/';
       } else {
         inp.value = '';
         inp.focus();

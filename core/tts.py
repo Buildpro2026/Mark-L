@@ -98,10 +98,6 @@ def _play_audio_bytes(audio_bytes: bytes) -> None:
     sd.wait()
 
 
-def _stopped(stop_event: Optional[threading.Event]) -> bool:
-    return stop_event is not None and stop_event.is_set()
-
-
 # ---------------------------------------------------------------------------
 # Engines
 # ---------------------------------------------------------------------------
@@ -112,13 +108,13 @@ class EdgeTTSEngine:
     def __init__(self, voice: str = "en-US-GuyNeural"):
         self.voice = voice
 
-    def speak(self, text: str, stop_event: Optional[threading.Event] = None) -> None:
+    def speak(self, text: str) -> None:
         loop = asyncio.new_event_loop()
         try:
             audio_bytes = loop.run_until_complete(self._synth(text))
         finally:
             loop.close()
-        if audio_bytes and not _stopped(stop_event):
+        if audio_bytes:
             _play_audio_bytes(audio_bytes)
 
     async def _synth(self, text: str) -> bytes:
@@ -311,7 +307,7 @@ class KokoroTTSEngine:
         except Exception as e:
             print(f"[TTS] Kokoro warmup warning: {e}")
 
-    def speak(self, text: str, stop_event: Optional[threading.Event] = None) -> None:
+    def speak(self, text: str) -> None:
         with self._lock:
             if self._pipeline is None:
                 self._init()
@@ -328,8 +324,6 @@ class KokoroTTSEngine:
         def _synth():
             try:
                 for _, _, audio in self._pipeline(text, voice=self.voice, speed=self.speed):
-                    if _stopped(stop_event):
-                        break
                     if audio is not None:
                         arr = _to_numpy(audio)
                         arr = _compress_silence(arr)
@@ -346,18 +340,9 @@ class KokoroTTSEngine:
         # Player runs in this thread so sd.wait() doesn't block the synth thread.
         while True:
             arr = audio_q.get()
-            if arr is None or _stopped(stop_event):
+            if arr is None:
                 break
             _play_np(arr, 24000)
-
-        if _stopped(stop_event):
-            # Drain so a synth thread blocked on a full queue (backpressure)
-            # can see the stop and exit, instead of join() below hanging.
-            while True:
-                try:
-                    audio_q.get_nowait()
-                except _queue.Empty:
-                    break
 
         synth_thread.join()
 
@@ -372,7 +357,7 @@ class ElevenLabsTTSEngine:
         self.api_key  = api_key
         self.voice_id = voice_id
 
-    def speak(self, text: str, stop_event: Optional[threading.Event] = None) -> None:
+    def speak(self, text: str) -> None:
         import requests
         headers = {
             "xi-api-key":   self.api_key,
@@ -388,11 +373,7 @@ class ElevenLabsTTSEngine:
             json=payload, headers=headers, timeout=30,
         )
         resp.raise_for_status()
-        # The HTTP fetch itself can't be aborted mid-flight without a bigger
-        # streaming-request rewrite — but at minimum, don't start playback if
-        # we were told to stop while waiting on the network.
-        if not _stopped(stop_event):
-            _play_audio_bytes(resp.content)
+        _play_audio_bytes(resp.content)
 
 
 # ---------------------------------------------------------------------------
@@ -406,10 +387,9 @@ class TTSPlayer:
     """
 
     def __init__(self, engine):
-        self._engine     = engine
-        self._playing    = False
-        self._lock       = threading.Lock()
-        self._stop_event = threading.Event()
+        self._engine  = engine
+        self._playing = False
+        self._lock    = threading.Lock()
 
     @property
     def is_playing(self) -> bool:
@@ -422,13 +402,12 @@ class TTSPlayer:
         on_done:  Optional[Callable] = None,
     ) -> None:
         """Synthesise and play text. BLOCKING – call from a dedicated thread."""
-        self._stop_event.clear()
         try:
             with self._lock:
                 self._playing = True
             if on_start:
                 on_start()
-            self._engine.speak(text, stop_event=self._stop_event)
+            self._engine.speak(text)
         except Exception as e:
             print(f"[TTS] Error: {e}")
         finally:
@@ -438,13 +417,7 @@ class TTSPlayer:
                 on_done()
 
     def stop(self) -> None:
-        """Stop playback immediately — aborts the live output stream instead
-        of sd.stop(), which waits for buffered audio to finish draining."""
-        self._stop_event.set()
-        try:
-            sd.get_stream().abort()   # raises RuntimeError if nothing has played yet
-        except Exception:
-            sd.stop()   # harmless no-op when nothing has played yet
+        sd.stop()
         with self._lock:
             self._playing = False
 

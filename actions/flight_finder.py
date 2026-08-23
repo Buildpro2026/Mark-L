@@ -62,8 +62,8 @@ def _parse_date(raw: str) -> str:
             return val.strftime("%Y-%m-%d")
 
     try:
-        from core.headless.gemini_client import get_client
-        _client  = get_client(_get_api_key())
+        from google import genai as _genai
+        _client  = _genai.Client(api_key=_get_api_key())
         response = _client.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=(
@@ -154,10 +154,10 @@ def _parse_flights_with_gemini(
     destination: str,
     date:        str,
 ) -> list[dict]:
+    from google import genai as _genai
     from google.genai import types
-    from core.headless.gemini_client import get_client
 
-    _client = get_client(_get_api_key())
+    _client = _genai.Client(api_key=_get_api_key())
     prompt  = (
         f"Extract flight options from {origin} to {destination} on {date} "
         f"from this Google Flights page text:\n\n{raw_text[:12000]}\n\n"
@@ -169,7 +169,7 @@ def _parse_flights_with_gemini(
 
     try:
         response = _client.models.generate_content(
-            model="gemini-flash-latest",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=(

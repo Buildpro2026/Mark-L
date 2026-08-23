@@ -16,8 +16,8 @@ BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
-MODEL_PLANNER    = "gemini-flash-latest"
-MODEL_WRITER     = "gemini-flash-latest"
+MODEL_PLANNER    = "gemini-2.5-flash"
+MODEL_WRITER     = "gemini-2.5-flash"
 
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -25,8 +25,8 @@ def _get_api_key() -> str:
 
 
 def _get_model(model_name: str):
-    from core.headless.gemini_client import get_client
-    _c = get_client(_get_api_key())
+    from google import genai
+    _c = genai.Client(api_key=_get_api_key())
 
     class _W:
         def generate_content(self, contents):

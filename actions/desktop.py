@@ -12,10 +12,7 @@ from datetime import datetime
 try:
     import pyautogui
     _PYAUTOGUI = True
-except Exception:
-    # Not just ImportError: pyautogui is installed but its mouseinfo
-    # dependency probes os.environ['DISPLAY'] at import time and raises
-    # KeyError on a headless Linux host with no X server (e.g. Render).
+except ImportError:
     _PYAUTOGUI = False
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
@@ -106,8 +103,8 @@ def _execute_generated_code(code: str, player=None) -> str:
 
 def _ask_gemini_for_desktop_action(task: str) -> str:
 
-    from core.headless.gemini_client import get_client
-    _client = get_client(_get_api_key())
+    from google import genai as _genai
+    _client = _genai.Client(api_key=_get_api_key())
 
     desktop = str(_get_desktop())
 
@@ -145,7 +142,7 @@ Output ONLY the Python code. No explanation, no markdown, no backticks.
 Task: {task}"""
 
     try:
-        response = _client.models.generate_content(model="gemini-flash-latest", contents=prompt)
+        response = _client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         code = response.text.strip()
         if code.startswith("```"):
             lines = code.split("\n")

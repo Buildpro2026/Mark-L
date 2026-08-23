@@ -20,10 +20,7 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
-except Exception:
-    # Not just ImportError: pyautogui is installed but its mouseinfo
-    # dependency probes os.environ['DISPLAY'] at import time and raises
-    # KeyError on a headless Linux host with no X server (e.g. Render).
+except ImportError:
     _PYAUTOGUI = False
 
 try:
@@ -320,8 +317,8 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         return None
 
     try:
+        from google import genai
         from google.genai import types as gtypes
-        from core.headless.gemini_client import get_client
 
         _require_pyautogui()
         w, h  = pyautogui.size()
@@ -330,7 +327,7 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         img.save(buf, format="PNG")
         image_bytes = buf.getvalue()
 
-        client = get_client(api_key)
+        client = genai.Client(api_key=api_key)
         prompt = (
             f"This is a screenshot of a {w}×{h} pixel screen. "
             f"Locate the UI element described as: '{description}'. "

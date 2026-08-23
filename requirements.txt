@@ -1,15 +1,11 @@
 PyQt6
 sounddevice
-miniaudio
 google-genai
 google-generativeai
-google-auth-oauthlib
-google-api-python-client
-anthropic
 pillow
 requests
 beautifulsoup4
-ddgs
+duckduckgo-search
 playwright
 pyautogui
 pyperclip

@@ -9,10 +9,7 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.06
     _PYAUTOGUI = True
-except Exception:
-    # Not just ImportError: pyautogui is installed but its mouseinfo
-    # dependency probes os.environ['DISPLAY'] at import time and raises
-    # KeyError on a headless Linux host with no X server (e.g. Render).
+except ImportError:
     _PYAUTOGUI = False
 
 try:

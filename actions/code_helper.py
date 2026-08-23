@@ -15,7 +15,7 @@ BASE_DIR           = get_base_dir()
 API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
 DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
-GEMINI_MODEL       = "gemini-flash-latest"
+GEMINI_MODEL       = "gemini-2.5-flash"
 
 
 def _get_api_key() -> str:
@@ -24,8 +24,8 @@ def _get_api_key() -> str:
 
 
 def _get_gemini(model: str = GEMINI_MODEL):
-    from core.headless.gemini_client import get_client
-    _c = get_client(_get_api_key())
+    from google import genai
+    _c = genai.Client(api_key=_get_api_key())
 
     class _W:
         def generate_content(self, contents):
@@ -456,10 +456,10 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
             print(f"[Code] ⚠️ Could not read file: {err}")
 
     try:
+        from google import genai
         from google.genai import types
-        from core.headless.gemini_client import get_client
 
-        client = get_client(_get_api_key())
+        client = genai.Client(api_key=_get_api_key())
 
         image_bytes  = screenshot_path.read_bytes()
         image_base64 = _image_to_base64(screenshot_path)
@@ -488,7 +488,7 @@ Be specific and actionable. If you see an error message, quote it exactly."""
         ]
 
         response = client.models.generate_content(
-            model="gemini-flash-latest",
+            model="gemini-2.5-flash",
             contents=contents,
         )
 

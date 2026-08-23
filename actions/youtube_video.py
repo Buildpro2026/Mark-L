@@ -12,10 +12,7 @@ from urllib.parse import quote_plus
 try:
     import pyautogui
     _PYAUTOGUI = True
-except Exception:
-    # Not just ImportError: pyautogui is installed but its mouseinfo
-    # dependency probes os.environ['DISPLAY'] at import time and raises
-    # KeyError on a headless Linux host with no X server (e.g. Render).
+except ImportError:
     _PYAUTOGUI = False
 
 try:
@@ -170,14 +167,14 @@ def _get_transcript(video_id: str) -> str | None:
 
 
 def _summarize_with_gemini(transcript: str, video_url: str) -> str:
+    from google import genai as _genai
     from google.genai import types
-    from core.headless.gemini_client import get_client
 
-    _client = get_client(_get_api_key())
+    _client = _genai.Client(api_key=_get_api_key())
     max_chars = 80000
     truncated = transcript[:max_chars] + ("..." if len(transcript) > max_chars else "")
     response  = _client.models.generate_content(
-        model="gemini-flash-latest",
+        model="gemini-2.5-flash",
         contents=f"Please summarize this YouTube video transcript:\n\n{truncated}",
         config=types.GenerateContentConfig(
             system_instruction=(

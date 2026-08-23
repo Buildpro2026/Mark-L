@@ -12,10 +12,7 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
-except Exception:
-    # Not just ImportError: pyautogui is installed but its mouseinfo
-    # dependency probes os.environ['DISPLAY'] at import time and raises
-    # KeyError on a headless Linux host with no X server (e.g. Render).
+except ImportError:
     _PYAUTOGUI = False
 
 try:
@@ -591,8 +588,8 @@ _DANGEROUS_ACTIONS = {"restart", "shutdown"}
 
 def _detect_action(description: str) -> dict:
 
-    from core.headless.gemini_client import get_client
-    _client = get_client(_get_api_key())
+    from google import genai as _genai
+    _client = _genai.Client(api_key=_get_api_key())
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
                 ", volume_set, type_text, press_key, reload_n"
