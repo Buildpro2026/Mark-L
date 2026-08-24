@@ -16,12 +16,33 @@ from __future__ import annotations
 import logging
 import platform
 import sys
+import types
 
 import uvicorn
 
+# Render/Linux is headless. Some legacy desktop actions import pyautogui at
+# module import time even though those actions are not usable in the cloud.
+# Provide a tiny compatibility module so one legacy import cannot crash the
+# entire headless service. Actual desktop calls still fail explicitly rather
+# than pretending a cloud container has a GUI.
+if platform.system() == "Linux" and not __import__("os").environ.get("DISPLAY"):
+    if "pyautogui" not in sys.modules:
+        _headless_pyautogui = types.ModuleType("pyautogui")
+
+        def _desktop_unavailable(*_args, **_kwargs):
+            raise RuntimeError("Desktop automation is unavailable in the headless cloud runtime.")
+
+        for _name in (
+            "click", "doubleClick", "moveTo", "dragTo", "scroll",
+            "press", "keyDown", "keyUp", "write", "hotkey",
+            "screenshot", "position", "size", "locateOnScreen",
+        ):
+            setattr(_headless_pyautogui, _name, _desktop_unavailable)
+        sys.modules["pyautogui"] = _headless_pyautogui
+
 from actions.google_auth import ensure_credentials_from_env
 from core.headless import config
-from core.headless.app import create_app
+from core.headless import app as _headless_app
 from core.startup import print_startup_banner
 
 
@@ -50,7 +71,7 @@ def main() -> None:
         )
     ensure_credentials_from_env()   # no-op unless GOOGLE_TOKEN_JSON/GOOGLE_CLIENT_SECRET_JSON are set
 
-    app = create_app()
+    app = _headless_app.create_app()
     uvicorn.run(app, host=config.HEADLESS_HOST, port=config.HEADLESS_PORT)
 
 
