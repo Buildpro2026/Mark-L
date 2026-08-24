@@ -43,7 +43,7 @@ HEADLESS_HOST = _env("JARVIS_HEADLESS_HOST", "0.0.0.0")
 HEADLESS_PORT = int(_env("JARVIS_HEADLESS_PORT") or _env("PORT", "8787"))
 PUBLIC_BASE_URL = _env("JARVIS_PUBLIC_URL", "https://jarvis-headless-core.onrender.com").rstrip("/")
 
-# Cloud JARVIS ships with its operational knowledge in the repository.
+# Cloud JARVIS ships with the operational knowledge in the repository.
 # An explicit environment path still wins when a true synced Obsidian vault
 # is supplied later. Until then the committed JARVIS Brain is the canonical
 # read-only cloud knowledge source.
@@ -51,9 +51,10 @@ _OBSIDIAN_DEFAULT = BASE_DIR / "knowledge" / "JARVIS Brain"
 OBSIDIAN_VAULT_PATH = _env("JARVIS_OBSIDIAN_VAULT_PATH", str(_OBSIDIAN_DEFAULT))
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
-# Retained only as a compatibility/config-report field. Headless chat no
-# longer falls back to Anthropic; Gemini is the sole cloud chat provider.
-ANTHROPIC_TOKEN = _env("ANTHROPIC_TOKEN")
+# Anthropic is intentionally disabled. This is kept as None so older fallback
+# code paths cannot activate even if an obsolete Render environment variable
+# remains behind. Gemini is the sole cloud chat provider.
+ANTHROPIC_TOKEN = None
 AIRTABLE_TOKEN = _env("AIRTABLE_TOKEN")
 HUBSPOT_TOKEN = _env("HUBSPOT_TOKEN")
 BUFFER_TOKEN = _env("BUFFER_TOKEN")
@@ -71,7 +72,7 @@ def summarize() -> dict:
         "headless_host": HEADLESS_HOST,
         "headless_port": HEADLESS_PORT,
         "gemini_api_key_env_set": bool(GEMINI_API_KEY),
-        "anthropic_token_env_set": bool(ANTHROPIC_TOKEN),
+        "anthropic_token_env_set": False,
         "airtable_token_env_set": bool(AIRTABLE_TOKEN),
         "hubspot_token_env_set": bool(HUBSPOT_TOKEN),
         "buffer_token_env_set": bool(BUFFER_TOKEN),
