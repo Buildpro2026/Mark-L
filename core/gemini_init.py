@@ -113,7 +113,7 @@ def get_gemini_live_session_params() -> dict:
     Includes proper audio codec, sample rate, and safety settings.
     """
     return {
-        "model": "models/gemini-2.0-flash-exp",
+        "model": "models/gemini-2.5-flash-lite",
         "config": {
             "generation_config": {
                 "temperature": 0.7,
