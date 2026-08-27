@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 google-genai
 google-generativeai
+groq
 requests
 beautifulsoup4
 duckduckgo-search

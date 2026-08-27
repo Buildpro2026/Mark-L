@@ -23,7 +23,7 @@ from PyQt6.QtCore import (
     QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
+    QBrush, QColor, QConicalGradient, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
@@ -2901,6 +2901,23 @@ class MainWindow(QMainWindow):
     def notify_phone_connected(self) -> None:
         if self._remote_overlay and self._remote_overlay.isVisible():
             self._remote_overlay.mark_connected()
+
+    def _open_3d_command_center(self):
+        """Opens the /3d spatial command center in the system browser at
+        whatever URL/scheme the dashboard is actually running on right
+        now — never a hardcoded http:// guess, since DashboardServer.get_url()
+        is the only source of truth for scheme+port (it flips to https://
+        once config/certs/jarvis.{crt,key} exist, and a wrong-scheme guess
+        fails silently in the browser rather than erroring visibly)."""
+        if not self.on_remote_clicked:
+            self._log.append_log("SYS: Dashboard not running — command center unavailable.")
+            return
+        result = self.on_remote_clicked()
+        if not result:
+            self._log.append_log("SYS: Could not reach the dashboard for the command center URL.")
+            return
+        url = result[0]
+        QDesktopServices.openUrl(QUrl(f"{url}/3d"))
 
     def _open_remote(self):
         if not self.on_remote_clicked:

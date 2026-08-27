@@ -228,7 +228,7 @@ def test_background_worker_starts_independently_of_gemini_session():
         worker = BackgroundWorker()
         worker.start()
         try:
-            assert len(worker._tasks) == 3
+            assert len(worker._tasks) == 4
             assert all(isinstance(t, asyncio.Task) for t in worker._tasks)
             assert all(not t.done() for t in worker._tasks)
         finally:
@@ -238,6 +238,45 @@ def test_background_worker_starts_independently_of_gemini_session():
     asyncio.run(_run())
     # No Gemini/google.genai import anywhere in background.py or its
     # actions.* dependencies — this ran with none configured/mocked at all.
+
+
+def test_agent_scheduler_polls_immediately_on_startup_not_after_a_full_interval(monkeypatch):
+    """A host that sleeps after inactivity (e.g. Render's free tier) may
+    only stay awake for a short window per wake cycle. The scheduler must
+    get its first due-agent check in immediately, not sleep the full
+    5-minute AGENT_SCHEDULER_POLL_SECS before ever polling once — a wake
+    window shorter than that would mean scheduled agents are never polled
+    at all, not just polled late."""
+    from core.headless import background as bg
+
+    monkeypatch.setattr(bg.agent_scheduler_lock, "acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(bg.agent_scheduler_lock, "refresh_scheduler_lock", lambda: None)
+    monkeypatch.setattr(bg.agent_scheduler_lock, "release_scheduler_lock", lambda: None)
+
+    poll_calls = []
+    monkeypatch.setattr(bg.agent_orchestrator, "get_due_agents", lambda: (poll_calls.append(1) or []))
+
+    sleep_calls = []
+    real_sleep = asyncio.sleep
+
+    async def _tracking_sleep(secs):
+        sleep_calls.append(secs)
+        await real_sleep(0)  # yield without actually waiting
+
+    monkeypatch.setattr(bg.asyncio, "sleep", _tracking_sleep)
+
+    async def _run():
+        worker = bg.BackgroundWorker()
+        worker.start()
+        await real_sleep(0.05)  # let the scheduler task get its first iteration in
+        await worker.stop()
+
+    asyncio.run(_run())
+
+    assert poll_calls, "scheduler never polled at all before the process would sleep again"
+    assert bg.AGENT_SCHEDULER_POLL_SECS not in sleep_calls[:1], (
+        "scheduler slept the full interval before its first poll instead of polling immediately"
+    )
 
 
 # ── 11-13: health endpoint, auth blocks/allows ───────────────────────────
@@ -291,8 +330,13 @@ def test_dashboard_import_failure_degrades_instead_of_crashing_whole_app(monkeyp
     resp = client.get("/api/tools", headers={"Authorization": "Bearer test-dashboard-token-not-a-real-secret"})
     assert resp.status_code == 200
 
-    # The mounted-dashboard fallback route responds instead of 500ing.
-    resp = client.get("/")
+    # "/" always redirects to the orb-first UI regardless of dashboard state
+    # (see app.py's primary_jarvis_ui) — that route is intentionally matched
+    # before the dashboard-or-fallback mount, so it isn't where a dashboard
+    # failure would show up. A route only the dashboard mount would have
+    # served is the correct place to check for the fallback 503 instead of
+    # a 500 crash.
+    resp = client.get("/some-legacy-dashboard-only-route")
     assert resp.status_code == 503
 
 

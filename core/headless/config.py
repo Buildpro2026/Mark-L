@@ -51,6 +51,7 @@ _OBSIDIAN_DEFAULT = BASE_DIR / "knowledge" / "JARVIS Brain"
 OBSIDIAN_VAULT_PATH = _env("JARVIS_OBSIDIAN_VAULT_PATH", str(_OBSIDIAN_DEFAULT))
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
+GROQ_API_KEY = _env("GROQ_API_KEY")
 # Anthropic is intentionally disabled. This is kept as None so older fallback
 # code paths cannot activate even if an obsolete Render environment variable
 # remains behind. Gemini is the sole cloud chat provider.
@@ -72,6 +73,7 @@ def summarize() -> dict:
         "headless_host": HEADLESS_HOST,
         "headless_port": HEADLESS_PORT,
         "gemini_api_key_env_set": bool(GEMINI_API_KEY),
+        "groq_api_key_env_set": bool(GROQ_API_KEY),
         "anthropic_token_env_set": False,
         "airtable_token_env_set": bool(AIRTABLE_TOKEN),
         "hubspot_token_env_set": bool(HUBSPOT_TOKEN),

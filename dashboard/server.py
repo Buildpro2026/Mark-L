@@ -11,6 +11,7 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 import asyncio
 import base64
 import hashlib
+import hmac
 import re
 import secrets
 import socket
@@ -18,10 +19,21 @@ import string
 import time
 from pathlib import Path
 
+from actions import nucleus_hierarchy
+from actions import buildpro_data as bd
+from actions import daily_deal_finders as ddf
+from actions import business_intelligence as biz_intel
+from actions import opportunity_engine as opp_engine
+from actions import strategic_objective as strategic_obj
+from actions import google_auth
+from actions import twilio_integration as twilio
+from actions.agent_orchestrator import orchestrator as agent_orchestrator
+from actions.system_monitor import get_system_status
+
 _DEPS_OK = False
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
     import uvicorn
     _DEPS_OK = True
 except ImportError:
@@ -38,6 +50,12 @@ except Exception:
 BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000
+# Plain-HTTP fallback alias for /3d when SSL is enabled (mirrors the
+# PORT + 1 HTTPS alias pattern in get_manual_url() below). Defined here so
+# it's a single source of truth; the plain-HTTP listener itself is not yet
+# implemented — see test_dashboard_plain_http.py, which exercises the port
+# math and will keep failing past collection until that listener exists.
+HTTP_PORT   = PORT + 2
 MAX_UPLOAD_MB = 500
 
 
@@ -364,6 +382,36 @@ def _read(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
+def _verify_twilio_signature(req, form: dict) -> bool:
+    """Independently implements Twilio's documented request-signing
+    algorithm (HMAC-SHA1 over the request URL + sorted form param
+    key+value pairs, base64-encoded), compared against the
+    X-Twilio-Signature header. False-closed on every failure mode
+    (not configured, missing header, wrong token, tampered form,
+    wrong URL, or any unexpected error) — the only routes in this file
+    meant to receive traffic from the open internet, so refusing is
+    always the safe default, never a fabricated pass."""
+    try:
+        if not twilio.is_configured():
+            return False
+        headers = getattr(req, "headers", None) or {}
+        sig = headers.get("x-twilio-signature")
+        if not sig:
+            return False
+        auth_token = twilio._load_twilio_config().get("auth_token", "")
+        if not auth_token:
+            return False
+        data = str(req.url)
+        for key in sorted(form.keys()):
+            data += key + str(form[key])
+        expected = base64.b64encode(
+            hmac.new(auth_token.encode("utf-8"), data.encode("utf-8"), hashlib.sha1).digest()
+        ).decode("utf-8")
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+
 # ── DashboardServer ───────────────────────────────────────────────────────────
 
 class DashboardServer:
@@ -381,6 +429,10 @@ class DashboardServer:
         self._pending_keys: dict[str, float] = {}
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
+        # ── /3d spatial command center state ────────────────────────────
+        self._nucleus_id = "jarvis"           # current focused Nucleus
+        self._nucleus_back_stack: list[str] = []  # for the "back" nav action
+        self._3d_ws_clients: set[WebSocket] = set()  # separate channel from the phone command center's _clients
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -409,6 +461,274 @@ class DashboardServer:
         if self._ssl_enabled():
             return f"{self._ip}:{PORT + 1}"
         return f"{self._ip}:{PORT}"
+
+    # ── /3d spatial command center — navigation state ───────────────────
+
+    def apply_navigation(self, action: str, nucleus_id: str = "") -> dict:
+        """The single place server-side navigation state actually changes —
+        called by the HTTP /3d/api/command route, the /3d/ws websocket, and
+        (via core/headless/tool_registry.py's navigate_command_center tool)
+        Gemini itself, so all three ways of moving JARVIS around the
+        Nucleus tree stay in sync. 'status' never mutates state — it's a
+        read of wherever navigation already put us."""
+        if action == "open" and nucleus_id:
+            if nucleus_id != self._nucleus_id:
+                self._nucleus_back_stack.append(self._nucleus_id)
+            self._nucleus_id = nucleus_id
+        elif action == "back":
+            if self._nucleus_back_stack:
+                self._nucleus_id = self._nucleus_back_stack.pop()
+        elif action == "home":
+            self._nucleus_id = "jarvis"
+            self._nucleus_back_stack = []
+        # "status" (or any unrecognized action) falls through and just
+        # reports current state without mutating it.
+        node = nucleus_hierarchy.get_hierarchy_node(self._nucleus_id) or {"id": "jarvis", "name": "Jarvis"}
+        return {
+            "type": "navigate", "action": action,
+            "nucleus_id": self._nucleus_id, "name": node.get("name", self._nucleus_id),
+            "ts": time.time(),
+        }
+
+    async def _broadcast_3d(self, payload: dict) -> None:
+        """Push to every connected /3d/ws client — used for navigation
+        pushes and (see dashboard_bridge.py / twilio webhooks) toast
+        notifications. Best-effort: a dead socket is dropped, never
+        allowed to break the broadcast for everyone else."""
+        dead = set()
+        for ws in self._3d_ws_clients:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.add(ws)
+        self._3d_ws_clients -= dead
+
+    async def broadcast_nav(self, payload: dict) -> None:
+        """Public alias for _broadcast_3d — the name main.py's
+        navigate_command_center tool and _broadcast_orb_state call,
+        matching what a live desktop/voice session (this dashboard's
+        actual caller) conceptually does: push a navigation or state
+        event to the spatial scene."""
+        await self._broadcast_3d(payload)
+
+    # ── /3d spatial command center — per-module live data ───────────────
+    # Each of these honestly reports NOT_CONFIGURED/empty rather than
+    # fabricating data — matching the same standard as every tool in
+    # core/headless/tool_executor.py. Wraps real, already-tested modules;
+    # nothing here reimplements business logic that exists elsewhere.
+
+    def _communications_placeholder(self) -> bool:
+        """Live-computed, not read from the static hierarchy config: True
+        (dim/"coming soon" in the 3D scene) unless Twilio is genuinely
+        configured right now. False-closed if the twilio module itself
+        failed to import (or was monkeypatched to None in a test)."""
+        if twilio is None:
+            return True
+        try:
+            return twilio.get_status().get("state") != "CONFIGURED"
+        except Exception:
+            return True
+
+    def _overlay_communications_placeholder(self, children: list[dict]) -> list[dict]:
+        placeholder = self._communications_placeholder()
+        return [{**c, "placeholder": placeholder} for c in children]
+
+    def _module_data(self, module_id: str, query: str = "") -> dict:
+        if module_id == "buildpro":
+            return self._module_buildpro()
+        if module_id == "candidates":
+            results = bd.list_candidates(limit=100)
+            return {"results": results, "summary": f"{len(results)} candidate(s) on file."}
+        if module_id == "clients":
+            results = bd.list_clients(limit=100)
+            return {"results": results, "summary": f"{len(results)} client(s) on file."}
+        if module_id == "prospects":
+            results = bd.list_clients(status="prospect", limit=100)
+            return {"results": results, "summary": f"{len(results)} prospect(s) on file."}
+        if module_id == "jobs":
+            results = bd.list_jobs(limit=100)
+            return {"results": results, "summary": f"{len(results)} job(s) on file."}
+        if module_id == "matches":
+            results = bd.top_matches(limit=100)
+            return {"results": results, "summary": f"{len(results)} candidate/job match(es) on file."}
+        if module_id in ("ddf", "deals"):
+            return self._module_ddf()
+        if module_id == "communications":
+            return self._module_communications()
+        if module_id == "system":
+            return self._module_system()
+        if module_id == "files":
+            return self._module_files(query)
+        if module_id == "reports":
+            return self._module_reports()
+        if module_id == "email":
+            return self._module_email()
+        if module_id == "calendar":
+            return self._module_calendar()
+        # Any other real hierarchy node (careerrocket, personal, etc.) —
+        # honest placeholder rather than a 404, since it's still a real,
+        # navigable Nucleus even before it has its own live data source.
+        return {"summary": "No live data source connected for this Nucleus yet."}
+
+    def _module_buildpro(self) -> dict:
+        candidates = bd.list_candidates(limit=200)
+        clients = bd.list_clients(limit=200)
+        jobs = bd.list_jobs(status="open", limit=200)
+        prospects = [c for c in clients if c.get("status") == "prospect"]
+        matches = bd.top_matches(limit=200)
+        qualified = [m for m in matches if (m.get("match_score") or 0) >= 70]
+        top_scores = qualified[:5]  # top_matches() is already ordered by score DESC
+        data = {
+            "buildpro_recruiting": {
+                "candidate_count": len(candidates),
+                "client_count": len(clients),
+                "active_jobs": len(jobs),
+                "prospect_count": len(prospects),
+                "qualified_matches": len(qualified),
+                "highest_match_scores": [
+                    {"candidate_name": m.get("candidate_name"), "job_title": m.get("job_title"),
+                     "match_score": m.get("match_score")}
+                    for m in top_scores
+                ],
+            },
+            "buildpro_followups": {
+                "candidates": bd.list_candidates_needing_followup(),
+                "clients": bd.list_clients_needing_followup(),
+            },
+        }
+        try:
+            data["business_intelligence"] = biz_intel.summary("buildpro")
+        except Exception:
+            data["business_intelligence"] = {"counts": {}}
+        try:
+            data["top_opportunities"] = opp_engine.rank_opportunities(business="buildpro", limit=5)
+        except Exception:
+            data["top_opportunities"] = []
+        return data
+
+    def _module_ddf(self) -> dict:
+        data = {"top_products": ddf.get_top_products(limit=5)}
+        try:
+            data["business_intelligence"] = biz_intel.summary("ddf")
+        except Exception:
+            data["business_intelligence"] = {"counts": {}}
+        return data
+
+    def _module_communications(self) -> dict:
+        try:
+            status = twilio.get_status() if twilio is not None else {"state": "NOT_CONFIGURED", "detail": "Twilio module unavailable."}
+        except Exception as e:
+            status = {"state": "ERROR", "detail": str(e)}
+        configured = status.get("state") == "CONFIGURED"
+        children = nucleus_hierarchy.get_hierarchy_children("communications")
+        # "contacts" has no backing store regardless of Twilio config — a
+        # placeholder either way, distinct from the other channels which
+        # flip live once Twilio is actually configured.
+        channels = {}
+        for c in children:
+            key = c["id"].replace("comm-", "")
+            channels[key] = {"status": "placeholder" if key == "contacts" or not configured else "live"}
+        return {
+            "configured": configured,
+            "status": status.get("state", "NOT_CONFIGURED"),
+            "detail": status.get("detail"),
+            "channels": channels,
+            "children": self._overlay_communications_placeholder(children),
+        }
+
+    def _module_system(self) -> dict:
+        data = dict(get_system_status())
+        try:
+            data["agents"] = agent_orchestrator.summary()
+        except Exception:
+            data["agents"] = {"agents": []}
+        try:
+            data["strategic_objective"] = strategic_obj.get_objective_status()
+        except Exception:
+            data["strategic_objective"] = {}
+        try:
+            data["business_intelligence"] = biz_intel.summary()
+        except Exception:
+            data["business_intelligence"] = {"counts": {}}
+        return data
+
+    def _module_files(self, query: str) -> dict:
+        results = []
+        try:
+            if query.strip():
+                for p in BASE_DIR.rglob(f"*{query.strip()}*"):
+                    if any(part in (".git", "__pycache__", "node_modules", ".venv") for part in p.parts):
+                        continue
+                    if p.is_file():
+                        results.append({"name": p.name, "path": str(p.relative_to(BASE_DIR))})
+                    if len(results) >= 50:
+                        break
+        except Exception:
+            pass
+        recent_files: list[dict] = []
+        try:
+            recent_files = [
+                {"name": f.name, "size": f.stat().st_size}
+                for f in sorted(
+                    (p for p in self._uploads_dir.iterdir() if p.is_file()),
+                    key=lambda p: p.stat().st_mtime, reverse=True,
+                )[:10]
+            ]
+        except Exception:
+            pass
+        return {"results": results, "recent_files": recent_files}
+
+    def _module_reports(self) -> dict:
+        report_files: list[dict] = []
+        try:
+            reports_dir = BASE_DIR / "data" / "reports"
+            if reports_dir.is_dir():
+                report_files = [{"name": f.name} for f in sorted(reports_dir.iterdir(), reverse=True)[:20]]
+        except Exception:
+            pass
+        return {"system_status": get_system_status(), "report_files": report_files}
+
+    def _module_email(self) -> dict:
+        try:
+            status = google_auth.get_credential_status()
+        except Exception as e:
+            status = {"authorized": False, "credential_file": "unknown", "error": str(e)}
+        return {"configured": bool(status.get("authorized")), "status": status}
+
+    def _module_calendar(self) -> dict:
+        try:
+            status = google_auth.get_credential_status()
+        except Exception as e:
+            status = {"authorized": False, "credential_file": "unknown", "error": str(e)}
+        return {"configured": bool(status.get("authorized")), "status": status}
+
+    def _overview_payload(self) -> dict:
+        root = nucleus_hierarchy.get_hierarchy_root()
+        hierarchy_children = list(root.get("children", []))
+        modules = []
+        for domain in hierarchy_children:
+            module_id = "deals" if domain["id"] == "ddf" else domain["id"]
+            modules.append({"id": module_id, "name": domain.get("name", domain["id"])})
+        # Live-computed communications placeholder overlay applied to the
+        # hierarchy tree the 3D scene actually renders from — see
+        # _overlay_communications_placeholder's docstring.
+        hierarchy = dict(root)
+        hierarchy["children"] = [
+            {**d, "children": self._overlay_communications_placeholder(d.get("children", []))}
+            if d["id"] == "communications" else d
+            for d in hierarchy_children
+        ]
+        try:
+            strategic_objective = strategic_obj.get_objective_status()
+        except Exception:
+            strategic_objective = {}
+        return {
+            "focus": self._nucleus_id if self._nucleus_id != "jarvis" else "core",
+            "modules": modules,
+            "summary": {"module_count": len(modules)},
+            "strategic_objective": strategic_objective,
+            "hierarchy": hierarchy,
+        }
 
     def _aes_key(self, session_key: str) -> bytes:
         if session_key not in self._aes_cache:
@@ -747,6 +1067,185 @@ class DashboardServer:
                 pass
             finally:
                 self._clients.discard(websocket)
+
+        # ── /3d spatial command center ───────────────────────────────────
+        # Separate auth from the phone command center's PIN/QR session
+        # tokens above: /3d/api/* and /3d/ws check against the same
+        # JARVIS_API_TOKEN the rest of the headless service uses (see
+        # tests/conftest.py's _dashboard_api_token fixture), since this is
+        # Lee's own operator surface, not a paired-device session.
+        def _3d_auth(req: Request) -> bool:
+            from core.headless import config as headless_config
+            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            return bool(tok) and bool(headless_config.API_TOKEN) and tok == headless_config.API_TOKEN
+
+        _THREE_D_DIR = STATIC_DIR / "3d"
+
+        @app.get("/3d", response_class=HTMLResponse)
+        async def three_d_page(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return HTMLResponse((_THREE_D_DIR / "index.html").read_text(encoding="utf-8"))
+
+        @app.get("/3d/sw.js")
+        async def three_d_service_worker(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            # Served at /3d/sw.js (top-level scope), NOT /3d/assets/sw.js —
+            # a service worker's default scope is the directory it's served
+            # from, so this must sit at /3d/ to cover /3d/* rather than
+            # only /3d/assets/*.
+            return FileResponse(str(_THREE_D_DIR / "sw.js"), media_type="application/javascript")
+
+        @app.get("/3d/assets/{asset_path:path}")
+        async def three_d_assets(asset_path: str, req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            safe = (_THREE_D_DIR / asset_path).resolve()
+            if _THREE_D_DIR.resolve() not in safe.parents and safe != _THREE_D_DIR.resolve():
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            if not safe.is_file():
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            media_type = None
+            if safe.suffix == ".js":
+                media_type = "application/javascript"
+            elif safe.suffix == ".json":
+                media_type = "application/json"
+            elif safe.suffix == ".svg":
+                media_type = "image/svg+xml"
+            return FileResponse(str(safe), media_type=media_type)
+
+        @app.get("/3d/api/overview")
+        async def three_d_overview(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return JSONResponse(self._overview_payload())
+
+        @app.get("/3d/api/module/{module_id}")
+        async def three_d_module(module_id: str, req: Request, query: str = ""):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            node = nucleus_hierarchy.get_hierarchy_node(module_id) or {"id": module_id, "name": module_id}
+            children = nucleus_hierarchy.get_hierarchy_children(module_id)
+            path = nucleus_hierarchy.get_hierarchy_path(module_id)
+            data = self._module_data(module_id, query)
+            if module_id == "communications":
+                data.setdefault("children", self._overlay_communications_placeholder(children))
+            else:
+                data.setdefault("node", node)
+                data.setdefault("children", children)
+                data.setdefault("path", path)
+            return JSONResponse({"module": {"id": module_id, "name": node.get("name", module_id)}, "data": data})
+
+        @app.post("/3d/api/command")
+        async def three_d_command(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            action = body.get("action", "")
+            try:
+                if action == "navigate":
+                    result = self.apply_navigation(body.get("nav_action", "status"), body.get("nucleus_id", ""))
+                    asyncio.create_task(self._broadcast_3d(result))
+                elif action == "system_status":
+                    result = get_system_status()
+                else:
+                    return JSONResponse({"ok": False, "error": f"Unknown command action: {action!r}"}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+            return JSONResponse({"ok": True, "result": result})
+
+        @app.websocket("/3d/ws")
+        async def three_d_ws(websocket: WebSocket, token: str = ""):
+            from core.headless import config as headless_config
+            tok = token.strip()
+            if not tok or not headless_config.API_TOKEN or tok != headless_config.API_TOKEN:
+                await websocket.close(code=4001)
+                return
+            await websocket.accept()
+            self._3d_ws_clients.add(websocket)
+            try:
+                await websocket.send_json(self.apply_navigation("status"))
+                while True:
+                    data = await websocket.receive_json()
+                    if data.get("type") == "navigate":
+                        result = self.apply_navigation(data.get("action", "status"), data.get("nucleus_id", ""))
+                        await self._broadcast_3d(result)
+            except WebSocketDisconnect:
+                pass
+            finally:
+                self._3d_ws_clients.discard(websocket)
+
+        # ── Twilio webhooks ───────────────────────────────────────────────
+        # The only routes in this file meant to receive traffic from the
+        # open internet (a real Twilio number's webhooks) — every one is
+        # signature-verified before anything is recorded or broadcast.
+        # See docs/DASHBOARD_SECURITY.md.
+
+        async def _reject_unless_signed(req: Request, form: dict) -> JSONResponse | None:
+            if not _verify_twilio_signature(req, form):
+                return JSONResponse({"error": "Invalid or missing Twilio signature."}, status_code=403)
+            return None
+
+        @app.post("/twilio/voice")
+        async def twilio_voice(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            twilio._log(
+                direction="inbound", kind="call", sid=form.get("CallSid"),
+                from_number=form.get("From"), to_number=form.get("To"),
+                status=form.get("CallStatus"),
+            )
+            asyncio.create_task(self._broadcast_3d({
+                "type": "notification",
+                "text": f"Incoming call from {form.get('From', 'unknown')}",
+                "ts": time.time(),
+            }))
+            return Response(content=twilio.voicemail_twiml(), media_type="application/xml")
+
+        @app.post("/twilio/sms")
+        async def twilio_sms(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            twilio._log(
+                direction="inbound", kind="sms", sid=form.get("MessageSid"),
+                from_number=form.get("From"), to_number=form.get("To"), body=form.get("Body"),
+            )
+            asyncio.create_task(self._broadcast_3d({
+                "type": "notification",
+                "text": f"New SMS from {form.get('From', 'unknown')}: {(form.get('Body') or '')[:80]}",
+                "ts": time.time(),
+            }))
+            return JSONResponse({"ok": True})
+
+        @app.post("/twilio/status")
+        async def twilio_status(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            sid = form.get("MessageSid") or form.get("CallSid")
+            if sid:
+                twilio.update_by_sid(sid, status=form.get("MessageStatus") or form.get("CallStatus"))
+            return JSONResponse({"ok": True})
+
+        @app.post("/twilio/transcription")
+        async def twilio_transcription(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            sid = form.get("CallSid")
+            if sid:
+                twilio.update_by_sid(sid, transcription=form.get("TranscriptionText"))
+            return JSONResponse({"ok": True})
 
         return app
 

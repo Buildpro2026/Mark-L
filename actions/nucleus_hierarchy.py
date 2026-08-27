@@ -173,3 +173,21 @@ def get_hierarchy_path(node_id: str) -> list[dict[str, Any]]:
 
 def get_hierarchy_root() -> dict[str, Any]:
     return load_hierarchy()
+
+
+def find_node_by_name(target: str) -> dict[str, Any] | None:
+    """Case-insensitive lookup by display name OR id — e.g. 'BuildPro'
+    matches name='BuildPro', and 'DDF' matches id='ddf' even though that
+    node's display name is 'Daily Deal Finders'. Used by the
+    navigate_command_center voice tool so a person can say either the
+    friendly name or the short id and reach the same Nucleus."""
+    target_norm = (target or "").strip().lower()
+    if not target_norm:
+        return None
+    stack = [load_hierarchy()]
+    while stack:
+        node = stack.pop()
+        if node.get("name", "").strip().lower() == target_norm or node.get("id", "").strip().lower() == target_norm:
+            return node
+        stack.extend(node.get("children", []))
+    return None

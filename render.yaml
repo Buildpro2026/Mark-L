@@ -27,8 +27,14 @@ services:
     envVars:
       - key: JARVIS_API_TOKEN
         sync: false   # set as a real secret in the Render dashboard, never committed
+      - key: GROQ_API_KEY
+        sync: false   # set as a real secret in the Render dashboard, never committed —
+                       # the zero-cost primary provider; see core/headless/ui.py's
+                       # _configured_providers() for the Groq -> Gemini -> Anthropic order
       - key: GEMINI_API_KEY
-        sync: false   # set as a real secret in the Render dashboard, never committed
+        sync: false   # set as a real secret in the Render dashboard, never committed —
+                       # optional fallback once GROQ_API_KEY is set; JARVIS no longer
+                       # requires this to operate
       - key: JARVIS_HEADLESS_HOST
         value: "0.0.0.0"
       # No JARVIS_HEADLESS_PORT here — core/headless/config.py falls back

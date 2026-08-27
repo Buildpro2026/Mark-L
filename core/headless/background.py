@@ -52,6 +52,7 @@ logger = logging.getLogger("jarvis.headless.background")
 AGENT_SCHEDULER_POLL_SECS = 300
 BACKGROUND_MONITOR_POLL_SECS = 1800
 PROACTIVE_POLL_SECS = 60
+OBJECTIVE_LOOP_POLL_SECS = 21_600  # 6 hours — matches get_stale_autonomous_agents()'s default staleness
 
 
 class BackgroundWorker:
@@ -74,6 +75,7 @@ class BackgroundWorker:
             asyncio.create_task(self._run_agent_scheduler(), name="agent_scheduler"),
             asyncio.create_task(self._run_background_monitor(), name="background_monitor"),
             asyncio.create_task(self._run_proactive_observer(), name="proactive_observer"),
+            asyncio.create_task(self._run_objective_loop(), name="objective_loop"),
         ]
 
     async def stop(self) -> None:
@@ -100,8 +102,17 @@ class BackgroundWorker:
         if not have_lock:
             logger.warning("Another JARVIS instance holds the scheduler lock — will keep retrying.")
         try:
+            first_pass = True
             while not self._stopping:
-                await asyncio.sleep(AGENT_SCHEDULER_POLL_SECS)
+                # Poll immediately on the very first pass rather than
+                # sleeping AGENT_SCHEDULER_POLL_SECS (5 min) before ever
+                # checking once — on a host that sleeps after inactivity
+                # (e.g. Render's free tier), a wake-serve-sleep cycle
+                # shorter than that delay would mean scheduled agents
+                # never get polled at all, not just polled late.
+                if not first_pass:
+                    await asyncio.sleep(AGENT_SCHEDULER_POLL_SECS)
+                first_pass = False
                 if not have_lock:
                     have_lock = await asyncio.to_thread(agent_scheduler_lock.acquire_scheduler_lock)
                     if not have_lock:
@@ -121,6 +132,30 @@ class BackgroundWorker:
         finally:
             if have_lock:
                 await asyncio.to_thread(agent_scheduler_lock.release_scheduler_lock)
+
+    # ── Autonomous objective loop (turns "monitor without being asked" ──
+    # into real, executed work — see agent_orchestrator.get_stale_
+    # autonomous_agents/run_stale_autonomous_agents for the actual
+    # safety-scoped dispatch logic. This loop is deliberately thin: all
+    # the judgment about which agents are safe to trigger generically
+    # lives in AgentDefinition.autonomous_ok, not here.)
+
+    async def run_objective_check_once(self) -> list:
+        return await asyncio.to_thread(agent_orchestrator.run_stale_autonomous_agents)
+
+    async def _run_objective_loop(self) -> None:
+        first_pass = True
+        while not self._stopping:
+            if not first_pass:
+                await asyncio.sleep(OBJECTIVE_LOOP_POLL_SECS)
+            first_pass = False
+            try:
+                results = await self.run_objective_check_once()
+                for task in results:
+                    summary_text = (task.result or {}).get("summary", "completed") if task.result else (task.error or "failed")
+                    logger.info("objective loop — agent %s: %s", task.agent_id, summary_text)
+            except Exception as e:
+                logger.warning("objective loop check failed: %s", e)
 
     # ── Background topic monitor ────────────────────────────────────────
 

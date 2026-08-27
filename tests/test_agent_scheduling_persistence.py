@@ -239,3 +239,207 @@ def test_corrupt_lock_file_is_treated_as_stale_and_reclaimed():
 def test_pid_is_running_returns_false_on_a_bogus_pid():
     # A very unlikely-to-exist PID — real liveness check via psutil.
     assert ao._pid_is_running(999_999_999) is False
+
+
+def test_agent_stuck_at_running_from_an_unclean_restart_is_recovered_to_idle():
+    """A process kill (crash, redeploy, Render free-tier sleep) between
+    run_task() setting agent.status = RUNNING and its own finally block
+    setting it back to IDLE leaves RUNNING persisted. Without recovery,
+    get_due_agents() (which only ever considers IDLE agents) would exclude
+    this agent forever — stuck, not idle, and never scheduled again."""
+    stuck_agent = _agent(status=ao.AgentStatus.RUNNING)
+    orch1 = ao.AgentOrchestrator(agents={stuck_agent.id: stuck_agent})
+    ao._save_agent_state(stuck_agent)
+
+    stuck_task = ao.AgentTask(
+        id="stuck-task", agent_id=stuck_agent.id,
+        description="in flight when the process died", status=ao.TaskStatus.RUNNING,
+    )
+    ao._save_task(stuck_task)
+
+    # "Restart": a fresh AgentOrchestrator against the same persisted state.
+    orch2 = ao.AgentOrchestrator(agents={stuck_agent.id: _agent(status=ao.AgentStatus.REGISTERED)})
+
+    recovered = orch2.get_agent(stuck_agent.id)
+    assert recovered.status == ao.AgentStatus.IDLE
+    assert "restart" in (recovered.last_error or "").lower()
+
+    recovered_task = orch2.get_task("stuck-task")
+    assert recovered_task.status == ao.TaskStatus.FAILED
+    assert "restart" in recovered_task.error.lower()
+
+    events = orch2.list_events(stuck_agent.id)
+    assert any("recovered" in e.message.lower() for e in events)
+
+
+def test_agent_persisted_as_idle_is_not_touched_by_crash_recovery():
+    """Crash recovery must only ever act on agents actually stuck at
+    RUNNING — a normally-idle agent's state/events must pass through
+    untouched."""
+    idle_agent = _agent(status=ao.AgentStatus.IDLE, last_error=None)
+    ao._save_agent_state(idle_agent)
+
+    orch = ao.AgentOrchestrator(agents={idle_agent.id: _agent(status=ao.AgentStatus.REGISTERED)})
+    restored = orch.get_agent(idle_agent.id)
+
+    assert restored.status == ao.AgentStatus.IDLE
+    assert restored.last_error is None
+    assert orch.list_events(idle_agent.id) == []
+
+
+def test_run_task_refuses_to_double_run_an_already_running_agent():
+    """Two overlapping attempts to run a task for the same agent must not
+    execute the handler twice concurrently — the second is refused, not
+    silently queued behind or raced against the first."""
+    calls = []
+
+    def _slow_handler(task):
+        calls.append(task.id)
+        return {"summary": "ran"}
+
+    agent = _agent(status=ao.AgentStatus.IDLE, handler=_slow_handler)
+    orch = ao.AgentOrchestrator(agents={agent.id: agent})
+
+    first = orch.assign_task(agent.id, "first task")
+    assert first.status == ao.TaskStatus.DONE  # OBSERVE-level runs immediately, then returns to IDLE
+
+    # Manually force the agent back to RUNNING to simulate a task genuinely
+    # still in flight (assign_task's own real run happens synchronously in
+    # this codebase, so this is how a would-be second concurrent call is
+    # reproduced deterministically without real threads).
+    live_agent = orch.get_agent(agent.id)
+    live_agent.status = ao.AgentStatus.RUNNING
+
+    second = orch.assign_task(agent.id, "second task, should be refused")
+    # assign_task() for an OBSERVE agent calls run_task() synchronously,
+    # which must refuse rather than execute the handler a second time.
+    assert second.status == ao.TaskStatus.REJECTED
+    assert "already running" in second.error.lower()
+    assert calls == [first.id]   # handler ran exactly once, not twice
+
+
+# ── Autonomous objective loop (get_stale_autonomous_agents) ──────────────
+
+def test_get_stale_autonomous_agents_only_includes_opted_in_idle_non_execute_agents():
+    calls = []
+
+    def _handler(task):
+        calls.append(task.agent_id)
+        return {"summary": "surveyed"}
+
+    autonomous_agent = ao.AgentDefinition(
+        id="auto_agent", name="Autonomous Test Agent", description="x", nucleus_id="system",
+        permission_level=ao.PermissionLevel.OBSERVE, status=ao.AgentStatus.IDLE,
+        schedule=None, autonomous_ok=True, handler=_handler,
+    )
+    # Needs a real topic per call — must NOT be swept into a generic trigger.
+    topic_agent = ao.AgentDefinition(
+        id="topic_agent", name="Needs A Real Topic", description="x", nucleus_id="system",
+        permission_level=ao.PermissionLevel.OBSERVE, status=ao.AgentStatus.IDLE,
+        schedule=None, autonomous_ok=False, handler=_handler,
+    )
+    # Even opted in, EXECUTE-level must never auto-run unattended.
+    execute_agent = ao.AgentDefinition(
+        id="execute_agent", name="Dangerous", description="x", nucleus_id="system",
+        permission_level=ao.PermissionLevel.EXECUTE, status=ao.AgentStatus.IDLE,
+        schedule=None, autonomous_ok=True, handler=_handler,
+    )
+    # Opted in but not started yet — must not run before start_agent().
+    not_started = ao.AgentDefinition(
+        id="not_started", name="Not Started", description="x", nucleus_id="system",
+        permission_level=ao.PermissionLevel.OBSERVE, status=ao.AgentStatus.REGISTERED,
+        schedule=None, autonomous_ok=True, handler=_handler,
+    )
+
+    orch = ao.AgentOrchestrator(agents={
+        "auto_agent": autonomous_agent, "topic_agent": topic_agent,
+        "execute_agent": execute_agent, "not_started": not_started,
+    })
+
+    stale = orch.get_stale_autonomous_agents()
+    assert [a.id for a in stale] == ["auto_agent"]
+
+    ran = orch.run_stale_autonomous_agents()
+    assert calls == ["auto_agent"]
+    assert len(ran) == 1
+
+
+def test_get_stale_autonomous_agents_respects_staleness_window():
+    def _handler(task):
+        return {"summary": "surveyed"}
+
+    agent = ao.AgentDefinition(
+        id="auto_agent", name="Autonomous Test Agent", description="x", nucleus_id="system",
+        permission_level=ao.PermissionLevel.OBSERVE, status=ao.AgentStatus.IDLE,
+        schedule=None, autonomous_ok=True, last_run_ts=time.time(), handler=_handler,
+    )
+    orch = ao.AgentOrchestrator(agents={"auto_agent": agent})
+
+    # Just ran moments ago — not stale yet under the default 6h window.
+    assert orch.get_stale_autonomous_agents() == []
+    # But long enough ago that it is.
+    time.sleep(0.01)
+    assert [a.id for a in orch.get_stale_autonomous_agents(staleness_secs=0.005)] == ["auto_agent"]
+
+
+# ── Autonomous objective loop: topic rotation for research-style agents ──
+
+def test_run_stale_autonomous_agents_rotates_through_autonomous_topics():
+    calls = []
+
+    def _handler(task):
+        calls.append(task.description)
+        return {"summary": "researched"}
+
+    agent = ao.AgentDefinition(
+        id="topic_agent", name="Topic Agent", description="x", nucleus_id="system",
+        permission_level=ao.PermissionLevel.OBSERVE, status=ao.AgentStatus.IDLE, schedule=None,
+        autonomous_ok=True, autonomous_topics=("topic A", "topic B", "topic C"), handler=_handler,
+    )
+    orch = ao.AgentOrchestrator(agents={"topic_agent": agent})
+
+    for _ in range(4):
+        for a in orch._agents.values():
+            a.last_run_ts = 0.0
+            a.status = ao.AgentStatus.IDLE
+        orch.run_stale_autonomous_agents()
+
+    assert calls == ["topic A", "topic B", "topic C", "topic A"]
+
+
+def test_autonomous_topic_rotation_survives_a_restart():
+    def _handler(task):
+        return {"summary": "researched"}
+
+    def _fresh_agent(status):
+        return ao.AgentDefinition(
+            id="topic_agent", name="Topic Agent", description="x", nucleus_id="system",
+            permission_level=ao.PermissionLevel.OBSERVE, status=status, schedule=None,
+            autonomous_ok=True, autonomous_topics=("topic A", "topic B", "topic C"), handler=_handler,
+        )
+
+    orch1 = ao.AgentOrchestrator(agents={"topic_agent": _fresh_agent(ao.AgentStatus.IDLE)})
+    orch1.run_stale_autonomous_agents()  # -> "topic A"
+
+    # "Restart": a brand new orchestrator against the same persisted DB.
+    orch2 = ao.AgentOrchestrator(agents={"topic_agent": _fresh_agent(ao.AgentStatus.REGISTERED)})
+    for a in orch2._agents.values():
+        a.last_run_ts = 0.0
+        a.status = ao.AgentStatus.IDLE
+    tasks = orch2.run_stale_autonomous_agents()
+
+    assert tasks[0].description == "topic B"
+
+
+def test_agent_without_autonomous_topics_still_uses_the_generic_description():
+    def _handler(task):
+        return {"summary": "surveyed"}
+
+    agent = ao.AgentDefinition(
+        id="survey_agent", name="Survey Agent", description="x", nucleus_id="system",
+        permission_level=ao.PermissionLevel.OBSERVE, status=ao.AgentStatus.IDLE,
+        schedule=None, autonomous_ok=True, autonomous_topics=None, handler=_handler,
+    )
+    orch = ao.AgentOrchestrator(agents={"survey_agent": agent})
+    tasks = orch.run_stale_autonomous_agents()
+    assert tasks[0].description == "Autonomous objective check"

@@ -111,6 +111,32 @@ class AgentDefinition:
     last_run_ts: Optional[float] = None
     last_error: Optional[str] = None       # error state — set by run_task on failure, cleared on success
     handler: Optional[Callable[["AgentTask"], dict]] = field(default=None, repr=False)
+    # Explicit, auditable opt-in for the autonomous objective loop (below) —
+    # separate from `schedule` on purpose. `schedule` means "run on a fixed
+    # clock with a generic trigger"; `autonomous_ok` means "safe AND
+    # meaningful to run with a generic trigger at all", which most on-demand
+    # agents are NOT: business_research_agent/careerrocket_research_agent/
+    # market_intelligence_agent/opportunity_scout all use task.description
+    # as a real, specific topic or brief — triggering them generically would
+    # burn a web-search call on a nonsense query, which is fabricated-looking
+    # busywork, not real autonomous value. Only agents whose handler already
+    # does something genuinely useful with a generic/empty description
+    # (surveying a fixed, already-connected data source rather than needing
+    # a per-call topic) should ever set this True. Never auto-set for an
+    # EXECUTE-level agent regardless of this flag — see
+    # get_stale_autonomous_agents()'s own belt-and-suspenders check.
+    autonomous_ok: bool = False
+    # A small, deterministic, rotating set of real topics/briefs for agents
+    # whose handler needs one per call (see the comment above) but whose
+    # domain is narrow and stable enough to pre-approve a fixed rotation
+    # for, rather than needing a human — or another AI call — to invent a
+    # fresh one each time. None means "doesn't need one" (most agents);
+    # get_stale_autonomous_agents() only ever sets autonomous_ok=True
+    # alongside this for such agents. Deliberately NOT LLM-generated: a
+    # fixed, auditable rotation can't drift into a fabricated or
+    # off-scope topic the way an autonomous "invent something to
+    # research" call could.
+    autonomous_topics: Optional[tuple[str, ...]] = None
 
     def to_public_dict(self) -> dict[str, Any]:
         d = {k: v for k, v in asdict(self).items() if k != "handler"}
@@ -653,6 +679,12 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="system", business="general",
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_research_handler("general", "research"),
+        autonomous_ok=True,
+        autonomous_topics=(
+            "recruiting industry trends and best practices",
+            "small business growth strategies for a recruiting/staffing firm",
+            "AI and automation tools relevant to recruiting operations",
+        ),
     ),
     "opportunity_scout": AgentDefinition(
         id="opportunity_scout", name="Opportunity Scout",
@@ -660,6 +692,11 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="ddf", business="general",
         permission_level=PermissionLevel.SUGGEST, schedule=None,
         handler=_opportunity_scout_handler,
+        autonomous_ok=True,
+        autonomous_topics=(
+            "trending low-competition dropshipping or deal-finder product niches",
+            "seasonal or timely product opportunities for a daily-deal site",
+        ),
     ),
     "buildpro_prospecting_agent": AgentDefinition(
         id="buildpro_prospecting_agent", name="BuildPro Prospecting Agent",
@@ -667,6 +704,7 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="buildpro", business="buildpro",
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_buildpro_prospecting_agent_handler,
+        autonomous_ok=True,  # surveys HubSpot data — no topic needed, safe to run unattended
     ),
     "buildpro_candidate_agent": AgentDefinition(
         id="buildpro_candidate_agent", name="BuildPro Candidate Agent",
@@ -674,6 +712,7 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="buildpro", business="buildpro",
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_buildpro_candidate_agent_handler,
+        autonomous_ok=True,  # its own handler already falls back to a full overview generically
     ),
     "careerrocket_research_agent": AgentDefinition(
         id="careerrocket_research_agent", name="CareerRocket Research Agent",
@@ -681,6 +720,11 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="careerrocket", business="careerrocket",
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_research_handler("careerrocket", "research"),
+        autonomous_ok=True,
+        autonomous_topics=(
+            "resume writing and career coaching service market trends",
+            "competitor pricing and positioning for resume/career services",
+        ),
     ),
     "daily_deal_finder_agent": AgentDefinition(
         id="daily_deal_finder_agent", name="Daily Deal Finder Agent",
@@ -695,6 +739,7 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="ddf", business="general",
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_social_content_agent_handler,
+        autonomous_ok=True,  # ignores task.description entirely — a pure connectivity/status survey
     ),
     "market_intelligence_agent": AgentDefinition(
         id="market_intelligence_agent", name="Market Intelligence Agent",
@@ -702,6 +747,11 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="system", business="general",
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_research_handler("general", "market_observations"),
+        autonomous_ok=True,
+        autonomous_topics=(
+            "construction and skilled-trades recruiting market signals",
+            "competing recruiting/staffing firms' recent moves or announcements",
+        ),
     ),
     "communications_agent": AgentDefinition(
         id="communications_agent", name="Communications Agent",
@@ -825,6 +875,13 @@ class AgentOrchestrator:
         source = agents if agents is not None else BUILTIN_AGENTS
         self._agents: dict[str, AgentDefinition] = {aid: copy.copy(a) for aid, a in source.items()}
 
+        # Load tasks/events BEFORE the status-restore loop below, so crash
+        # recovery (an agent persisted as RUNNING) can find and fail that
+        # agent's own dangling RUNNING task and log a real recovery event —
+        # not just fix the agent's status in isolation.
+        self._tasks: dict[str, AgentTask] = _load_tasks()
+        self._events: list[AgentEvent] = _load_events()
+
         # Restore persisted status/last_run_ts/last_error so a restart
         # doesn't silently stop scheduled automation — see module comment
         # above _connect(). Only applies to agents that already exist in
@@ -860,8 +917,35 @@ class AgentOrchestrator:
             agent.last_run_ts = state["last_run_ts"]
             agent.last_error = state["last_error"]
 
-        self._tasks: dict[str, AgentTask] = _load_tasks()
-        self._events: list[AgentEvent] = _load_events()
+            # Crash recovery: a persisted status of RUNNING means the
+            # process was killed (crash, redeploy, Render free-tier sleep)
+            # mid-task and never reached run_task()'s `finally` block that
+            # would have set it back to IDLE. Left alone, this agent would
+            # be permanently excluded from get_due_agents() (which only
+            # ever considers IDLE agents) — stuck forever, not "idle" and
+            # not recoverable, exactly the failure mode this must detect.
+            if agent.status == AgentStatus.RUNNING:
+                stuck_task = next(
+                    (t for t in self._tasks.values()
+                     if t.agent_id == agent_id and t.status == TaskStatus.RUNNING),
+                    None,
+                )
+                if stuck_task is not None:
+                    stuck_task.status = TaskStatus.FAILED
+                    stuck_task.error = "Interrupted by a process restart before it could finish."
+                    stuck_task.updated_ts = time.time()
+                    _save_task(stuck_task)
+                agent.status = AgentStatus.IDLE
+                agent.last_error = "Recovered after an unclean restart while running a task."
+                _save_agent_state(agent)
+                recovery_event = AgentEvent(
+                    agent_id=agent_id, kind="status_change",
+                    message=f"{agent.name} recovered from an unclean restart (was RUNNING) — reset to idle.",
+                )
+                _save_event(recovery_event)
+                self._events.append(recovery_event)
+
+
 
     # ── registration / status (hooks) ───────────────────────────────────
     def list_agents(self) -> list[AgentDefinition]:
@@ -931,13 +1015,29 @@ class AgentOrchestrator:
 
     def run_task(self, task_id: str) -> AgentTask:
         """Executes a PENDING task by calling its agent's handler. Refuses to
-        run a PENDING_APPROVAL task directly — only approve_task() may do that."""
+        run a PENDING_APPROVAL task directly — only approve_task() may do that.
+        Also refuses to start if the agent is already RUNNING another task —
+        each agent processes at most one task at a time, so two concurrent
+        assign_task()/approve_task() calls for the same agent (e.g. a
+        double-fired scheduler tick, two overlapping Gemini tool calls, or
+        an objective manager re-triggering the same agent) can never race
+        into genuinely duplicate concurrent work."""
         task = self._require_task(task_id)
         agent = self._require_agent(task.agent_id)
         if task.status == TaskStatus.PENDING_APPROVAL:
             raise PermissionError(
                 f"Task {task_id} requires approval (agent '{agent.name}' is EXECUTE-level)."
             )
+        if agent.status == AgentStatus.RUNNING:
+            task.status = TaskStatus.REJECTED
+            task.error = f"{agent.name} is already running another task — refused to run two at once."
+            task.updated_ts = time.time()
+            _save_task(task)
+            self._log_event(
+                agent.id, "log",
+                f"Refused to start task {task_id}: {agent.name} is already running another task.",
+            )
+            return task
 
         agent.status = AgentStatus.RUNNING
         task.status = TaskStatus.RUNNING
@@ -1023,6 +1123,57 @@ class AgentOrchestrator:
         periodically from a background loop — see
         main.py::_run_agent_scheduler."""
         return [self.assign_task(agent.id, task_description) for agent in self.get_due_agents()]
+
+    def get_stale_autonomous_agents(
+        self, now: Optional[float] = None, staleness_secs: float = 21_600,
+    ) -> list[AgentDefinition]:
+        """The autonomous objective loop's due-check — deliberately separate
+        from get_due_agents()/`schedule`. These are on-demand agents
+        (schedule=None) explicitly opted into unattended, generic-trigger
+        runs via autonomous_ok=True (see AgentDefinition's own comment for
+        why most on-demand agents must NOT be swept in here). Same IDLE +
+        not-EXECUTE safety gates as get_due_agents(), applied independently
+        rather than reused, so a bug in one due-check can't silently change
+        the other's behavior too."""
+        now = now if now is not None else time.time()
+        stale = []
+        for agent in self._agents.values():
+            if not agent.autonomous_ok:
+                continue
+            if agent.status != AgentStatus.IDLE:
+                continue
+            if agent.permission_level == PermissionLevel.EXECUTE:
+                continue
+            if agent.last_run_ts is None or (now - agent.last_run_ts) >= staleness_secs:
+                stale.append(agent)
+        return stale
+
+    def run_stale_autonomous_agents(
+        self, task_description: str = "Autonomous objective check",
+    ) -> list[AgentTask]:
+        """Same run pattern as run_due_agents(), against
+        get_stale_autonomous_agents() instead — this is what actually turns
+        'JARVIS should monitor his assigned business domains without being
+        asked' into real, executed work rather than a standing description
+        of intent. See core/headless/background.py's _run_objective_loop.
+
+        An agent with autonomous_topics set gets a real topic from its own
+        pre-approved, deterministic rotation, picked by how many tasks
+        this agent has already been assigned in total (persisted task
+        history, so the rotation survives a restart rather than always
+        restarting at topic 0 — relevant given Render's free tier has no
+        persistent disk and restarts often) — see
+        AgentDefinition.autonomous_topics for why this is a fixed rotation
+        and not an LLM-invented topic."""
+        results = []
+        for agent in self.get_stale_autonomous_agents():
+            if agent.autonomous_topics:
+                prior_runs = sum(1 for t in self._tasks.values() if t.agent_id == agent.id)
+                description = agent.autonomous_topics[prior_runs % len(agent.autonomous_topics)]
+            else:
+                description = task_description
+            results.append(self.assign_task(agent.id, description))
+        return results
 
     # ── internal ─────────────────────────────────────────────────────────
     def _require_agent(self, agent_id: str) -> AgentDefinition:

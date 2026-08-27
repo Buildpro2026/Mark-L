@@ -308,46 +308,101 @@ def _status_label_for_tool(name: str, args: dict) -> str:
     return labels.get(name, "Waiting on external service...")
 
 
+def _configured_providers() -> list[str]:
+    """Ordered by preference — cheapest/most generous first. Groq's free
+    tier (no credit card, roughly 1,000-14,400 requests/day depending on
+    model) is far more generous than Gemini's free tier (20 requests/day,
+    which 429s immediately once exhausted — see the P0 zero-cost-provider
+    audit), so it's tried first when configured. This is the entire
+    provider-priority mechanism: which of GROQ_API_KEY / GEMINI_API_KEY /
+    ANTHROPIC_TOKEN are set, and in what order they're listed here — no
+    other code changes to add, remove, or reorder a provider."""
+    order = []
+    if config.GROQ_API_KEY:
+        order.append("groq")
+    if config.GEMINI_API_KEY:
+        order.append("gemini")
+    if config.ANTHROPIC_TOKEN:
+        order.append("anthropic")
+    return order
+
+
 async def run_chat_turn(
     message: str, history: list[dict],
     on_status: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, list[dict]]:
-    """One conversational turn through Gemini + the shared ToolExecutor —
-    the browser equivalent of what Gemini Live's function-calling already
-    does for the desktop voice loop (main.py), using the SAME tool
-    declarations and the SAME ToolExecutor, just over a plain (non-Live)
-    Gemini call since neither a browser chat tab nor a headless cloud
-    process can hold a Live audio session the way main.py's Gemini Live
-    client does. Nothing about tool dispatch or the underlying agents/
-    business logic is reimplemented here. Shared by /ui/api/chat (the
-    generic web UI) and core.headless.dashboard_bridge (the original
-    JARVIS phone/3D command-center UI's typed-command relay) so both
-    surfaces run the exact same conversational path.
+    """One conversational turn through a configured AI provider + the
+    shared ToolExecutor — the browser equivalent of what Gemini Live's
+    function-calling already does for the desktop voice loop (main.py),
+    using the SAME tool declarations and the SAME ToolExecutor, just over
+    a plain (non-Live) chat-completion call since neither a browser chat
+    tab nor a headless cloud process can hold a Live audio session the
+    way main.py's Gemini Live client does. Nothing about tool dispatch or
+    the underlying agents/business logic is reimplemented here. Shared by
+    /ui/api/chat (the generic web UI) and core.headless.dashboard_bridge
+    (the original JARVIS phone/3D command-center UI's typed-command
+    relay) so both surfaces run the exact same conversational path.
 
-    If Gemini fails and ANTHROPIC_TOKEN is configured, falls back to
-    Claude for the rest of the turn — found live 2026-08-19: the deployed
-    Gemini key sits on the free tier's 20-requests/day cap, and once it's
-    hit, a turn's FIRST call often still succeeds (invokes a tool) while
-    the SECOND call (to read that tool's result back) is what 429s — so
-    gating the fallback on "only before any tool ran" turned out to never
-    actually trigger in practice. Instead, any tool call(s) already
-    completed this turn are handed to Claude as plain completed-context
-    (see _run_chat_turn_anthropic) rather than re-executed — Claude
-    continues reasoning from what already happened instead of the turn
-    restarting blind, so a HubSpot write or a sent email never runs twice.
+    Which provider actually runs the turn is not hardcoded — see
+    _configured_providers(). If the first configured provider fails (on
+    any round, not just the first — a 429 on round 2 after round 1
+    already ran a tool is common, not rare), the next configured provider
+    picks up with the already-completed tool call(s) handed over as plain
+    context rather than re-executed, so a HubSpot write or a sent email
+    never runs twice across a provider switch mid-turn.
 
-    Raises HTTPException on a missing GEMINI_API_KEY, an empty message, or
-    a request failure neither provider could serve — callers that don't
-    want that (e.g. the dashboard bridge, which just wants a reply string)
-    should catch it."""
-    if not config.GEMINI_API_KEY:
-        raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured on this server.")
+    Raises HTTPException if no provider is configured, the message is
+    empty, or every configured provider's request failed — callers that
+    don't want that (e.g. the dashboard bridge, which just wants a reply
+    string) should catch it."""
     if not message.strip():
         raise HTTPException(status_code=400, detail="Empty message.")
+    providers = _configured_providers()
+    if not providers:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No AI provider is configured on this server "
+                "(set GROQ_API_KEY, GEMINI_API_KEY, or ANTHROPIC_TOKEN)."
+            ),
+        )
 
-    from google.genai import types as gtypes
     from core.headless.context import ToolContext
-    from core.headless.tool_executor import ToolExecutor, UnknownToolError
+    from core.headless.tool_executor import ToolExecutor
+
+    executor = ToolExecutor(ToolContext())
+    tool_calls_made: list[dict] = []
+    return await _run_provider_chain(providers, message, history, on_status, executor, tool_calls_made)
+
+
+async def _run_provider_chain(
+    providers: list[str], message: str, history: list[dict],
+    on_status: Callable[[str], Awaitable[None]] | None,
+    executor: "ToolExecutor",  # noqa: F821 — imported by the caller before this runs
+    tool_calls_made: list[dict],
+) -> tuple[str, list[dict]]:
+    """Tries providers[0]; on failure, recurses into providers[1:] (which
+    raises the final, clean HTTPException itself once the list is empty —
+    see each _run_chat_turn_* function's own except clause). One place
+    for the "next provider, or give up" decision instead of three copies
+    of it."""
+    runner = {
+        "groq": _run_chat_turn_groq,
+        "gemini": _run_chat_turn_gemini,
+        "anthropic": _run_chat_turn_anthropic,
+    }[providers[0]]
+    return await runner(message, history, on_status, executor, tool_calls_made, providers[1:])
+
+
+async def _run_chat_turn_gemini(
+    message: str, history: list[dict],
+    on_status: Callable[[str], Awaitable[None]] | None,
+    executor: "ToolExecutor",  # noqa: F821
+    tool_calls_made: list[dict],
+    remaining_providers: list[str],
+) -> tuple[str, list[dict]]:
+    from google.genai import types as gtypes
+    from core.headless.tool_executor import UnknownToolError
     from core.headless.gemini_client import get_client
 
     client = get_client(config.GEMINI_API_KEY)
@@ -361,9 +416,14 @@ async def run_chat_turn(
         if text:
             contents.append(gtypes.Content(role=role, parts=[gtypes.Part(text=text)]))
     contents.append(gtypes.Content(role="user", parts=[gtypes.Part(text=message)]))
+    if tool_calls_made:
+        already_done = "\n".join(f"- {c['name']}({c['args']}) -> {c['result']}" for c in tool_calls_made)
+        contents.append(gtypes.Content(role="user", parts=[gtypes.Part(text=(
+            "[System note: before switching to you, the following tool call(s) "
+            "already ran successfully and must NOT be repeated — use these real "
+            f"results to answer:]\n{already_done}"
+        ))]))
 
-    executor = ToolExecutor(ToolContext())
-    tool_calls_made: list[dict] = []
     loop = asyncio.get_event_loop()
 
     for round_num in range(_MAX_TOOL_CALL_ROUNDS):
@@ -372,12 +432,12 @@ async def run_chat_turn(
                 None, lambda: client.models.generate_content(model=CHAT_MODEL, contents=contents, config=gen_config)
             )
         except Exception as e:
-            if config.ANTHROPIC_TOKEN:
-                return await _run_chat_turn_anthropic(message, history, on_status, executor, tool_calls_made)
+            if remaining_providers:
+                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
             # Gemini's own API returns a clean, user-safe error message
             # (e.g. "high demand" 503s) — safe to surface directly, this
             # is never a secret-bearing string.
-            raise HTTPException(status_code=502, detail=f"Gemini request failed: {e}")
+            raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Gemini. Error: {e}")
 
         if not resp.function_calls:
             return resp.text or "", tool_calls_made
@@ -414,20 +474,113 @@ async def run_chat_turn(
     )
 
 
+async def _run_chat_turn_groq(
+    message: str, history: list[dict],
+    on_status: Callable[[str], Awaitable[None]] | None,
+    executor: "ToolExecutor",  # noqa: F821
+    tool_calls_made: list[dict],
+    remaining_providers: list[str],
+) -> tuple[str, list[dict]]:
+    """Structurally parallel to _run_chat_turn_gemini/_run_chat_turn_anthropic
+    but in OpenAI's chat-completions shape (tool_calls / role="tool" messages
+    instead of function_calls/FunctionResponse or tool_use/tool_result)."""
+    import json as _json
+    from core.headless.tool_executor import UnknownToolError
+    from core.headless.groq_client import get_client, gemini_tools_to_openai, CHAT_MODEL as GROQ_CHAT_MODEL
+
+    client = get_client(config.GROQ_API_KEY)
+    tools = gemini_tools_to_openai(_chat_tool_declarations())
+
+    messages: list[dict] = [{"role": "system", "content": _chat_system_prompt()}]
+    for turn in history[-20:]:
+        role = "assistant" if turn.get("role") == "model" else "user"
+        text = str(turn.get("text") or "")
+        if text:
+            messages.append({"role": role, "content": text})
+    messages.append({"role": "user", "content": message})
+    if tool_calls_made:
+        already_done = "\n".join(f"- {c['name']}({c['args']}) -> {c['result']}" for c in tool_calls_made)
+        messages.append({
+            "role": "user",
+            "content": (
+                "[System note: before switching to you, the following tool call(s) "
+                "already ran successfully and must NOT be repeated — use these real "
+                f"results to answer:]\n{already_done}"
+            ),
+        })
+
+    loop = asyncio.get_event_loop()
+
+    for _ in range(_MAX_TOOL_CALL_ROUNDS):
+        try:
+            resp = await loop.run_in_executor(
+                None, lambda: client.chat.completions.create(
+                    model=GROQ_CHAT_MODEL, messages=messages, tools=tools,
+                )
+            )
+        except Exception as e:
+            if remaining_providers:
+                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+            raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Groq. Error: {e}")
+
+        choice = resp.choices[0].message
+        tool_calls = choice.tool_calls or []
+        if not tool_calls:
+            return choice.content or "", tool_calls_made
+
+        messages.append({
+            "role": "assistant", "content": choice.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ],
+        })
+        for tc in tool_calls:
+            try:
+                args = _json.loads(tc.function.arguments or "{}")
+            except Exception:
+                args = {}
+            if on_status is not None:
+                try:
+                    await on_status(_status_label_for_tool(tc.function.name, args))
+                except Exception:
+                    pass
+            try:
+                result = await executor.execute(tc.function.name, args)
+            except UnknownToolError as e:
+                result = f"Error: {e}"
+            except Exception as e:
+                result = f"Error: {tc.function.name} failed — {e}"
+            tool_calls_made.append({"name": tc.function.name, "args": args, "result": result})
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+
+        if on_status is not None and tool_calls:
+            try:
+                await on_status("Analyzing results...")
+            except Exception:
+                pass
+
+    return (
+        "I ran several tool calls but didn't reach a final answer — try rephrasing or breaking the request into smaller steps.",
+        tool_calls_made,
+    )
+
+
 async def _run_chat_turn_anthropic(
     message: str, history: list[dict],
     on_status: Callable[[str], Awaitable[None]] | None,
     executor: "ToolExecutor",  # noqa: F821 — imported by the caller before this runs
     tool_calls_made: list[dict],
+    remaining_providers: list[str],
 ) -> tuple[str, list[dict]]:
-    """Claude fallback loop, structurally parallel to run_chat_turn's Gemini
-    loop but in Anthropic's content-block shape (tool_use/tool_result
-    instead of function_calls/FunctionResponse). Shares the caller's
-    ToolExecutor and tool_calls_made list. If Gemini already completed one
-    or more tool calls earlier this turn before failing, those are handed
-    to Claude as plain completed-context (a "here's what already happened,
-    don't repeat it" note) rather than re-executed — see run_chat_turn's
-    docstring for why."""
+    """Structurally parallel to _run_chat_turn_gemini's loop but in
+    Anthropic's content-block shape (tool_use/tool_result instead of
+    function_calls/FunctionResponse). Shares the caller's ToolExecutor and
+    tool_calls_made list. Tool call(s) already completed by an earlier
+    provider this turn are handed to Claude as plain completed-context (a
+    "here's what already happened, don't repeat it" note) rather than
+    re-executed — see run_chat_turn's docstring for why."""
     from core.headless.tool_executor import UnknownToolError
     from core.headless.anthropic_client import get_client, gemini_tools_to_anthropic, CHAT_MODEL as ANTHROPIC_CHAT_MODEL
 
@@ -463,7 +616,9 @@ async def _run_chat_turn_anthropic(
                 )
             )
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Anthropic request failed (after Gemini also failed): {e}")
+            if remaining_providers:
+                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+            raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Anthropic. Error: {e}")
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
         if not tool_uses:

@@ -117,8 +117,140 @@ class _FakeAnthropicClient:
 
 @pytest.fixture(autouse=True)
 def _base_config(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", None)
     monkeypatch.setattr(headless_ui.config, "GEMINI_API_KEY", "fake-gemini-key-not-real")
     monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", None)
+
+
+class _FakeGroqToolCall:
+    def __init__(self, id, name, arguments_json):
+        self.id = id
+        self.function = type("_F", (), {"name": name, "arguments": arguments_json})()
+
+
+class _FakeGroqMessage:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class _FakeGroqChoice:
+    def __init__(self, message):
+        self.message = message
+
+
+class _FakeGroqResponse:
+    def __init__(self, content=None, tool_calls=None):
+        self.choices = [_FakeGroqChoice(_FakeGroqMessage(content=content, tool_calls=tool_calls))]
+
+
+class _FakeGroqClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    class _Completions:
+        def __init__(self, outer):
+            self._outer = outer
+
+        def create(self, model, messages, tools):
+            return self._outer._responses.pop(0)
+
+    class _Chat:
+        def __init__(self, outer):
+            self.completions = outer._Completions(outer)
+
+    @property
+    def chat(self):
+        return self._Chat(self)
+
+
+def test_groq_is_tried_first_when_configured_gemini_never_touched(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
+    fake_groq = _FakeGroqClient([_FakeGroqResponse(content="Groq here, no need for Gemini.")])
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_groq)
+
+    def _gemini_should_never_be_called(*a, **k):
+        raise AssertionError("Gemini was called even though Groq (higher priority) succeeded")
+    monkeypatch.setattr("core.headless.gemini_client.get_client", _gemini_should_never_be_called)
+
+    reply, calls = asyncio.run(headless_ui.run_chat_turn("hello", []))
+    assert reply == "Groq here, no need for Gemini."
+    assert calls == []
+
+
+def test_falls_back_from_groq_to_gemini_when_groq_fails(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
+
+    class _AlwaysFailsGroq:
+        class _Chat:
+            class _Completions:
+                def create(self, **kwargs):
+                    raise RuntimeError("groq also down")
+            completions = _Completions()
+        chat = _Chat()
+
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _AlwaysFailsGroq())
+    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient2())
+
+    reply, calls = asyncio.run(headless_ui.run_chat_turn("hello", []))
+    assert reply == "Gemini caught the fall from Groq."
+    assert calls == []
+
+
+class _FakeGeminiClient2:
+    """A Gemini fake that succeeds — distinct name from test_llm_fallback's
+    own _FakeGeminiClient (which always raises) since this file needs both
+    a failing and a succeeding Gemini fake."""
+    class _Models:
+        def generate_content(self, model, contents, config):
+            return _FakeGeminiResponse2(text="Gemini caught the fall from Groq.")
+    models = _Models()
+
+
+class _FakeGeminiResponse2:
+    def __init__(self, text):
+        self.text = text
+        self.function_calls = []
+
+
+def test_full_three_provider_chain_exhausted_raises_clean_error(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
+    monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", "fake-anthropic-key-not-real")
+
+    class _AlwaysFailsGroq:
+        class _Chat:
+            class _Completions:
+                def create(self, **kwargs):
+                    raise RuntimeError("groq down")
+            completions = _Completions()
+        chat = _Chat()
+
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _AlwaysFailsGroq())
+    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient())
+
+    class _AlwaysFailsAnthropic:
+        class _Messages:
+            def create(self, **kwargs):
+                raise RuntimeError("anthropic down too")
+        messages = _Messages()
+
+    monkeypatch.setattr("core.headless.anthropic_client.get_client", lambda *a, **k: _AlwaysFailsAnthropic())
+
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(headless_ui.run_chat_turn("hello", []))
+    assert exc_info.value.status_code == 502
+    assert "All configured AI providers failed" in exc_info.value.detail
+    assert "Anthropic" in exc_info.value.detail  # last one tried
+
+
+def test_no_provider_configured_raises_clear_503(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "GEMINI_API_KEY", None)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(headless_ui.run_chat_turn("hello", []))
+    assert exc_info.value.status_code == 503
+    assert "GROQ_API_KEY" in exc_info.value.detail
 
 
 def test_falls_back_to_anthropic_when_gemini_fails_before_any_tool_call(monkeypatch):
@@ -140,7 +272,7 @@ def test_does_not_fall_back_when_anthropic_not_configured(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(headless_ui.run_chat_turn("hello", []))
     assert exc_info.value.status_code == 502
-    assert "Gemini request failed" in exc_info.value.detail
+    assert "Gemini" in exc_info.value.detail
 
 
 def test_falls_back_after_a_gemini_tool_already_ran_without_repeating_it(monkeypatch):
@@ -227,4 +359,5 @@ def test_anthropic_fallback_also_raises_cleanly_if_both_providers_fail(monkeypat
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(headless_ui.run_chat_turn("hello", []))
     assert exc_info.value.status_code == 502
-    assert "after Gemini also failed" in exc_info.value.detail
+    assert "All configured AI providers failed" in exc_info.value.detail
+    assert "Anthropic" in exc_info.value.detail

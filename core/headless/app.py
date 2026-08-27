@@ -51,8 +51,19 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     app.state.background_worker = BackgroundWorker()
 
     # The original dashboard is optional in the cloud. It must never prevent
-    # the headless API or the primary orb interface from starting.
+    # the headless API or the primary orb interface from starting, so a
+    # failure here is caught and logged rather than propagated — but it must
+    # actually be attempted, or the phone command center and /3d routes stay
+    # permanently dark even in environments where they'd work fine.
     dashboard_server = None
+    try:
+        from dashboard.server import DashboardServer
+        dashboard_server = DashboardServer()
+    except Exception:
+        logger.exception(
+            "Legacy dashboard failed to initialize — continuing without it; "
+            "/health will report degraded and its routes return 503."
+        )
     app.state.dashboard_server = dashboard_server
 
     if start_background_worker:
@@ -75,11 +86,27 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     def health():
         """Unauthenticated platform health probe."""
         cfg = config.summarize()
+        healthy = _db_reachable() and dashboard_server is not None
+        providers = []
+        if config.GROQ_API_KEY:
+            providers.append("groq")
+        if config.GEMINI_API_KEY:
+            providers.append("gemini")
+        if config.ANTHROPIC_TOKEN:
+            providers.append("anthropic")
         return {
-            "status": "ok" if _db_reachable() else "degraded",
+            "status": "ok" if healthy else "degraded",
             "uptime_seconds": round(time.time() - START_TS, 1),
             "db_reachable": _db_reachable(),
             "dashboard_ui_available": dashboard_server is not None,
+            # Safe provider diagnostics — which chat provider a real request
+            # would actually reach right now, and in what order, without
+            # ever exposing the key values themselves. Answers "is Groq
+            # actually configured on THIS running instance" directly,
+            # rather than requiring a live chat call (which burns a
+            # request against whatever's exhausted) to find out.
+            "provider_selected": providers[0] if providers else None,
+            "fallbacks_available": providers[1:],
             **cfg,
         }
 
