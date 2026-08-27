@@ -50,17 +50,8 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     )
     app.state.background_worker = BackgroundWorker()
 
-    # The original JARVIS dashboard/phone/3D-command-center UI, imported
-    # lazily here (not at module scope) so a dashboard/server.py import
-    # failure can't take the whole headless app down with it — see the
-    # mount at the bottom of this function. The lazy import alone only
-    # protects `import core.headless.app`; create_app() itself used to call
-    # DashboardServer() with no try/except, so a real failure here (e.g. a
-    # missing dependency or a bug in dashboard/server.py) still took down
-    # /health, the tools API, and the orchestrator API along with it —
-    # exactly the outcome this comment claimed couldn't happen. Now a
-    # failure here is logged and the core API stays up in a degraded mode
-    # instead of crash-looping the whole process.
+    # The original dashboard is optional in the cloud. It must never prevent
+    # the headless API or the primary orb interface from starting.
     dashboard_server = None
     app.state.dashboard_server = dashboard_server
 
@@ -82,14 +73,10 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
 
     @app.get("/health")
     def health():
-        """Unauthenticated on purpose — this is what a cloud platform's
-        health probe / uptime monitor hits, and it reveals no secrets, no
-        conversation content, and no business data. Presence/reachability
-        only, same discipline as scripts/health_check.py and
-        core/startup.py's print_startup_banner()."""
+        """Unauthenticated platform health probe."""
         cfg = config.summarize()
         return {
-            "status": "ok" if dashboard_server is not None else "degraded",
+            "status": "ok" if _db_reachable() else "degraded",
             "uptime_seconds": round(time.time() - START_TS, 1),
             "db_reachable": _db_reachable(),
             "dashboard_ui_available": dashboard_server is not None,
@@ -101,36 +88,23 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     app.include_router(status_api.router, prefix="/api")
     app.include_router(ui.router)
     app.include_router(ui.api)
-    # Public/unauthenticated on purpose — a candidate reaches this from a
-    # plain link in an email, no JARVIS login of their own. See that
-    # module's docstring.
     app.include_router(agreement_routes.router)
 
-    # The orb-first executive surface is now the primary browser entry point.
-    # The original phone dashboard and spatial command center remain mounted
-    # below at their existing explicit paths (/3d and its APIs).
+    # The orb-first executive surface is the primary browser entry point.
+    # It is independent of the optional legacy dashboard.
     @app.get("/", include_in_schema=False)
     def primary_jarvis_ui():
-        if dashboard_server is None:
-            return JSONResponse(
-                {"error": "dashboard UI failed to load — check server logs", "status": "degraded"},
-                status_code=503,
-            )
         return RedirectResponse(url="/ui", status_code=307)
 
-    # Everything else — "/login", "/3d", "/ws", "/api/command", etc.
-    # — falls through to dashboard/server.py's own FastAPI app, mounted
-    # last so the explicit routes above (/health, /api/tools*, /api/status,
-    # /api/orchestrator/*, /ui/*) are matched first and never shadowed by
-    # it. The bare public URL is handled by primary_jarvis_ui above; these
-    # routes remain available as supporting JARVIS surfaces.
+    # The legacy dashboard is optional. Keep a clean response for its routes
+    # when the desktop dashboard cannot load in the cloud.
     if dashboard_server is not None:
         app.mount("/", dashboard_server.app)
     else:
         @app.get("/{_path:path}")
         def _dashboard_unavailable(_path: str):
             return JSONResponse(
-                {"error": "dashboard UI failed to load — check server logs", "status": "degraded"},
+                {"error": "dashboard UI unavailable in headless runtime", "status": "degraded"},
                 status_code=503,
             )
 
