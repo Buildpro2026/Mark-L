@@ -1075,9 +1075,18 @@ class DashboardServer:
         # tests/conftest.py's _dashboard_api_token fixture), since this is
         # Lee's own operator surface, not a paired-device session.
         def _3d_auth(req: Request) -> bool:
+            """Accepts either the same JARVIS_API_TOKEN Bearer auth used by
+            /3d/api/* clients and tests, OR the same browser session cookie
+            /ui already sets on login — so a person who's simply logged
+            into the normal JARVIS interface can click through to /3d and
+            it just works, with no separate login step and no token ever
+            appearing in a URL or needing to be typed in twice."""
             from core.headless import config as headless_config
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
-            return bool(tok) and bool(headless_config.API_TOKEN) and tok == headless_config.API_TOKEN
+            if tok and headless_config.API_TOKEN and tok == headless_config.API_TOKEN:
+                return True
+            from core.headless.ui import _session_valid, COOKIE_NAME
+            return _session_valid(req.cookies.get(COOKIE_NAME))
 
         _THREE_D_DIR = STATIC_DIR / "3d"
 
@@ -1161,8 +1170,15 @@ class DashboardServer:
         @app.websocket("/3d/ws")
         async def three_d_ws(websocket: WebSocket, token: str = ""):
             from core.headless import config as headless_config
+            from core.headless.ui import _session_valid, COOKIE_NAME
             tok = token.strip()
-            if not tok or not headless_config.API_TOKEN or tok != headless_config.API_TOKEN:
+            token_ok = bool(tok) and bool(headless_config.API_TOKEN) and tok == headless_config.API_TOKEN
+            # A same-origin browser tab already sends the /ui session
+            # cookie automatically on the websocket handshake, same as it
+            # would on any other same-origin request — no separate login
+            # needed, matching the HTTP routes' _3d_auth above.
+            cookie_ok = _session_valid(websocket.cookies.get(COOKIE_NAME))
+            if not (token_ok or cookie_ok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()

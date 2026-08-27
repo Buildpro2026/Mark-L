@@ -101,6 +101,17 @@
   #sidebar-foot { padding: 12px 18px 0; border-top: 1px solid var(--line); margin-top: 8px; }
   #sidebar-foot button { width: 100%; }
 
+  /* ── 3D Command Center launcher — obvious, not a hidden URL ────────── */
+  #command-center-link {
+    display: flex; align-items: center; gap: 8px; margin: 2px 18px 14px; padding: 9px 12px;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, transparent), color-mix(in srgb, var(--accent) 8%, transparent));
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--text);
+    text-decoration: none; cursor: pointer; transition: filter 0.15s;
+  }
+  #command-center-link:hover { filter: brightness(1.15); }
+  #command-center-link .cc-icon { font-size: 15px; line-height: 1; }
+
   #content { flex: 1; overflow-y: auto; padding: 22px 28px 60px; }
   .page { display: none; }
   .page.active { display: block; }
@@ -307,6 +318,7 @@
   }
   #sidebar .brand { padding: 0; font-size: 12px; }
   #identity-badge { padding: 0; margin-right: auto; }
+  #command-center-link { margin: 0; padding: 7px 10px; white-space: nowrap; }
   #report-picker-wrap { padding: 0; width: min(230px, 34vw); }
   #report-picker-wrap .field-label { display: none; }
   #report-picker { padding: 8px 34px 8px 12px; background-color: color-mix(in srgb, var(--panel-alt) 86%, transparent); }
@@ -365,6 +377,10 @@
   <div id="sidebar">
     <div class="brand"><span class="dot" id="conn-dot"></span> JARVIS</div>
     <div id="identity-badge">Executive</div>
+    <a id="command-center-link" href="/3d" target="_blank" rel="noopener"
+       title="Open the 3D spatial Command Center in a new tab">
+      <span class="cc-icon">&#127760;</span> 3D Command Center
+    </a>
     <div id="approval-badge"><span id="approval-badge-text">Tasks waiting on you</span><span class="count" id="approval-count">0</span></div>
     <div id="report-picker-wrap">
       <label class="field-label" for="report-picker">Report</label>
