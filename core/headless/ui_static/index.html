@@ -243,6 +243,35 @@
     border: 1px solid var(--line); transition: border-color .15s ease;
   }
   .chat-input-row textarea:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); outline: none; }
+
+  /* ── Knowledge / JARVIS Brain ─────────────────────────────────────── */
+  .knowledge-intro { color: var(--muted); font-size: 12.5px; line-height: 1.6; max-width: 640px; margin-bottom: 16px; }
+  .knowledge-intro code { font-family: var(--mono); color: var(--accent); font-size: 11.5px; }
+  .knowledge-search { display: flex; gap: 8px; margin-bottom: 16px; }
+  .knowledge-search input {
+    flex: 1; font-family: var(--mono); background: var(--panel-alt); border: 1px solid var(--line);
+    transition: border-color .15s ease;
+  }
+  .knowledge-search input:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); outline: none; }
+  .knowledge-row { cursor: pointer; transition: background .12s ease; border-radius: 6px; padding-left: 6px; padding-right: 6px; }
+  .knowledge-row:hover { background: var(--panel-alt); }
+  .knowledge-row .title::before {
+    content: "\25CF"; color: var(--accent); font-size: 6px; margin-right: 7px; vertical-align: middle;
+  }
+  #knowledge-reader {
+    background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px 20px; animation: msg-in .18s ease both;
+  }
+  .knowledge-reader-back {
+    display: inline-block; margin-bottom: 12px; font-size: 11.5px; color: var(--muted);
+    cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .knowledge-reader-back:hover { color: var(--accent); }
+  .knowledge-reader-path { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-bottom: 12px; word-break: break-all; }
+  #knowledge-reader-content {
+    white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 13px;
+    line-height: 1.65; color: var(--text); max-height: 60vh; overflow-y: auto; margin: 0;
+  }
   .search-row { display: flex; gap: 8px; margin-bottom: 12px; }
 
   #global-error {
@@ -479,6 +508,7 @@
         <button class="nav-item" data-report="buildpro" type="button"><span class="nav-marker"></span>BuildPro</button>
         <button class="nav-item" data-report="ddf" type="button"><span class="nav-marker"></span>DDF</button>
         <button class="nav-item" data-report="intelligence" type="button"><span class="nav-marker"></span>Intelligence</button>
+        <button class="nav-item" data-report="knowledge" type="button"><span class="nav-marker"></span>Knowledge</button>
         <button class="nav-item" data-report="agents" type="button"><span class="nav-marker"></span>Agents</button>
         <button class="nav-item" data-report="tasks" type="button"><span class="nav-marker"></span>Tasks &amp; Approvals</button>
         <button class="nav-item" data-report="history" type="button"><span class="nav-marker"></span>History</button>
@@ -557,6 +587,34 @@
     <div class="page" id="page-intelligence">
       <div class="page-head"><h1>Intelligence</h1><button class="ghost small" id="refresh-intel-btn">Refresh</button></div>
       <div id="intelligence-body"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- Knowledge / JARVIS Brain — reuses the real, already-working
+         /3d/api/module/knowledge endpoint (list/search/read over the
+         actual knowledge/JARVIS Brain/ vault). Same-origin fetch through
+         the shared api() helper already sends the /ui session cookie,
+         which /3d's own auth already accepts (see dashboard/server.py's
+         _3d_auth) — no new backend route. -->
+    <div class="page" id="page-knowledge">
+      <div class="page-head">
+        <h1>Knowledge</h1>
+        <span class="sub" id="knowledge-count-label">JARVIS Brain</span>
+        <button class="ghost small" id="refresh-knowledge-btn">Refresh</button>
+      </div>
+      <div id="knowledge-body">
+        <div class="knowledge-intro">The real notes JARVIS consults before executive decisions — founder context, company facts, SOPs, and past decisions from <code>knowledge/JARVIS Brain/</code>.</div>
+        <div class="knowledge-search">
+          <input id="knowledge-search-input" type="text" placeholder="Search the Brain…" autocomplete="off" />
+          <button id="knowledge-search-btn" class="small">Search</button>
+          <button id="knowledge-clear-btn" class="ghost small">All notes</button>
+        </div>
+        <div id="knowledge-list" class="row-list"><div class="empty">Loading…</div></div>
+        <div id="knowledge-reader" style="display:none">
+          <div class="knowledge-reader-back" id="knowledge-reader-back">&lsaquo; Back to Brain</div>
+          <div class="knowledge-reader-path" id="knowledge-reader-path"></div>
+          <pre id="knowledge-reader-content"></pre>
+        </div>
+      </div>
     </div>
 
     <!-- Agents -->
@@ -1184,6 +1242,101 @@ async function loadIntelligence() {
 }
 $('refresh-intel-btn').addEventListener('click', loadIntelligence);
 
+/* ── Knowledge / JARVIS Brain — real data only, via the existing
+   /3d/api/module/knowledge endpoint (see the page markup comment for
+   why this reuses that route instead of duplicating backend code). ── */
+function knowledgeTitle(path) {
+  return String(path).split('/').pop().replace(/\.md$/i, '');
+}
+function knowledgeCategory(path) {
+  const parts = String(path).split('/');
+  if (parts.length < 2) return 'Brain';
+  return parts[0].replace(/^[-\d]+/, '').trim() || parts[0];
+}
+async function fetchKnowledge(params) {
+  const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+  return api(`/3d/api/module/knowledge${qs}`);
+}
+function setKnowledgeMode(mode) {
+  $('knowledge-list').style.display = mode === 'list' ? '' : 'none';
+  $('knowledge-reader').style.display = mode === 'reader' ? '' : 'none';
+}
+function renderKnowledgeList(data) {
+  const el = $('knowledge-list');
+  if (!data.configured) {
+    $('knowledge-count-label').textContent = 'Not configured';
+    el.innerHTML = `<div class="empty">No JARVIS Brain vault is configured on this server yet.</div>`;
+    return;
+  }
+  if (Array.isArray(data.results)) {
+    $('knowledge-count-label').textContent = `${data.results.length} match(es)`;
+    el.innerHTML = data.results.length ? data.results.map(r => `
+      <div class="row knowledge-row" data-path="${escapeHtml(r.path)}">
+        <div class="main">
+          <div class="title">${escapeHtml(knowledgeTitle(r.path))}</div>
+          <div class="detail">${escapeHtml(knowledgeCategory(r.path))}${r.snippet ? ' — …' + escapeHtml(r.snippet) + '…' : ''}</div>
+        </div>
+      </div>`).join('') : '<div class="empty">No notes match that search.</div>';
+    return;
+  }
+  const notes = data.notes || [];
+  $('knowledge-count-label').textContent = notes.length ? `${notes.length} document(s)` : 'JARVIS Brain';
+  el.innerHTML = notes.length ? notes.map(n => `
+    <div class="row knowledge-row" data-path="${escapeHtml(n)}">
+      <div class="main">
+        <div class="title">${escapeHtml(knowledgeTitle(n))}</div>
+        <div class="detail">${escapeHtml(knowledgeCategory(n))}</div>
+      </div>
+    </div>`).join('') : '<div class="empty">The JARVIS Brain vault is empty — no notes yet.</div>';
+}
+async function loadKnowledge() {
+  setKnowledgeMode('list');
+  const el = $('knowledge-list');
+  el.innerHTML = `<div class="empty">Loading…</div>`;
+  try {
+    const payload = await fetchKnowledge();
+    renderKnowledgeList(payload.data || {});
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+async function runKnowledgeSearch() {
+  const q = $('knowledge-search-input').value.trim();
+  if (!q) { loadKnowledge(); return; }
+  setKnowledgeMode('list');
+  const el = $('knowledge-list');
+  el.innerHTML = `<div class="empty">Searching…</div>`;
+  try {
+    const payload = await fetchKnowledge({ query: q });
+    renderKnowledgeList(payload.data || {});
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+async function openKnowledgeNote(path) {
+  setKnowledgeMode('reader');
+  $('knowledge-reader-path').textContent = path;
+  $('knowledge-reader-content').textContent = 'Loading…';
+  try {
+    const payload = await fetchKnowledge({ note: path });
+    const note = (payload.data || {}).note || {};
+    $('knowledge-reader-content').textContent = note.found
+      ? (note.content || '')
+      : `This note couldn't be found in the vault (it may have been moved or removed).`;
+  } catch (e) {
+    $('knowledge-reader-content').textContent = 'Error: ' + e.message;
+  }
+}
+$('knowledge-search-btn').addEventListener('click', runKnowledgeSearch);
+$('knowledge-search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runKnowledgeSearch(); });
+$('knowledge-clear-btn').addEventListener('click', () => { $('knowledge-search-input').value = ''; loadKnowledge(); });
+$('knowledge-reader-back').addEventListener('click', () => setKnowledgeMode('list'));
+$('refresh-knowledge-btn').addEventListener('click', () => { $('knowledge-search-input').value = ''; loadKnowledge(); });
+$('knowledge-list').addEventListener('click', (e) => {
+  const row = e.target.closest('.knowledge-row');
+  if (row) openKnowledgeNote(row.dataset.path);
+});
+
 /* ── Agents ────────────────────────────────────────────────────────── */
 let agentsCache = [];
 const BUSINESS_LABELS = {
@@ -1485,6 +1638,7 @@ function loadAll() {
   loadBuildPro();
   loadDDF();
   loadIntelligence();
+  loadKnowledge();
   loadAgents();
   loadTasksAndApprovals();
   loadHistory();
