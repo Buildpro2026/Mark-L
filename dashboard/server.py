@@ -533,7 +533,7 @@ class DashboardServer:
         placeholder = self._communications_placeholder()
         return [{**c, "placeholder": placeholder} for c in children]
 
-    def _module_data(self, module_id: str, query: str = "") -> dict:
+    def _module_data(self, module_id: str, query: str = "", note: str = "") -> dict:
         if module_id == "buildpro":
             return self._module_buildpro()
         if module_id == "candidates":
@@ -559,6 +559,8 @@ class DashboardServer:
             return self._module_system()
         if module_id == "files":
             return self._module_files(query)
+        if module_id == "knowledge":
+            return self._module_knowledge(query, note)
         if module_id == "reports":
             return self._module_reports()
         if module_id == "email":
@@ -677,6 +679,46 @@ class DashboardServer:
         except Exception:
             pass
         return {"results": results, "recent_files": recent_files}
+
+    def _module_knowledge(self, query: str = "", note: str = "") -> dict:
+        """JARVIS Brain — a thin read-only wrapper over the existing
+        core.headless.obsidian.ObsidianVault (no new retrieval system:
+        list_notes()/search_notes()/read_note() are the same methods the
+        obsidian LLM tool already uses). Distinct from _module_files:
+        this is specifically the Obsidian knowledge vault (default
+        knowledge/JARVIS Brain/), not a general filesystem search.
+        Every field below comes straight from the vault — an unconfigured
+        vault, an empty vault, or a not-found note is reported honestly,
+        never fabricated."""
+        from core.headless.obsidian import ObsidianVault
+        vault = ObsidianVault()
+        vault_path = vault.status().get("path")
+        if not vault.is_configured():
+            return {
+                "configured": False, "vault_path": vault_path,
+                "summary": "No JARVIS Brain vault configured.", "notes": [],
+            }
+        if note:
+            content = vault.read_note(note)
+            found = content is not None
+            return {
+                "configured": True, "vault_path": vault_path,
+                "note": {"path": note, "content": content, "found": found},
+                "summary": f"Reading {note}" if found else f"{note!r} not found in the JARVIS Brain.",
+            }
+        if query.strip():
+            results = vault.search_notes(query)
+            return {
+                "configured": True, "vault_path": vault_path,
+                "query": query, "results": results,
+                "summary": f'{len(results)} note(s) match "{query}".',
+            }
+        notes = vault.list_notes()
+        return {
+            "configured": True, "vault_path": vault_path,
+            "notes": notes,
+            "summary": f"{len(notes)} note(s) in the JARVIS Brain." if notes else "The JARVIS Brain vault is empty.",
+        }
 
     def _module_reports(self) -> dict:
         report_files: list[dict] = []
@@ -1135,13 +1177,13 @@ class DashboardServer:
             return JSONResponse(self._overview_payload())
 
         @app.get("/3d/api/module/{module_id}")
-        async def three_d_module(module_id: str, req: Request, query: str = ""):
+        async def three_d_module(module_id: str, req: Request, query: str = "", note: str = ""):
             if not _3d_auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             node = nucleus_hierarchy.get_hierarchy_node(module_id) or {"id": module_id, "name": module_id}
             children = nucleus_hierarchy.get_hierarchy_children(module_id)
             path = nucleus_hierarchy.get_hierarchy_path(module_id)
-            data = self._module_data(module_id, query)
+            data = self._module_data(module_id, query, note)
             if module_id == "communications":
                 data.setdefault("children", self._overlay_communications_placeholder(children))
             else:

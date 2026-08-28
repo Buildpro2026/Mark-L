@@ -286,6 +286,21 @@
       color: var(--muted); border: 1px solid var(--line-strong); border-radius: 999px; padding: 2px 8px; margin-bottom: 8px;
     }
 
+    .brain-note {
+      margin-top: 12px; padding: 12px 13px; border-radius: 12px;
+      border: 1px solid var(--line); background: rgba(255,255,255,0.02);
+    }
+    .brain-note .path { font-size: 10.5px; color: var(--accent); letter-spacing: 0.3px; margin-bottom: 8px; word-break: break-all; }
+    .brain-note pre {
+      margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit;
+      font-size: 12px; line-height: 1.6; color: var(--text-dim); max-height: 46vh; overflow-y: auto;
+    }
+    .brain-note-back {
+      display: inline-block; margin-bottom: 10px; font-size: 10.5px; color: var(--muted);
+      cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+    }
+    .brain-note-back:hover { color: var(--accent); }
+
     .files-search { display: flex; gap: 6px; margin-top: 4px; }
     .files-search input {
       flex: 1; background: rgba(255,255,255,0.03); border: 1px solid var(--line); border-radius: 8px;
@@ -439,6 +454,17 @@
           <div class="files-search">
             <input id="files-search-input" type="text" placeholder="filename or extension…" autocomplete="off" />
             <button id="files-search-btn" type="button">Search</button>
+          </div>
+        </div>
+
+        <!-- Distinct from Files above: this searches the actual Obsidian
+             JARVIS Brain vault (knowledge/JARVIS Brain/), not the filesystem. -->
+        <div class="info-section" id="knowledge-search-section" style="display:none;">
+          <h4>Search the JARVIS Brain</h4>
+          <div class="files-search">
+            <input id="knowledge-search-input" type="text" placeholder="search Brain notes…" autocomplete="off" />
+            <button id="knowledge-search-btn" type="button">Search</button>
+            <button id="knowledge-list-btn" type="button" title="Show all notes">All notes</button>
           </div>
         </div>
 

@@ -65,6 +65,10 @@ const infoPanelToggleEl = document.getElementById("info-panel-toggle");
 const filesSearchSection = document.getElementById("files-search-section");
 const filesSearchInput = document.getElementById("files-search-input");
 const filesSearchBtn = document.getElementById("files-search-btn");
+const knowledgeSearchSection = document.getElementById("knowledge-search-section");
+const knowledgeSearchInput = document.getElementById("knowledge-search-input");
+const knowledgeSearchBtn = document.getElementById("knowledge-search-btn");
+const knowledgeListBtn = document.getElementById("knowledge-list-btn");
 const dockInput      = document.getElementById("dock-input");
 const dockSend       = document.getElementById("dock-send");
 const dockMic        = document.getElementById("dock-mic");
@@ -89,7 +93,7 @@ const STATE_PULSE_SPEED = {
 
 const NUCLEUS_COLORS = {
   buildpro: 0x4fd6ff, ddf: 0x5cffc4, careerrocket: 0xffb454,
-  email: 0x8fb8ff, calendar: 0xff8fd1, files: 0xb98bff,
+  email: 0x8fb8ff, calendar: 0xff8fd1, knowledge: 0xf5e6a8, files: 0xb98bff,
   reports: 0x9fe6ff, communications: 0x7d8fa6, system: 0xff6b7a,
   personal: 0x8fa8b8,
 };
@@ -97,10 +101,12 @@ const NUCLEUS_COLORS = {
 // Display order for the left rail — presentation only; every id below is a
 // real actions/nucleus_hierarchy.py node (or, for "agents", a real shortcut
 // into the System Nucleus's already-fetched agent_orchestrator data — there
-// is no separate Agents endpoint, so this never invents one).
+// is no separate Agents endpoint, so this never invents one). "knowledge" is
+// the real Obsidian JARVIS Brain vault — distinct from "files" below, which
+// is a general filesystem search, not vault-aware.
 const RAIL_ORDER = [
   "buildpro", "ddf", "careerrocket", "email", "calendar",
-  "files", "reports", "communications", "system", "personal",
+  "knowledge", "files", "reports", "communications", "system", "personal",
 ];
 
 // ── Three.js setup ──────────────────────────────────────────────────────
@@ -477,8 +483,11 @@ function findRootNode(id) {
   return (hierarchyRoot?.children || []).find(c => c.id === id) || null;
 }
 
-async function fetchModule(id, query = "") {
-  const qs = query ? `?query=${encodeURIComponent(query)}` : "";
+async function fetchModule(id, query = "", note = "") {
+  const params = new URLSearchParams();
+  if (query) params.set("query", query);
+  if (note) params.set("note", note);
+  const qs = params.toString() ? `?${params.toString()}` : "";
   const res = await _authFetch(`/3d/api/module/${encodeURIComponent(id)}${qs}`);
   if (res.status === 401) { _redirectToLogin(); throw new Error("unauthorized"); }
   if (!res.ok) throw new Error(`module fetch failed: ${res.status}`);
@@ -549,6 +558,7 @@ async function goHome({ fromServer = false, notify = true } = {}) {
   infoObjects = [];
   flyTo(new THREE.Vector3(0, 0, 0), 17);
   filesSearchSection.style.display = "none";
+  knowledgeSearchSection.style.display = "none";
   statGridMount.innerHTML = "";
   gaugeMount.innerHTML = "";
   try {
@@ -688,6 +698,7 @@ function renderInfoPanel(id, node, data) {
   statGridMount.innerHTML = "";
   gaugeMount.innerHTML = "";
   filesSearchSection.style.display = id === "files" ? "" : "none";
+  knowledgeSearchSection.style.display = id === "knowledge" ? "" : "none";
 
   const details = [];
   if (id === "ddf" && Array.isArray(data.top_products)) {
@@ -723,6 +734,36 @@ function renderInfoPanel(id, node, data) {
     panelChildrenEl.innerHTML = (data.children || []).length
       ? data.children.map(c => item(c.placeholder ? `${escapeHtml(c.name)} — coming soon` : escapeHtml(c.name), !!c.placeholder)).join("")
       : `<div class="info-empty">No sub-branches.</div>`;
+    return;
+  } else if (id === "knowledge") {
+    // JARVIS Brain — every field below came straight from ObsidianVault
+    // (list_notes/search_notes/read_note via _module_knowledge()); nothing
+    // here is fabricated, including the empty/not-found/unconfigured cases.
+    if (data.note) {
+      panelStatusEl.textContent = data.note.found ? "Reading from the JARVIS Brain" : "Not found in the vault";
+      panelDetailsEl.innerHTML = data.note.found
+        ? `<div class="brain-note">
+            <div class="brain-note-back" data-brain-back="1">‹ Back to Brain list</div>
+            <div class="path">${escapeHtml(data.note.path)}</div>
+            <pre>${escapeHtml(data.note.content || "")}</pre>
+          </div>`
+        : `<div class="unavailable-card"><span class="tag">Not found</span><br/>${escapeHtml(data.summary || "")}</div>`;
+      panelChildrenEl.innerHTML = "";
+      return;
+    }
+    panelStatusEl.textContent = data.summary || "JARVIS Brain";
+    if (Array.isArray(data.results)) {
+      if (!data.results.length) details.push(item("No notes match that search."));
+      for (const r of data.results) {
+        details.push(brainItem(r.path, r.snippet ? ` — …${escapeHtml(r.snippet)}…` : ""));
+      }
+    } else {
+      const notes = Array.isArray(data.notes) ? data.notes : [];
+      if (!notes.length) details.push(item(data.configured ? "The vault is empty." : "No JARVIS Brain vault configured.", !data.configured));
+      for (const n of notes) details.push(brainItem(n));
+    }
+    panelChildrenEl.innerHTML = `<div class="info-empty">No sub-branches — browse notes above.</div>`;
+    panelDetailsEl.innerHTML = details.join("");
     return;
   } else if (id === "files") {
     panelStatusEl.textContent = "Live filesystem search + recent files";
@@ -814,6 +855,49 @@ function item(html, placeholder = false, priority = false) {
   if (priority) cls.push("priority");
   return `<div class="${cls.join(" ")}">${html}</div>`;
 }
+
+// A clickable JARVIS Brain note/result row — path is a real vault-relative
+// path from ObsidianVault.list_notes()/search_notes(), never invented.
+function brainItem(path, extra = "") {
+  return `<div class="info-item" data-note-path="${escapeHtml(path)}" style="cursor:pointer;"><span class="k">${escapeHtml(path)}</span>${extra}</div>`;
+}
+
+// Delegated click handling for Brain note rows and the "back to list" link
+// inside a read note — registered once rather than per-render.
+panelDetailsEl.addEventListener("click", (e) => {
+  const back = e.target.closest("[data-brain-back]");
+  if (back) { focusNucleus("knowledge"); return; }
+  const row = e.target.closest("[data-note-path]");
+  if (row) openBrainNote(row.dataset.notePath);
+});
+
+// ── JARVIS Brain — real ObsidianVault list/search/read via /3d/api/module/knowledge ──
+async function openBrainNote(path) {
+  try {
+    const payload = await fetchModule("knowledge", "", path);
+    currentModuleData = payload;
+    const node = findRootNode("knowledge") || { id: "knowledge", name: "JARVIS Brain" };
+    renderInfoPanel("knowledge", node, payload.data || {});
+  } catch (e) {
+    if (e.message !== "unauthorized") showToast("Couldn't open that Brain note.");
+  }
+}
+
+async function runKnowledgeSearch() {
+  const q = knowledgeSearchInput.value.trim();
+  if (!q) return;
+  try {
+    const payload = await fetchModule("knowledge", q);
+    currentModuleData = payload;
+    const node = findRootNode("knowledge") || { id: "knowledge", name: "JARVIS Brain" };
+    renderInfoPanel("knowledge", node, payload.data || {});
+  } catch (e) {
+    if (e.message !== "unauthorized") showToast("Brain search failed.");
+  }
+}
+knowledgeSearchBtn.addEventListener("click", runKnowledgeSearch);
+knowledgeSearchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runKnowledgeSearch(); });
+knowledgeListBtn.addEventListener("click", () => focusNucleus("knowledge"));
 
 // ── Files search — real /3d/api/module/files?query= endpoint, no fake results ──
 async function runFilesSearch() {

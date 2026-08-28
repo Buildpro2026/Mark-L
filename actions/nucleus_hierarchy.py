@@ -69,6 +69,19 @@ DEFAULT_HIERARCHY = {
             ],
         },
         {
+            # Distinct from "files" below: this is specifically the Obsidian
+            # knowledge vault (default knowledge/JARVIS Brain/, see
+            # core/headless/obsidian.py), not a general filesystem search.
+            # No static category children — dashboard/server.py's
+            # _module_knowledge() lists the vault's real notes at request
+            # time rather than hardcoding folder names here that could
+            # drift from what the vault actually contains.
+            "id": "knowledge",
+            "name": "JARVIS Brain",
+            "kind": "domain",
+            "children": [],
+        },
+        {
             "id": "files",
             "name": "Files",
             "kind": "domain",
