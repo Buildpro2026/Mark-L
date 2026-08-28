@@ -1069,21 +1069,25 @@ class DashboardServer:
                 self._clients.discard(websocket)
 
         # ── /3d spatial command center ───────────────────────────────────
-        # Separate auth from the phone command center's PIN/QR session
-        # tokens above: /3d/api/* and /3d/ws check against the same
-        # JARVIS_API_TOKEN the rest of the headless service uses (see
-        # tests/conftest.py's _dashboard_api_token fixture), since this is
-        # Lee's own operator surface, not a paired-device session.
+        # /3d/api/* and /3d/ws accept three credentials — see .env.example's
+        # JARVIS_API_TOKEN comment, which already documented the pairing-key
+        # acceptance below as intended but it was never actually wired in:
         def _3d_auth(req: Request) -> bool:
-            """Accepts either the same JARVIS_API_TOKEN Bearer auth used by
-            /3d/api/* clients and tests, OR the same browser session cookie
-            /ui already sets on login — so a person who's simply logged
-            into the normal JARVIS interface can click through to /3d and
-            it just works, with no separate login step and no token ever
-            appearing in a URL or needing to be typed in twice."""
+            """Accepts: (1) the JARVIS_API_TOKEN Bearer auth used by /3d/api/*
+            clients and tests, (2) the desktop app's own pairing-key/PIN
+            session token (self._tokens — the same credential /api/command
+            already accepts), so main.py's raw DashboardServer — which never
+            mounts /ui and typically has no JARVIS_API_TOKEN set — has a
+            working browser path to /3d at all, or (3) the same browser
+            session cookie /ui already sets on login — so a person who's
+            simply logged into the normal JARVIS interface can click through
+            to /3d and it just works, with no separate login step and no
+            token ever appearing in a URL or needing to be typed in twice."""
             from core.headless import config as headless_config
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             if tok and headless_config.API_TOKEN and tok == headless_config.API_TOKEN:
+                return True
+            if tok and tok in self._tokens:
                 return True
             from core.headless.ui import _session_valid, COOKIE_NAME
             return _session_valid(req.cookies.get(COOKIE_NAME))
@@ -1173,12 +1177,15 @@ class DashboardServer:
             from core.headless.ui import _session_valid, COOKIE_NAME
             tok = token.strip()
             token_ok = bool(tok) and bool(headless_config.API_TOKEN) and tok == headless_config.API_TOKEN
+            # Pairing-key/PIN session token — same credential /api/command
+            # already accepts — matches _3d_auth above (see its docstring).
+            pairing_ok = bool(tok) and tok in self._tokens
             # A same-origin browser tab already sends the /ui session
             # cookie automatically on the websocket handshake, same as it
             # would on any other same-origin request — no separate login
             # needed, matching the HTTP routes' _3d_auth above.
             cookie_ok = _session_valid(websocket.cookies.get(COOKIE_NAME))
-            if not (token_ok or cookie_ok):
+            if not (token_ok or pairing_ok or cookie_ok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
