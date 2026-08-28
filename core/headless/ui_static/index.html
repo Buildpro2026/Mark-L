@@ -79,27 +79,12 @@
   #sidebar .brand .dot.ok { background: var(--ok); }
   #sidebar .brand .dot.bad { background: var(--bad); }
   #identity-badge { padding: 0 18px 14px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
-  /* ── report picker: a dropdown instead of the old tall sidebar button
-     list — same underlying switchTab()/.page.active mechanism, just a
-     more compact trigger so the sidebar stops competing with the orb for
-     "the thing your eye goes to." ── */
-  #report-picker-wrap { padding: 4px 18px 14px; }
-  #report-picker {
-    width: 100%; background: var(--panel-alt); border: 1px solid var(--line-strong); color: var(--text);
-    padding: 10px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
-    appearance: none; -webkit-appearance: none;
-    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-    background-position: calc(100% - 18px) center, calc(100% - 13px) center;
-    background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
-  }
   #approval-badge {
     display: none; align-items: center; gap: 8px; margin: 0 18px 14px; padding: 9px 12px;
     background: color-mix(in srgb, var(--bad) 14%, transparent); border: 1px solid var(--bad);
     border-radius: 8px; font-size: 12px; color: var(--text); cursor: pointer;
   }
   #approval-badge .count { font-weight: 700; background: var(--bad); color: #1a0505; padding: 1px 7px; border-radius: 8px; font-size: 11px; }
-  #sidebar-foot { padding: 12px 18px 0; border-top: 1px solid var(--line); margin-top: 8px; }
-  #sidebar-foot button { width: 100%; }
 
   /* ── 3D Command Center launcher — obvious, not a hidden URL ────────── */
   #command-center-link {
@@ -302,30 +287,78 @@
   }
   @media (max-width: 640px) { #orb-widget { --orb-size: 112px !important; } }
 
-  /* The executive information remains available, but it now lives as a
-     quiet, contextual "lens" around JARVIS instead of a conventional
-     sidebar dashboard. All existing page ids and API bindings stay intact. */
+  /* Global JARVIS shell: a persistent top command/status bar plus a real
+     left navigation rail (see the audit report: an earlier "lens" pass
+     had collapsed the rail into the top bar; this restores a genuine
+     two-region shell — status ABOVE, navigation BESIDE the content —
+     while keeping every existing page id, element id, and API binding
+     intact underneath). */
   body::before {
     content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -1;
     background: radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--accent) 15%, transparent), transparent 26%),
                 radial-gradient(circle at 18% 16%, rgba(255,255,255,.035), transparent 25%), var(--bg);
   }
-  #shell.active { display: grid; grid-template-rows: 64px minmax(0, 1fr); }
-  #sidebar {
-    width: auto; min-height: 64px; border-right: 0; border-bottom: 1px solid var(--line);
-    background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(16px);
-    padding: 0 24px; flex-direction: row; align-items: center; gap: 16px;
+  #shell.active { display: flex; flex-direction: column; height: 100vh; }
+
+  #command-header {
+    flex: none; display: flex; align-items: center; gap: 22px;
+    height: 60px; padding: 0 20px; border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--panel) 90%, transparent); backdrop-filter: blur(16px);
   }
-  #sidebar .brand { padding: 0; font-size: 12px; }
-  #identity-badge { padding: 0; margin-right: auto; }
-  #command-center-link { margin: 0; padding: 7px 10px; white-space: nowrap; }
-  #report-picker-wrap { padding: 0; width: min(230px, 34vw); }
-  #report-picker-wrap .field-label { display: none; }
-  #report-picker { padding: 8px 34px 8px 12px; background-color: color-mix(in srgb, var(--panel-alt) 86%, transparent); }
-  #approval-badge { margin: 0; padding: 7px 10px; white-space: nowrap; }
-  #sidebar-foot { padding: 0; margin: 0; border: 0; }
-  #sidebar-foot button { width: auto; padding: 7px 10px; }
-  #content { padding: clamp(24px, 5vh, 56px) clamp(20px, 7vw, 120px) 90px; max-width: 1320px; width: 100%; margin: 0 auto; }
+  .ch-group { display: flex; align-items: center; gap: 14px; }
+  .ch-brand-group .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: 0.12em; font-size: 13px; }
+  .ch-brand-group .brand .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none;
+    transition: background .3s ease, box-shadow .3s ease;
+  }
+  .ch-brand-group .brand .dot.ok { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 70%, transparent); }
+  .ch-brand-group .brand .dot.bad { background: var(--bad); box-shadow: 0 0 8px color-mix(in srgb, var(--bad) 70%, transparent); }
+  #identity-badge {
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);
+    padding: 3px 9px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 999px;
+  }
+  .ch-stat { display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .ch-stat b { font-size: 13px; color: var(--text); font-weight: 700; }
+  .ch-stat label { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+  #mic-status { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-alt); }
+  .mic-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); transition: background .2s ease, box-shadow .2s ease; }
+  .mic-dot.listening { background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent); animation: mic-pulse 1.1s ease-in-out infinite; }
+  .mic-dot.thinking { background: #b98bff; box-shadow: 0 0 8px rgba(185,139,255,.6); }
+  .mic-dot.speaking { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 70%, transparent); }
+  .mic-dot.interrupted { background: var(--bad); box-shadow: 0 0 8px color-mix(in srgb, var(--bad) 70%, transparent); }
+  @keyframes mic-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+  .ch-metrics-group { margin-left: auto; }
+  .ch-clock { font-family: var(--mono); }
+  #approval-badge { margin: 0; }
+  .ch-logout { flex: none; }
+
+  #shell-body { flex: 1; display: flex; min-height: 0; }
+  #sidebar {
+    width: 216px; flex: none; display: flex; flex-direction: column; gap: 10px;
+    padding: 16px 12px; background: var(--panel); border-right: 1px solid var(--line);
+    overflow-y: auto;
+  }
+  .nav-list { display: flex; flex-direction: column; gap: 2px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    background: transparent; color: var(--muted); border: 1px solid transparent; border-radius: 8px;
+    padding: 9px 12px; font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em;
+    cursor: pointer; transition: background .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .nav-item:hover { background: var(--panel-alt); color: var(--text); }
+  .nav-item.active {
+    background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .nav-marker { width: 5px; height: 5px; border-radius: 1px; background: var(--dim); flex: none; transition: background .15s ease, box-shadow .15s ease; }
+  .nav-item.active .nav-marker { background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 80%, transparent); }
+  .nav-item-dev { color: var(--dim); }
+  .nav-divider { height: 1px; background: var(--line); margin: 10px 2px; flex: none; }
+  #command-center-link.nav-item { color: var(--muted); text-decoration: none; margin-top: auto; }
+  #command-center-link.nav-item:hover { color: var(--text); }
+  .cc-icon { font-size: 13px; }
+
+  #content { flex: 1; overflow-y: auto; padding: clamp(24px, 5vh, 56px) clamp(20px, 6vw, 100px) 90px; max-width: 1320px; width: 100%; margin: 0 auto; }
   .page-head { max-width: 780px; margin-left: auto; margin-right: auto; }
   .page-head h1 { font-size: 11px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
   .page.active { animation: lens-arrive .34s ease both; }
@@ -348,13 +381,19 @@
   #orb-canvas { cursor: grab; }
   #orb-input-row input { font-size: 13px; padding: 10px 15px; }
   #orb-state-label { color: var(--accent); }
-  @media (max-width: 760px) {
-    #shell.active { grid-template-rows: auto minmax(0, 1fr); }
-    #sidebar { padding: 10px 14px; flex-wrap: wrap; gap: 8px; }
-    #identity-badge { margin-right: 0; }
-    #report-picker-wrap { width: 170px; margin-left: auto; }
-    #approval-badge-text, #sidebar-foot { display: none; }
-    #content { padding: 180px 16px 44px; }
+  @media (max-width: 900px) {
+    #command-header { height: auto; flex-wrap: wrap; padding: 10px 14px; gap: 8px 14px; }
+    .ch-metrics-group { margin-left: 0; flex-wrap: wrap; gap: 8px 14px; }
+    #shell-body { flex-direction: column; }
+    #sidebar { width: 100%; flex-direction: row; overflow-x: auto; overflow-y: visible; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 10px; }
+    .nav-list { flex-direction: row; gap: 4px; }
+    .nav-item { flex: none; padding: 7px 10px; font-size: 11.5px; }
+    .nav-divider { width: 1px; height: 22px; margin: 0 6px; }
+    #command-center-link.nav-item { margin-top: 0; margin-left: 6px; }
+  }
+  @media (max-width: 640px) {
+    .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text { display: none; }
+    #content { padding: 20px 16px 80px; }
     #page-home { padding-top: 0; }
     #page-home .grid2 { grid-template-columns: 1fr; }
   }
@@ -374,34 +413,46 @@
 </div>
 
 <div id="shell">
-  <div id="sidebar">
-    <div class="brand"><span class="dot" id="conn-dot"></span> JARVIS</div>
-    <div id="identity-badge">Executive</div>
-    <a id="command-center-link" href="/3d" target="_blank" rel="noopener"
-       title="Open the 3D spatial Command Center in a new tab">
-      <span class="cc-icon">&#127760;</span> 3D Command Center
-    </a>
-    <div id="approval-badge"><span id="approval-badge-text">Tasks waiting on you</span><span class="count" id="approval-count">0</span></div>
-    <div id="report-picker-wrap">
-      <label class="field-label" for="report-picker">Report</label>
-      <select id="report-picker">
-        <option value="home" selected>Home</option>
-        <option value="command">Command</option>
-        <option value="ceo">CEO Brief</option>
-        <option value="buildpro">BuildPro</option>
-        <option value="ddf">DDF</option>
-        <option value="intelligence">Intelligence</option>
-        <option value="agents">Agents</option>
-        <option value="tasks">Tasks &amp; Approvals</option>
-        <option value="history">History</option>
-        <option value="settings">Settings</option>
-        <option value="tools">Tools</option>
-      </select>
+  <header id="command-header">
+    <div class="ch-group ch-brand-group">
+      <span class="brand"><span class="dot" id="conn-dot"></span> JARVIS</span>
+      <span id="identity-badge">Executive</span>
     </div>
-    <div id="sidebar-foot"><button class="ghost" id="logout-btn">Log out</button></div>
-  </div>
+    <div class="ch-group ch-mode-group">
+      <span class="ch-stat" id="mic-status" title="Voice state"><span class="mic-dot" id="mic-dot"></span><span id="mic-label">Idle</span></span>
+    </div>
+    <div class="ch-group ch-metrics-group">
+      <span class="ch-stat ch-stat-agents" title="Agents actively working right now"><b id="header-agent-count">0</b><label>Agents</label></span>
+      <span class="ch-stat ch-stat-objective" title="Strategic objective progress"><b id="header-objective-pct">—</b><label>Objective</label></span>
+      <div id="approval-badge"><span id="approval-badge-text">Tasks waiting on you</span><span class="count" id="approval-count">0</span></div>
+      <span class="ch-stat ch-clock" id="header-clock"></span>
+    </div>
+    <button class="ghost ch-logout" id="logout-btn">Log out</button>
+  </header>
 
-  <div id="content">
+  <div id="shell-body">
+    <nav id="sidebar">
+      <div class="nav-list" id="nav-list">
+        <button class="nav-item active" data-report="home" type="button"><span class="nav-marker"></span>Home</button>
+        <button class="nav-item" data-report="command" type="button"><span class="nav-marker"></span>Command</button>
+        <button class="nav-item" data-report="ceo" type="button"><span class="nav-marker"></span>CEO Brief</button>
+        <button class="nav-item" data-report="buildpro" type="button"><span class="nav-marker"></span>BuildPro</button>
+        <button class="nav-item" data-report="ddf" type="button"><span class="nav-marker"></span>DDF</button>
+        <button class="nav-item" data-report="intelligence" type="button"><span class="nav-marker"></span>Intelligence</button>
+        <button class="nav-item" data-report="agents" type="button"><span class="nav-marker"></span>Agents</button>
+        <button class="nav-item" data-report="tasks" type="button"><span class="nav-marker"></span>Tasks &amp; Approvals</button>
+        <button class="nav-item" data-report="history" type="button"><span class="nav-marker"></span>History</button>
+        <button class="nav-item" data-report="settings" type="button"><span class="nav-marker"></span>Settings</button>
+        <button class="nav-item nav-item-dev" data-report="tools" type="button"><span class="nav-marker"></span>Tools</button>
+      </div>
+      <div class="nav-divider"></div>
+      <a id="command-center-link" class="nav-item nav-external" href="/3d" target="_blank" rel="noopener"
+         title="Open the 3D spatial Command Center in a new tab">
+        <span class="cc-icon">&#127760;</span> 3D Command Center
+      </a>
+    </nav>
+
+    <div id="content">
 
     <!-- Home: the four permanent executive areas -->
     <div class="page active" id="page-home">
@@ -591,6 +642,7 @@
       <pre id="tool-result" style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto">No result yet.</pre>
     </div>
 
+    </div>
   </div>
 </div>
 
@@ -706,14 +758,15 @@ $('logout-btn').addEventListener('click', async () => {
   showLogin();
 });
 
-/* ── report navigation (dropdown, replacing the old sidebar tab list) ── */
+/* ── report navigation (persistent left nav rail) ── */
 function switchTab(tabId) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + tabId));
-  const picker = $('report-picker');
-  if (picker && picker.value !== tabId) picker.value = tabId;
+  document.querySelectorAll('.nav-item[data-report]').forEach(b => b.classList.toggle('active', b.dataset.report === tabId));
   if (window.onReportOpened) window.onReportOpened(tabId);
 }
-$('report-picker').addEventListener('change', (e) => switchTab(e.target.value));
+document.querySelectorAll('.nav-item[data-report]').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.report));
+});
 $('approval-badge').addEventListener('click', () => switchTab('tasks'));
 
 /* ── Home ──────────────────────────────────────────────────────────── */
@@ -1194,6 +1247,10 @@ async function loadTasksAndApprovals() {
     if (approvals.length) { countBadge.textContent = approvals.length; badgeWrap.style.display = 'flex'; }
     else { badgeWrap.style.display = 'none'; }
 
+    const objective = brief.strategic_objective || {};
+    const objEl = $('header-objective-pct');
+    if (objEl) objEl.textContent = (typeof objective.progress_pct === 'number') ? objective.progress_pct + '%' : '—';
+
     approvalsEl.innerHTML = approvals.length ? approvals.map(t => `
       <div class="row">
         <div class="main">
@@ -1369,10 +1426,30 @@ function loadAll() {
   loadTasksAndApprovals();
   loadHistory();
   loadTools();
+  refreshHeaderAgentCount();
 }
+async function refreshHeaderAgentCount() {
+  const el = $('header-agent-count');
+  if (!el) return;
+  try {
+    const r = await api('/ui/api/active-agents');
+    el.textContent = (r.agents || []).length;
+  } catch (e) { /* header stat only — never blocks the rest of the shell */ }
+}
+
+function updateHeaderClock() {
+  const el = $('header-clock');
+  if (!el) return;
+  const now = new Date();
+  el.textContent = now.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' · ' +
+    now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 pollHealth();
 setInterval(pollHealth, 15000);
-setInterval(() => { if ($('shell').classList.contains('active')) { loadTasksAndApprovals(); loadHomePriorities(); } }, 30000);
+setInterval(() => { if ($('shell').classList.contains('active')) { loadTasksAndApprovals(); loadHomePriorities(); refreshHeaderAgentCount(); } }, 30000);
+updateHeaderClock();
+setInterval(updateHeaderClock, 30000);
 checkSession();
 </script>
 
@@ -1419,6 +1496,12 @@ checkSession();
       // pulse rather than sitting in "speaking" forever.
       window._orbSpeakingFallback = setTimeout(() => { if (currentState === "speaking") setOrbState("idle"); }, 2500);
     }
+    // Mirror the same state into the top command bar's mic indicator —
+    // same source of truth, no separate state machine.
+    const headerMicDot = document.getElementById("mic-dot");
+    const headerMicLabel = document.getElementById("mic-label");
+    if (headerMicDot) headerMicDot.className = "mic-dot " + currentState;
+    if (headerMicLabel) headerMicLabel.textContent = currentState.charAt(0).toUpperCase() + currentState.slice(1);
   };
 
   // ── canvas: breathing gradient core + a few slowly orbiting particles ──

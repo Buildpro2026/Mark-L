@@ -243,10 +243,18 @@ def test_orb_has_its_own_compact_chat_input(monkeypatch):
     assert "window.sendMessage" in html
 
 
-def test_report_picker_replaced_the_old_sidebar_tab_list(monkeypatch):
+def test_persistent_nav_rail_replaced_the_dropdown_report_picker(monkeypatch):
+    # Phase 1 of the global JARVIS shell (see the /ui redesign report):
+    # the <select id="report-picker"> dropdown this test used to guard is
+    # intentionally retired in favor of a persistent left navigation rail
+    # (.nav-item buttons calling the same switchTab()/.page.active
+    # mechanism) — this test now guards THAT structure instead, while
+    # keeping the original regression guards (no bare old-style nav.tabs
+    # list, approval badge still present) intact.
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert "report-picker" in html
+    assert "nav-item" in html
+    assert 'data-report="home"' in html
     assert "nav.tabs" not in html
     assert "approval-badge" in html
 
