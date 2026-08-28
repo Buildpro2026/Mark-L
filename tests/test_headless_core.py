@@ -563,6 +563,16 @@ def test_gmail_send_via_tool_executor_writes_an_audit_entry(monkeypatch, tmp_pat
     assert any(r["action"] == "gmail_send" and r["execution_status"] == "succeeded" for r in rows)
 
 
+def test_main_py_imports_cleanly_with_no_missing_modules():
+    """A guard against exactly the failure this caught live: main.py
+    referenced a knowledge.knowledge_manager module that didn't exist
+    anywhere in the repo, crashing the import at module load time and
+    cascading into every test that imports main.py (~180 tests failed
+    from this one bad import). A plain successful import is the cheapest
+    possible check that would have caught it before it shipped."""
+    load_module("jarvis_import_smoke_check", "main.py")
+
+
 def test_desktop_app_uses_the_shared_tool_executor_not_a_duplicate():
     main = load_module("jarvis_j2_shared_executor_check", "main.py")
     from core.headless.tool_executor import ToolExecutor as SharedToolExecutor

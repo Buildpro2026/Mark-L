@@ -158,3 +158,47 @@ def test_unknown_action_reports_clearly(tmp_path, monkeypatch):
     l = _live(main)
     response = _run(l._execute_tool(_make_fc(action="not_a_real_action")))
     assert "unknown obsidian action" in response.response["result"].lower()
+
+
+def test_format_for_prompt_concatenates_notes_with_headers(tmp_path, monkeypatch):
+    from core.headless.obsidian import ObsidianVault
+    from core.headless import obsidian as obsidian_module
+    (tmp_path / "Notes").mkdir()
+    (tmp_path / "Notes" / "goals.md").write_text("Hit the revenue target.", encoding="utf-8")
+    (tmp_path / "Notes" / "identity.md").write_text("JARVIS is the operating assistant.", encoding="utf-8")
+    monkeypatch.setattr(obsidian_module.config, "OBSIDIAN_VAULT_PATH", str(tmp_path))
+
+    result = ObsidianVault().format_for_prompt()
+    assert "revenue target" in result
+    assert "operating assistant" in result
+    assert "Notes/goals.md" in result
+
+
+def test_format_for_prompt_respects_max_chars(tmp_path, monkeypatch):
+    from core.headless.obsidian import ObsidianVault
+    from core.headless import obsidian as obsidian_module
+    (tmp_path / "big.md").write_text("x" * 10_000, encoding="utf-8")
+    monkeypatch.setattr(obsidian_module.config, "OBSIDIAN_VAULT_PATH", str(tmp_path))
+
+    result = ObsidianVault().format_for_prompt(max_chars=500)
+    assert len(result) <= 600  # header + truncated content, generous slack
+
+
+def test_format_for_prompt_with_query_uses_search_ranking(tmp_path, monkeypatch):
+    from core.headless.obsidian import ObsidianVault
+    from core.headless import obsidian as obsidian_module
+    (tmp_path / "goals.md").write_text("Hit the revenue target.", encoding="utf-8")
+    (tmp_path / "unrelated.md").write_text("Nothing to do with the query.", encoding="utf-8")
+    monkeypatch.setattr(obsidian_module.config, "OBSIDIAN_VAULT_PATH", str(tmp_path))
+
+    result = ObsidianVault().format_for_prompt(query="revenue")
+    assert "revenue target" in result
+    assert "unrelated" not in result.lower()
+
+
+def test_format_for_prompt_returns_empty_string_when_unconfigured(monkeypatch):
+    from core.headless.obsidian import ObsidianVault
+    from core.headless import obsidian as obsidian_module
+    monkeypatch.setattr(obsidian_module.config, "OBSIDIAN_VAULT_PATH", "")
+
+    assert ObsidianVault().format_for_prompt() == ""

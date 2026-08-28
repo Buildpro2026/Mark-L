@@ -14,7 +14,6 @@ if _platform.system() == "Windows":
 
     _subprocess.Popen = _Popen
 # ─────────────────────────────────────────────────────────────────────────────
-from knowledge.knowledge_manager import get_knowledge_manager
 import asyncio
 import re
 import threading
@@ -291,11 +290,8 @@ class JarvisLive:
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
-        knowledge_manager = get_knowledge_manager()
-        knowledge_str = knowledge_manager.format_for_prompt(
-            query=None,
-            max_chars=6000
-        )
+        from core.headless.obsidian import ObsidianVault
+        knowledge_str = ObsidianVault().format_for_prompt(query=None, max_chars=6000)
 
         parts.append(knowledge_str)
 

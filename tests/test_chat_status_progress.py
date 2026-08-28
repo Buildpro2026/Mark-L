@@ -30,52 +30,60 @@ def test_unknown_tool_gets_an_honest_generic_label():
 
 # ── run_chat_turn emits status around tool calls ─────────────────────────
 
-class _FakePart:
-    def __init__(self, text=None, function_call=None):
-        self.text = text
-        self.function_call = function_call
-
-
-class _FakeContent:
-    def __init__(self, parts):
-        self.parts = parts
-
-
-class _FakeCandidate:
-    def __init__(self, content):
-        self.content = content
+import json as _json
 
 
 class _FakeFunctionCall:
+    """Provider-agnostic tool-call spec used to build a Groq-shaped fake
+    response below — name kept for readability at call sites, not tied
+    to any one provider's actual response shape."""
     def __init__(self, name, args):
         self.name = name
         self.args = args
 
 
+class _FakeToolCall:
+    def __init__(self, id, name, args):
+        self.id = id
+        self.function = type("_F", (), {"name": name, "arguments": _json.dumps(args)})()
+
+
+class _FakeMessage:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class _FakeChoice:
+    def __init__(self, message):
+        self.message = message
+
+
 class _FakeResponse:
     def __init__(self, text=None, function_calls=None):
-        self.text = text
-        self.function_calls = function_calls or []
-        parts = [_FakePart(function_call=fc) for fc in self.function_calls] or [_FakePart(text=text)]
-        self.candidates = [_FakeCandidate(_FakeContent(parts))]
+        tool_calls = [
+            _FakeToolCall(f"call_{i}", fc.name, fc.args)
+            for i, fc in enumerate(function_calls or [])
+        ]
+        self.choices = [_FakeChoice(_FakeMessage(content=text, tool_calls=tool_calls))]
 
 
-class _FakeModels:
+class _FakeCompletions:
     def __init__(self, responses):
         self._responses = list(responses)
 
-    def generate_content(self, model, contents, config):
+    def create(self, model, messages, tools):
         return self._responses.pop(0)
 
 
 class _FakeClient:
     def __init__(self, responses):
-        self.models = _FakeModels(responses)
+        self.chat = type("_Chat", (), {"completions": _FakeCompletions(responses)})()
 
 
 @pytest.fixture(autouse=True)
-def _no_real_gemini_calls(monkeypatch):
-    monkeypatch.setattr(headless_ui.config, "GEMINI_API_KEY", "fake-key-not-real")
+def _no_real_groq_calls(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-key-not-real")
 
 
 def test_run_chat_turn_emits_status_before_tool_call_and_after(monkeypatch):
@@ -85,7 +93,7 @@ def test_run_chat_turn_emits_status_before_tool_call_and_after(monkeypatch):
         _FakeResponse(text="All good."),
     ]
     fake_client = _FakeClient(responses)
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: fake_client)
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
 
     from core.headless.tool_executor import ToolExecutor
     monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
@@ -104,7 +112,7 @@ def test_run_chat_turn_emits_status_before_tool_call_and_after(monkeypatch):
 
 def test_run_chat_turn_never_calls_on_status_when_no_tool_is_needed(monkeypatch):
     fake_client = _FakeClient([_FakeResponse(text="Just an answer, no tools needed.")])
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: fake_client)
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
 
     seen = []
 
@@ -118,7 +126,7 @@ def test_run_chat_turn_never_calls_on_status_when_no_tool_is_needed(monkeypatch)
 
 def test_run_chat_turn_works_fine_with_no_status_callback_at_all(monkeypatch):
     fake_client = _FakeClient([_FakeResponse(text="No callback needed.")])
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: fake_client)
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
 
     reply, calls = asyncio.run(headless_ui.run_chat_turn("hello", []))
     assert reply == "No callback needed."
@@ -126,7 +134,7 @@ def test_run_chat_turn_works_fine_with_no_status_callback_at_all(monkeypatch):
 
 def test_a_broken_status_sink_never_breaks_the_real_turn(monkeypatch):
     fake_client = _FakeClient([_FakeResponse(text="Still works.")])
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: fake_client)
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
 
     async def _broken_on_status(label):
         raise RuntimeError("status sink exploded")
@@ -156,11 +164,11 @@ def test_dashboard_bridge_broadcasts_progress_as_a_distinct_type(monkeypatch):
         _FakeResponse(text="Here's what I found."),
     ]
     fake_client = _FakeClient(responses)
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: fake_client)
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
 
     from core.headless.tool_executor import ToolExecutor
     monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
-    monkeypatch.setattr(headless_ui.config, "GEMINI_API_KEY", "fake-key-not-real")
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-key-not-real")
 
     server = _FakeDashboardServer(["search for something"])
 

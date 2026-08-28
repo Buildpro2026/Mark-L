@@ -88,6 +88,36 @@ class ObsidianVault:
             return None
         return path.read_text(encoding="utf-8")
 
+    def format_for_prompt(self, query: Optional[str] = None, max_chars: int = 6000) -> str:
+        """Concatenates Brain notes into a system-prompt-ready block, most
+        relevant first. query=None means "no specific topic" — every note
+        in vault order (list_notes() is already sorted), truncated to
+        max_chars, rather than an arbitrary/empty result. With a query,
+        reuses search_notes()'s own relevance ranking instead of a second
+        matching implementation. Never raises: an unconfigured or empty
+        vault returns an honest empty string, not a fabricated summary."""
+        if not self.is_configured():
+            return ""
+        if query:
+            paths = [hit["path"] for hit in self.search_notes(query, limit=50)]
+        else:
+            paths = self.list_notes()
+        parts: list[str] = []
+        used = 0
+        for rel_path in paths:
+            content = self.read_note(rel_path)
+            if not content:
+                continue
+            block = f"## {rel_path}\n{content.strip()}\n"
+            if used + len(block) > max_chars:
+                remaining = max_chars - used
+                if remaining > 0:
+                    parts.append(block[:remaining])
+                break
+            parts.append(block)
+            used += len(block)
+        return "\n".join(parts)
+
     def search_notes(self, query: str, limit: int = 20) -> list[dict]:
         """Plain substring search over title (filename) and content —
         deliberately simple; a real retrieval layer is future work, not

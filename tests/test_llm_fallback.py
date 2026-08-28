@@ -164,6 +164,15 @@ class _FakeGroqClient:
         return self._Chat(self)
 
 
+def test_gemini_is_excluded_from_the_active_chain_even_when_configured(monkeypatch):
+    """Direct proof of the Groq-only instruction: GEMINI_API_KEY being set
+    must not put Gemini in the active provider list at all."""
+    monkeypatch.setattr(headless_ui.config, "GEMINI_API_KEY", "fake-gemini-key-not-real")
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
+    assert "gemini" not in headless_ui._configured_providers()
+    assert headless_ui._configured_providers() == ["groq"]
+
+
 def test_groq_is_tried_first_when_configured_gemini_never_touched(monkeypatch):
     monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
     fake_groq = _FakeGroqClient([_FakeGroqResponse(content="Groq here, no need for Gemini.")])
@@ -178,42 +187,34 @@ def test_groq_is_tried_first_when_configured_gemini_never_touched(monkeypatch):
     assert calls == []
 
 
-def test_falls_back_from_groq_to_gemini_when_groq_fails(monkeypatch):
+def test_groq_failure_raises_cleanly_when_no_other_provider_is_configured(monkeypatch):
+    """Gemini is deliberately excluded from the active chain (Lee's
+    instruction: Groq-only for now) — a Groq failure with nothing else
+    configured must fail cleanly, not silently fall back to Gemini."""
     monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
 
     class _AlwaysFailsGroq:
         class _Chat:
             class _Completions:
                 def create(self, **kwargs):
-                    raise RuntimeError("groq also down")
+                    raise RuntimeError("groq down")
             completions = _Completions()
         chat = _Chat()
 
     monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _AlwaysFailsGroq())
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient2())
 
-    reply, calls = asyncio.run(headless_ui.run_chat_turn("hello", []))
-    assert reply == "Gemini caught the fall from Groq."
-    assert calls == []
-
-
-class _FakeGeminiClient2:
-    """A Gemini fake that succeeds — distinct name from test_llm_fallback's
-    own _FakeGeminiClient (which always raises) since this file needs both
-    a failing and a succeeding Gemini fake."""
-    class _Models:
-        def generate_content(self, model, contents, config):
-            return _FakeGeminiResponse2(text="Gemini caught the fall from Groq.")
-    models = _Models()
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(headless_ui.run_chat_turn("hello", []))
+    assert exc_info.value.status_code == 502
+    assert "Groq" in exc_info.value.detail
 
 
-class _FakeGeminiResponse2:
-    def __init__(self, text):
-        self.text = text
-        self.function_calls = []
 
-
-def test_full_three_provider_chain_exhausted_raises_clean_error(monkeypatch):
+def test_groq_and_anthropic_chain_exhausted_raises_clean_error(monkeypatch):
+    # Gemini is excluded from the active chain regardless of GEMINI_API_KEY
+    # being set (default fixture) — only Groq and Anthropic are actually
+    # attempted here.
     monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
     monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", "fake-anthropic-key-not-real")
 
@@ -226,7 +227,6 @@ def test_full_three_provider_chain_exhausted_raises_clean_error(monkeypatch):
         chat = _Chat()
 
     monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _AlwaysFailsGroq())
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient())
 
     class _AlwaysFailsAnthropic:
         class _Messages:
@@ -253,39 +253,76 @@ def test_no_provider_configured_raises_clear_503(monkeypatch):
     assert "GROQ_API_KEY" in exc_info.value.detail
 
 
-def test_falls_back_to_anthropic_when_gemini_fails_before_any_tool_call(monkeypatch):
+def test_falls_back_to_anthropic_when_groq_fails_before_any_tool_call(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
     monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", "fake-anthropic-key-not-real")
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient())
-    fake_anthropic = _FakeAnthropicClient([_FakeAnthropicResponse([_FakeTextBlock("Claude here, Gemini was down.")])])
+
+    class _AlwaysFailsGroq:
+        class _Chat:
+            class _Completions:
+                def create(self, **kwargs):
+                    raise RuntimeError("groq down")
+            completions = _Completions()
+        chat = _Chat()
+
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _AlwaysFailsGroq())
+    fake_anthropic = _FakeAnthropicClient([_FakeAnthropicResponse([_FakeTextBlock("Claude here, Groq was down.")])])
     monkeypatch.setattr("core.headless.anthropic_client.get_client", lambda *a, **k: fake_anthropic)
 
     reply, calls = asyncio.run(headless_ui.run_chat_turn("hello", []))
-    assert reply == "Claude here, Gemini was down."
+    assert reply == "Claude here, Groq was down."
     assert calls == []
 
 
 def test_does_not_fall_back_when_anthropic_not_configured(monkeypatch):
-    # ANTHROPIC_TOKEN stays None from the autouse fixture.
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient())
+    # ANTHROPIC_TOKEN stays None from the autouse fixture; Gemini is
+    # excluded from the chain, so Groq is the only configured provider.
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
+
+    class _AlwaysFailsGroq:
+        class _Chat:
+            class _Completions:
+                def create(self, **kwargs):
+                    raise RuntimeError("groq down")
+            completions = _Completions()
+        chat = _Chat()
+
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _AlwaysFailsGroq())
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(headless_ui.run_chat_turn("hello", []))
     assert exc_info.value.status_code == 502
-    assert "Gemini" in exc_info.value.detail
+    assert "Groq" in exc_info.value.detail
 
 
-def test_falls_back_after_a_gemini_tool_already_ran_without_repeating_it(monkeypatch):
-    # Found live 2026-08-19: once Gemini's daily quota is exhausted, a
-    # turn's first call often still succeeds (invokes a tool) and it's the
-    # SECOND call that 429s — gating the fallback on "only before any tool
-    # ran" turned out to never actually trigger in practice. This confirms
-    # the real behavior: fall back, but tell Claude what already ran
-    # instead of letting it call system_status a second time.
+def test_falls_back_after_a_groq_tool_already_ran_without_repeating_it(monkeypatch):
+    # Same real-world pattern this project hit with Gemini's daily quota
+    # (a turn's first call succeeds and runs a tool; a LATER call is what
+    # actually hits the rate limit) — verified here against Groq, since
+    # Groq is now the sole active provider. Confirms the real behavior:
+    # fall back to Anthropic, but tell it what already ran instead of
+    # letting it call system_status a second time.
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
     monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", "fake-anthropic-key-not-real")
-    fc = _FakeFunctionCall("system_status", {})
-    fake_gemini = _FakeGeminiThenSucceeds(_FakeGeminiResponse(function_calls=[fc]))
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: fake_gemini)
+
+    class _GroqRunsToolThenFails:
+        class _Chat:
+            class _Completions:
+                def __init__(self):
+                    self._call_num = 0
+
+                def create(self, model, messages, tools):
+                    self._call_num += 1
+                    if self._call_num == 1:
+                        return _FakeGroqResponse(tool_calls=[
+                            _FakeGroqToolCall("call_1", "system_status", "{}"),
+                        ])
+                    raise RuntimeError("groq down on round 2")
+            completions = _Completions()
+        chat = _Chat()
+
+    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _GroqRunsToolThenFails())
 
     from core.headless.tool_executor import ToolExecutor
     execute_calls = []
@@ -315,7 +352,7 @@ def test_falls_back_after_a_gemini_tool_already_ran_without_repeating_it(monkeyp
     reply, calls = asyncio.run(headless_ui.run_chat_turn("check system status", []))
 
     assert reply == "Handled by Claude, no repeat call."
-    # system_status ran exactly once (by Gemini) — Claude was never asked
+    # system_status ran exactly once (by Groq) — Claude was never asked
     # to call it again, it was just told the result.
     assert execute_calls == ["system_status"]
     assert calls == [{"name": "system_status", "args": {}, "result": "ok"}]
@@ -325,8 +362,9 @@ def test_falls_back_after_a_gemini_tool_already_ran_without_repeating_it(monkeyp
 
 
 def test_anthropic_fallback_executes_tool_calls_via_the_same_executor(monkeypatch):
+    # Anthropic as the sole configured provider (Gemini excluded from the
+    # active chain, Groq not set here) — real tool execution through it.
     monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", "fake-anthropic-key-not-real")
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient())
 
     responses = [
         _FakeAnthropicResponse([_FakeToolUseBlock("tu_1", "system_status", {})]),
@@ -344,8 +382,8 @@ def test_anthropic_fallback_executes_tool_calls_via_the_same_executor(monkeypatc
 
 
 def test_anthropic_fallback_also_raises_cleanly_if_both_providers_fail(monkeypatch):
+    # Anthropic as the sole configured provider, failing.
     monkeypatch.setattr(headless_ui.config, "ANTHROPIC_TOKEN", "fake-anthropic-key-not-real")
-    monkeypatch.setattr("core.headless.gemini_client.get_client", lambda *a, **k: _FakeGeminiClient())
 
     class _AlwaysFailsAnthropic:
         class _Messages:
