@@ -442,6 +442,20 @@
   }
   #page-home section.block { margin: 0; min-height: 135px; }
   #page-home section.block h2 { border: 0; color: var(--accent); }
+  .home-status-strip {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;
+    max-width: 980px; margin: 14px auto 0;
+  }
+  .home-stat-card {
+    text-align: left; background: color-mix(in srgb, var(--panel) 70%, transparent);
+    border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px; cursor: pointer;
+    font-family: inherit; color: var(--text); transition: border-color .15s ease, background .15s ease;
+  }
+  .home-stat-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--panel) 88%, transparent); }
+  .hsc-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
+  .hsc-value { font-size: 14px; font-weight: 700; color: var(--text); }
+  .hsc-bar { margin-top: 8px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--line-strong) 100%, transparent); overflow: hidden; }
+  .hsc-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width .4s ease; }
   .page:not(#page-home) { max-width: 900px; margin: 0 auto; }
   .page:not(#page-home) section.block { margin-bottom: 18px; }
   #chat-wrap { max-width: 780px; }
@@ -465,6 +479,7 @@
     #content { padding: 20px 16px 80px; }
     #page-home { padding-top: 0; }
     #page-home .grid2 { grid-template-columns: 1fr; }
+    .home-status-strip { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -546,6 +561,21 @@
           <h2>Opportunities</h2>
           <div class="row-list" id="home-opportunities"><div class="empty">Loading…</div></div>
         </section>
+      </div>
+      <div class="home-status-strip" id="home-status-strip">
+        <button class="home-stat-card" data-report="communications" type="button">
+          <div class="hsc-label">Communications</div>
+          <div class="hsc-value" id="home-comms-value">—</div>
+        </button>
+        <button class="home-stat-card" data-report="knowledge" type="button">
+          <div class="hsc-label">JARVIS Brain</div>
+          <div class="hsc-value" id="home-knowledge-value">—</div>
+        </button>
+        <button class="home-stat-card" data-report="ceo" type="button">
+          <div class="hsc-label">Strategic Objective</div>
+          <div class="hsc-value" id="home-objective-value">—</div>
+          <div class="hsc-bar"><div class="hsc-bar-fill" id="home-objective-bar"></div></div>
+        </button>
       </div>
     </div>
 
@@ -877,6 +907,9 @@ document.querySelectorAll('.nav-item[data-report]').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.report));
 });
 $('approval-badge').addEventListener('click', () => switchTab('tasks'));
+document.querySelectorAll('.home-stat-card[data-report]').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.report));
+});
 
 /* ── Home ──────────────────────────────────────────────────────────── */
 function renderPriorityRow(p) {
@@ -1306,7 +1339,13 @@ async function loadKnowledge() {
   el.innerHTML = `<div class="empty">Loading…</div>`;
   try {
     const payload = await fetchKnowledge();
-    renderKnowledgeList(payload.data || {});
+    const data = payload.data || {};
+    renderKnowledgeList(data);
+    const homeVal = $('home-knowledge-value');
+    if (homeVal) {
+      homeVal.textContent = !data.configured ? 'Not configured'
+        : (data.notes || []).length ? `${data.notes.length} document(s) available` : 'Vault is empty';
+    }
   } catch (e) {
     el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
   }
@@ -1383,6 +1422,8 @@ function renderCommunications(data) {
         <div class="detail">${escapeHtml(r.detail)}</div>
       </div>
     </div>`).join('')}</div>`;
+  const homeVal = $('home-comms-value');
+  if (homeVal) homeVal.textContent = `${rows.filter(r => r.connected).length} of ${rows.length} connected`;
 }
 async function loadCommunications() {
   const el = $('communications-body');
@@ -1525,6 +1566,13 @@ async function loadTasksAndApprovals() {
     const objective = brief.strategic_objective || {};
     const objEl = $('header-objective-pct');
     if (objEl) objEl.textContent = (typeof objective.progress_pct === 'number') ? objective.progress_pct + '%' : '—';
+    const homeObjVal = $('home-objective-value');
+    const homeObjBar = $('home-objective-bar');
+    if (homeObjVal) {
+      const pct = typeof objective.progress_pct === 'number' ? Math.max(0, Math.min(100, objective.progress_pct)) : null;
+      homeObjVal.textContent = pct === null ? '—' : `$${Math.round(objective.cumulative_revenue_usd || 0).toLocaleString()} of $${Math.round(objective.target_amount_usd || 0).toLocaleString()} (${pct}%)`;
+      if (homeObjBar) homeObjBar.style.width = (pct || 0) + '%';
+    }
 
     approvalsEl.innerHTML = approvals.length ? approvals.map(t => `
       <div class="row">
