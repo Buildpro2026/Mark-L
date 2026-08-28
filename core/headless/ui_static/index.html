@@ -33,6 +33,13 @@
     --text: #1a1d24; --muted: #5a6272; --dim: #8b93a3;
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important; animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important; scroll-behavior: auto !important;
+    }
+  }
+
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
@@ -189,20 +196,53 @@
   #home-greeting { font-size: 15px; margin-bottom: 20px; color: var(--text); }
   #home-greeting .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
-  /* ── Command (chat) ───────────────────────────────────────────────── */
+  /* ── Command: the AI command console — chat is the interaction, not a
+     ChatGPT-clone transcript. Tool activity renders as compact "JARVIS →
+     System" chips (real tool_calls the backend already returned for the
+     turn), never raw JSON — that stays on the Tools (developer) screen. ── */
   #chat-wrap { display: flex; flex-direction: column; max-width: 760px; }
   #transcript-wrap.collapsed #transcript { display: none; }
   #transcript-toggle { cursor: pointer; user-select: none; }
-  #transcript { max-height: calc(100vh - 260px); overflow-y: auto; padding: 4px 0 16px; display: flex; flex-direction: column; gap: 10px; }
-  .msg { max-width: 82%; padding: 9px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5; }
-  .msg.user { align-self: flex-end; background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
+  #transcript {
+    max-height: calc(100vh - 260px); overflow-y: auto; padding: 6px 2px 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .msg {
+    max-width: 82%; padding: 10px 13px; border-radius: 10px; font-size: 13px; line-height: 1.55;
+    box-shadow: 0 8px 24px rgba(0,0,0,.12); animation: msg-in .18s ease both;
+  }
+  @keyframes msg-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .msg.user {
+    align-self: flex-end; background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  }
   .msg.jarvis { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); }
-  .msg.progress { align-self: flex-start; background: transparent; border: 1px dashed var(--line-strong); color: var(--muted); font-style: italic; }
-  .msg .who { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin-bottom: 3px; }
-  .msg .tools { margin-top: 6px; font-size: 11px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 5px; }
+  .msg.progress {
+    align-self: flex-start; background: transparent; border: 1px dashed var(--line-strong);
+    color: var(--muted); box-shadow: none; animation: progress-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes progress-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+  .msg .who { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin-bottom: 3px; font-family: var(--mono); }
+  .msg .tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+  .tool-chip {
+    display: inline-flex; align-items: center; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.02em; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 3px 9px;
+  }
   .msg.error { border-color: var(--bad); color: #ffb3ba; }
-  .chat-input-row { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
-  .chat-input-row textarea { flex: 1; resize: none; }
+  .chat-input-row {
+    display: flex; align-items: flex-end; gap: 8px; padding: 10px 0 0; margin-top: 4px;
+    border-top: 1px solid var(--line);
+  }
+  .chat-input-row::before {
+    content: "\203A"; align-self: center; color: var(--accent); font-family: var(--mono);
+    font-size: 15px; font-weight: 700; padding-bottom: 2px;
+  }
+  .chat-input-row textarea {
+    flex: 1; resize: none; font-family: var(--mono); background: var(--panel-alt);
+    border: 1px solid var(--line); transition: border-color .15s ease;
+  }
+  .chat-input-row textarea:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); outline: none; }
   .search-row { display: flex; gap: 8px; margin-bottom: 12px; }
 
   #global-error {
@@ -883,6 +923,25 @@ function setTranscriptExpanded(expanded) {
 }
 $('transcript-toggle').addEventListener('click', () => setTranscriptExpanded(!_transcriptExpanded));
 
+// Human-readable labels for the tool-activity chips below — covers every
+// real name in core/headless/tool_registry.py's TOOL_DECLARATIONS. A tool
+// not in this map (e.g. a new one added later) still renders, just as its
+// raw name, rather than being silently dropped.
+const TOOL_LABELS = {
+  open_app: 'Apps', web_search: 'Web Search', system_status: 'System', weather_report: 'Weather',
+  send_message: 'Messages', reminder: 'Reminders', youtube_video: 'YouTube',
+  computer_settings: 'Computer', browser_control: 'Browser', file_controller: 'Files',
+  desktop_control: 'Desktop', code_helper: 'Code', dev_agent: 'Dev Agent',
+  computer_control: 'Computer', game_updater: 'Games', flight_finder: 'Flights',
+  manage_monitor: 'Display', file_processor: 'Files', save_memory: 'Memory',
+  strategic_objective: 'Objective', agent_orchestrator: 'Agents', communications: 'Communications',
+  gmail: 'Gmail', calendar: 'Calendar', airtable: 'Airtable', hubspot: 'HubSpot',
+  social_post: 'Buffer', obsidian: 'JARVIS Brain', daily_deal_finders: 'Daily Deal Finders',
+  buildpro_matching: 'BuildPro', proactive_settings: 'Settings', business_intelligence: 'Intelligence',
+  opportunity_engine: 'Opportunities', ceo_decision: 'Decision Log', cloud_status: 'Cloud',
+};
+function toolDisplayLabel(name) { return TOOL_LABELS[name] || name; }
+
 function appendMessage(role, text, toolCalls) {
   clearProgress();
   const wrap = $('transcript');
@@ -890,8 +949,12 @@ function appendMessage(role, text, toolCalls) {
   if (hint) hint.remove();
   const div = document.createElement('div');
   div.className = `msg ${role}`;
+  // Compact "JARVIS → <system>" activity chips — real tool_calls the
+  // backend already returned for this turn, not a fabricated live feed.
+  // Raw args/results stay in the Tools (developer) screen, never shown here.
   const toolsHtml = (toolCalls && toolCalls.length)
-    ? `<div class="tools">used: ${toolCalls.map(t => t.name).join(', ')}</div>` : '';
+    ? `<div class="tools">${toolCalls.map(t => `<span class="tool-chip">JARVIS &rarr; ${escapeHtml(toolDisplayLabel(t.name))}</span>`).join('')}</div>`
+    : '';
   div.innerHTML = `<div class="who">${role === 'user' ? 'You' : 'Jarvis'}</div><div>${escapeHtml(text)}</div>${toolsHtml}`;
   wrap.appendChild(div);
   wrap.scrollTop = wrap.scrollHeight;
