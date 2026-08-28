@@ -509,6 +509,7 @@
         <button class="nav-item" data-report="ddf" type="button"><span class="nav-marker"></span>DDF</button>
         <button class="nav-item" data-report="intelligence" type="button"><span class="nav-marker"></span>Intelligence</button>
         <button class="nav-item" data-report="knowledge" type="button"><span class="nav-marker"></span>Knowledge</button>
+        <button class="nav-item" data-report="communications" type="button"><span class="nav-marker"></span>Communications</button>
         <button class="nav-item" data-report="agents" type="button"><span class="nav-marker"></span>Agents</button>
         <button class="nav-item" data-report="tasks" type="button"><span class="nav-marker"></span>Tasks &amp; Approvals</button>
         <button class="nav-item" data-report="history" type="button"><span class="nav-marker"></span>History</button>
@@ -615,6 +616,16 @@
           <pre id="knowledge-reader-content"></pre>
         </div>
       </div>
+    </div>
+
+    <!-- Communications — real connection status only, via the existing
+         /ui/api/status endpoint (status_api.status()'s "integrations"
+         block), never fabricated content for a channel that's only
+         connection-checked, not content-readable, today. -->
+    <div class="page" id="page-communications">
+      <div class="page-head"><h1>Communications</h1><button class="ghost small" id="refresh-communications-btn">Refresh</button></div>
+      <div class="knowledge-intro">Real connection status for JARVIS's external systems — a channel showing CONNECTED means credentials are present and verified, not that live message content is pulled in here yet.</div>
+      <div id="communications-body"><div class="empty">Loading…</div></div>
     </div>
 
     <!-- Agents -->
@@ -1337,6 +1348,54 @@ $('knowledge-list').addEventListener('click', (e) => {
   if (row) openKnowledgeNote(row.dataset.path);
 });
 
+/* ── Communications — real status only, via the existing /ui/api/status
+   endpoint (status_api.status()'s "integrations" block). No new backend
+   route: this is the first frontend caller of an endpoint that already
+   existed and was already tested. ── */
+function commsBadge(connected) {
+  return connected ? '<span class="badge ok">CONNECTED</span>' : '<span class="badge bad">NOT CONNECTED</span>';
+}
+function renderCommunications(data) {
+  const el = $('communications-body');
+  const integ = data.integrations || {};
+  const g = integ.gmail_calendar || {};
+  const hs = integ.hubspot || {};
+  const at = integ.airtable || {};
+  const tw = integ.twilio || {};
+  const bf = integ.buffer || {};
+  const rows = [
+    {
+      name: 'Gmail &amp; Calendar (Google)', connected: !!g.authorized,
+      detail: g.authorized ? 'Authorized and ready.' : (g.configured ? 'Credentials present but not yet authorized.' : 'Not configured.'),
+    },
+    { name: 'HubSpot', connected: !!hs.configured, detail: hs.configured ? 'Token present.' : 'No HubSpot token configured.' },
+    { name: 'Airtable', connected: !!at.configured, detail: at.detail || (at.configured ? 'Token present.' : 'Not configured.') },
+    { name: 'Twilio (Phone / SMS)', connected: tw.state === 'CONFIGURED', detail: tw.detail || 'No status available.' },
+    {
+      name: 'Buffer (Social)', connected: !!bf.configured,
+      detail: bf.status ? bf.status.replace(/^UNAVAILABLE:/, 'Unavailable: ') : 'Not configured.',
+    },
+  ];
+  el.innerHTML = `<div class="row-list">${rows.map(r => `
+    <div class="row">
+      <div class="main">
+        <div class="title">${r.name} ${commsBadge(r.connected)}</div>
+        <div class="detail">${escapeHtml(r.detail)}</div>
+      </div>
+    </div>`).join('')}</div>`;
+}
+async function loadCommunications() {
+  const el = $('communications-body');
+  el.innerHTML = `<div class="empty">Loading…</div>`;
+  try {
+    const data = await api('/ui/api/status');
+    renderCommunications(data);
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+$('refresh-communications-btn').addEventListener('click', loadCommunications);
+
 /* ── Agents ────────────────────────────────────────────────────────── */
 let agentsCache = [];
 const BUSINESS_LABELS = {
@@ -1639,6 +1698,7 @@ function loadAll() {
   loadDDF();
   loadIntelligence();
   loadKnowledge();
+  loadCommunications();
   loadAgents();
   loadTasksAndApprovals();
   loadHistory();
