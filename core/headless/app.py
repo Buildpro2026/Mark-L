@@ -87,13 +87,12 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
         """Unauthenticated platform health probe."""
         cfg = config.summarize()
         healthy = _db_reachable() and dashboard_server is not None
-        providers = []
-        if config.GROQ_API_KEY:
-            providers.append("groq")
-        if config.GEMINI_API_KEY:
-            providers.append("gemini")
-        if config.ANTHROPIC_TOKEN:
-            providers.append("anthropic")
+        # Reuses ui._configured_providers() directly rather than a second
+        # copy of the same list — the exact reason for doing this is on
+        # record: /health briefly drifted out of sync with the real
+        # chat-turn provider order earlier this project, which is the
+        # class of bug a single source of truth prevents outright.
+        providers = ui._configured_providers()
         return {
             "status": "ok" if healthy else "degraded",
             "uptime_seconds": round(time.time() - START_TS, 1),

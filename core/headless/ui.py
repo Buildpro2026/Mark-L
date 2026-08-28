@@ -313,15 +313,21 @@ def _configured_providers() -> list[str]:
     tier (no credit card, roughly 1,000-14,400 requests/day depending on
     model) is far more generous than Gemini's free tier (20 requests/day,
     which 429s immediately once exhausted — see the P0 zero-cost-provider
-    audit), so it's tried first when configured. This is the entire
-    provider-priority mechanism: which of GROQ_API_KEY / GEMINI_API_KEY /
-    ANTHROPIC_TOKEN are set, and in what order they're listed here — no
-    other code changes to add, remove, or reorder a provider."""
+    audit), so it's tried first when configured.
+
+    Gemini is deliberately excluded from this list for now (Lee's
+    explicit instruction: Groq-only, so JARVIS never calls Gemini and
+    never consumes Gemini credits while that account is being managed
+    separately) — GEMINI_API_KEY is still read into config.GEMINI_API_KEY
+    and core/headless/gemini_client.py / _run_chat_turn_gemini are still
+    fully intact, so re-enabling it later is a one-line change here, not
+    a rebuild. This is the entire provider-priority mechanism: which of
+    GROQ_API_KEY / ANTHROPIC_TOKEN are set, and in what order they're
+    listed here — no other code changes to add, remove, or reorder a
+    provider."""
     order = []
     if config.GROQ_API_KEY:
         order.append("groq")
-    if config.GEMINI_API_KEY:
-        order.append("gemini")
     if config.ANTHROPIC_TOKEN:
         order.append("anthropic")
     return order
