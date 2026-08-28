@@ -140,10 +140,16 @@ def test_served_page_has_the_floating_orb_wired_into_the_chat_lifecycle(monkeypa
     assert "KTX2Loader" not in html
     assert "facecap.glb" not in html
     assert '"three":' not in html
-    # Actually called at the right points in the chat lifecycle, not just defined.
-    assert "setOrbState('thinking')" in html
-    assert "setOrbState('speaking')" in html
-    assert "setOrbState('idle')" in html
+    # Actually called at the right points in the chat lifecycle, not just
+    # defined. 2026-08-28: these now go through window.setOrbReason's
+    # priority arbitration (see test_orb_state_reactivity.py) rather than
+    # forcing window.setOrbState directly, so a real tool call in flight
+    # is never silently overwritten by a stale "thinking" or "speaking"
+    # call — but the same real lifecycle points still drive it.
+    assert "setOrbReason('thinking', true)" in html
+    assert "setOrbReason('speaking', true)" in html
+    assert "setOrbReason('tool', true)" in html
+    assert "setOrbReason('error', true)" in html
 
 
 def test_orb_is_draggable_resizable_and_repositions_on_report_change(monkeypatch):
