@@ -411,7 +411,12 @@ async def _run_chat_turn_gemini(
     from core.headless.tool_executor import UnknownToolError
     from core.headless.gemini_client import get_client
 
-    client = get_client(config.GEMINI_API_KEY)
+    try:
+        client = get_client(config.GEMINI_API_KEY)
+    except Exception as e:
+        if remaining_providers:
+            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+        raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Gemini. Error: {e}")
     tools = [gtypes.Tool(function_declarations=_chat_tool_declarations())]
     gen_config = gtypes.GenerateContentConfig(system_instruction=_chat_system_prompt(), tools=tools)
 
@@ -494,7 +499,12 @@ async def _run_chat_turn_groq(
     from core.headless.tool_executor import UnknownToolError
     from core.headless.groq_client import get_client, gemini_tools_to_openai, CHAT_MODEL as GROQ_CHAT_MODEL
 
-    client = get_client(config.GROQ_API_KEY)
+    try:
+        client = get_client(config.GROQ_API_KEY)
+    except Exception as e:
+        if remaining_providers:
+            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+        raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Groq. Error: {e}")
     tools = gemini_tools_to_openai(_chat_tool_declarations())
 
     messages: list[dict] = [{"role": "system", "content": _chat_system_prompt()}]
@@ -590,7 +600,12 @@ async def _run_chat_turn_anthropic(
     from core.headless.tool_executor import UnknownToolError
     from core.headless.anthropic_client import get_client, gemini_tools_to_anthropic, CHAT_MODEL as ANTHROPIC_CHAT_MODEL
 
-    client = get_client(config.ANTHROPIC_TOKEN)
+    try:
+        client = get_client(config.ANTHROPIC_TOKEN)
+    except Exception as e:
+        if remaining_providers:
+            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+        raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Anthropic. Error: {e}")
     tools = gemini_tools_to_anthropic(_chat_tool_declarations())
 
     messages: list[dict] = []

@@ -399,3 +399,21 @@ def test_anthropic_fallback_also_raises_cleanly_if_both_providers_fail(monkeypat
     assert exc_info.value.status_code == 502
     assert "All configured AI providers failed" in exc_info.value.detail
     assert "Anthropic" in exc_info.value.detail
+
+
+def test_groq_client_construction_failure_raises_a_clean_error_not_a_500(monkeypatch):
+    """The actual live bug: get_client() ran outside any try/except, so a
+    construction-time failure (missing package, bad key, etc.) was an
+    unhandled exception -> raw HTTP 500 instead of a clean error."""
+    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-groq-key-not-real")
+
+    def _broken_get_client(*a, **k):
+        raise RuntimeError("simulated construction failure")
+
+    monkeypatch.setattr("core.headless.groq_client.get_client", _broken_get_client)
+
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(headless_ui.run_chat_turn("hello", []))
+    assert exc_info.value.status_code == 502
+    assert "Groq" in exc_info.value.detail
