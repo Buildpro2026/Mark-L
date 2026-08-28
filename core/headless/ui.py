@@ -44,12 +44,13 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from core.headless import config
@@ -336,6 +337,7 @@ def _configured_providers() -> list[str]:
 async def run_chat_turn(
     message: str, history: list[dict],
     on_status: Callable[[str], Awaitable[None]] | None = None,
+    on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
 ) -> tuple[str, list[dict]]:
     """One conversational turn through a configured AI provider + the
     shared ToolExecutor — the browser equivalent of what Gemini Live's
@@ -360,7 +362,16 @@ async def run_chat_turn(
     Raises HTTPException if no provider is configured, the message is
     empty, or every configured provider's request failed — callers that
     don't want that (e.g. the dashboard bridge, which just wants a reply
-    string) should catch it."""
+    string) should catch it.
+
+    on_tool_event, if given, is called with a structured
+    {"type": "tool_start"|"tool_end", "name": ..., ["ok": bool]} dict
+    right before/after each individual tool call — the per-tool signal
+    on_status's human-readable labels don't carry (on_status only knows
+    "about to call a tool" and "done with this round," not which tool or
+    whether it succeeded). Purely additive: existing on_status callers
+    (dashboard_bridge.py, the /3d/phone relay) are unaffected — they never
+    pass this and nothing here changes on_status's own behavior."""
     if not message.strip():
         raise HTTPException(status_code=400, detail="Empty message.")
     providers = _configured_providers()
@@ -378,7 +389,7 @@ async def run_chat_turn(
 
     executor = ToolExecutor(ToolContext())
     tool_calls_made: list[dict] = []
-    return await _run_provider_chain(providers, message, history, on_status, executor, tool_calls_made)
+    return await _run_provider_chain(providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
 
 
 async def _run_provider_chain(
@@ -386,6 +397,7 @@ async def _run_provider_chain(
     on_status: Callable[[str], Awaitable[None]] | None,
     executor: "ToolExecutor",  # noqa: F821 — imported by the caller before this runs
     tool_calls_made: list[dict],
+    on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
 ) -> tuple[str, list[dict]]:
     """Tries providers[0]; on failure, recurses into providers[1:] (which
     raises the final, clean HTTPException itself once the list is empty —
@@ -397,7 +409,16 @@ async def _run_provider_chain(
         "gemini": _run_chat_turn_gemini,
         "anthropic": _run_chat_turn_anthropic,
     }[providers[0]]
-    return await runner(message, history, on_status, executor, tool_calls_made, providers[1:])
+    return await runner(message, history, on_status, executor, tool_calls_made, providers[1:], on_tool_event)
+
+
+async def _emit_tool_event(on_tool_event: Callable[[dict], Awaitable[None]] | None, event: dict) -> None:
+    if on_tool_event is None:
+        return
+    try:
+        await on_tool_event(event)
+    except Exception:
+        pass  # a broken event sink must never break the actual turn
 
 
 async def _run_chat_turn_gemini(
@@ -406,6 +427,7 @@ async def _run_chat_turn_gemini(
     executor: "ToolExecutor",  # noqa: F821
     tool_calls_made: list[dict],
     remaining_providers: list[str],
+    on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
 ) -> tuple[str, list[dict]]:
     from google.genai import types as gtypes
     from core.headless.tool_executor import UnknownToolError
@@ -415,7 +437,7 @@ async def _run_chat_turn_gemini(
         client = get_client(config.GEMINI_API_KEY)
     except Exception as e:
         if remaining_providers:
-            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
         raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Gemini. Error: {e}")
     tools = [gtypes.Tool(function_declarations=_chat_tool_declarations())]
     gen_config = gtypes.GenerateContentConfig(system_instruction=_chat_system_prompt(), tools=tools)
@@ -444,7 +466,7 @@ async def _run_chat_turn_gemini(
             )
         except Exception as e:
             if remaining_providers:
-                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
             # Gemini's own API returns a clean, user-safe error message
             # (e.g. "high demand" 503s) — safe to surface directly, this
             # is never a secret-bearing string.
@@ -461,12 +483,17 @@ async def _run_chat_turn_gemini(
                     await on_status(_status_label_for_tool(fc.name, args))
                 except Exception:
                     pass   # a broken status sink must never break the actual turn
+            await _emit_tool_event(on_tool_event, {"type": "tool_start", "name": fc.name})
             try:
                 result = await executor.execute(fc.name, args)
+                tool_ok = True
             except UnknownToolError as e:
                 result = f"Error: {e}"
+                tool_ok = False
             except Exception as e:
                 result = f"Error: {fc.name} failed — {e}"
+                tool_ok = False
+            await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": fc.name, "ok": tool_ok})
             tool_calls_made.append({"name": fc.name, "args": args, "result": result})
             contents.append(gtypes.Content(
                 role="user",
@@ -491,6 +518,7 @@ async def _run_chat_turn_groq(
     executor: "ToolExecutor",  # noqa: F821
     tool_calls_made: list[dict],
     remaining_providers: list[str],
+    on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
 ) -> tuple[str, list[dict]]:
     """Structurally parallel to _run_chat_turn_gemini/_run_chat_turn_anthropic
     but in OpenAI's chat-completions shape (tool_calls / role="tool" messages
@@ -503,7 +531,7 @@ async def _run_chat_turn_groq(
         client = get_client(config.GROQ_API_KEY)
     except Exception as e:
         if remaining_providers:
-            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
         raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Groq. Error: {e}")
     tools = gemini_tools_to_openai(_chat_tool_declarations())
 
@@ -540,7 +568,7 @@ async def _run_chat_turn_groq(
             )
         except Exception as e:
             if remaining_providers:
-                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
             raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Groq. Error: {e}")
 
         choice = resp.choices[0].message
@@ -566,12 +594,17 @@ async def _run_chat_turn_groq(
                     await on_status(_status_label_for_tool(tc.function.name, args))
                 except Exception:
                     pass
+            await _emit_tool_event(on_tool_event, {"type": "tool_start", "name": tc.function.name})
             try:
                 result = await executor.execute(tc.function.name, args)
+                tool_ok = True
             except UnknownToolError as e:
                 result = f"Error: {e}"
+                tool_ok = False
             except Exception as e:
                 result = f"Error: {tc.function.name} failed — {e}"
+                tool_ok = False
+            await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": tc.function.name, "ok": tool_ok})
             tool_calls_made.append({"name": tc.function.name, "args": args, "result": result})
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
 
@@ -593,6 +626,7 @@ async def _run_chat_turn_anthropic(
     executor: "ToolExecutor",  # noqa: F821 — imported by the caller before this runs
     tool_calls_made: list[dict],
     remaining_providers: list[str],
+    on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
 ) -> tuple[str, list[dict]]:
     """Structurally parallel to _run_chat_turn_gemini's loop but in
     Anthropic's content-block shape (tool_use/tool_result instead of
@@ -608,7 +642,7 @@ async def _run_chat_turn_anthropic(
         client = get_client(config.ANTHROPIC_TOKEN)
     except Exception as e:
         if remaining_providers:
-            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+            return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
         raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Anthropic. Error: {e}")
     tools = gemini_tools_to_anthropic(_chat_tool_declarations())
 
@@ -642,7 +676,7 @@ async def _run_chat_turn_anthropic(
             )
         except Exception as e:
             if remaining_providers:
-                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made)
+                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
             raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Anthropic. Error: {e}")
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
@@ -658,12 +692,17 @@ async def _run_chat_turn_anthropic(
                     await on_status(_status_label_for_tool(tu.name, args))
                 except Exception:
                     pass
+            await _emit_tool_event(on_tool_event, {"type": "tool_start", "name": tu.name})
             try:
                 result = await executor.execute(tu.name, args)
+                tool_ok = True
             except UnknownToolError as e:
                 result = f"Error: {e}"
+                tool_ok = False
             except Exception as e:
                 result = f"Error: {tu.name} failed — {e}"
+                tool_ok = False
+            await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": tu.name, "ok": tool_ok})
             tool_calls_made.append({"name": tu.name, "args": args, "result": result})
             tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(result)})
         messages.append({"role": "user", "content": tool_results})
@@ -682,8 +721,56 @@ async def _run_chat_turn_anthropic(
 
 @api.post("/chat")
 async def chat(body: ChatRequest):
-    reply, tool_calls = await run_chat_turn(body.message, body.history)
-    return {"reply": reply, "tool_calls": tool_calls}
+    """Streams the turn as Server-Sent Events instead of waiting for the
+    whole (possibly multi-tool-call) turn to finish — the Command console
+    sees "JARVIS -> Gmail" the moment that tool starts, not after the
+    entire reply is ready. Smallest reliable change over the previous
+    single-JSON-response shape: same route, same POST body, still one
+    HTTP request/response, no new WebSocket or transport concept.
+    run_chat_turn's own tool-dispatch/provider-fallback logic is
+    unchanged — this only taps its existing, purely additive
+    on_tool_event hook (see that function's docstring). dashboard_bridge.py
+    (the /3d/phone relay) calls run_chat_turn directly and never touches
+    this route, so /3d is untouched by this change.
+
+    Frame shape (one JSON object per "data: " line, blank line between
+    frames — standard SSE):
+      {"type": "tool_start", "name": "gmail"}
+      {"type": "tool_end", "name": "gmail", "ok": true}
+      {"type": "done", "reply": "...", "tool_calls": [...]}   -- terminal
+      {"type": "error", "detail": "..."}                       -- terminal
+    """
+    async def _events():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _on_tool_event(event: dict) -> None:
+            await queue.put(event)
+
+        async def _runner() -> None:
+            try:
+                reply, tool_calls = await run_chat_turn(body.message, body.history, on_tool_event=_on_tool_event)
+                await queue.put({"type": "done", "reply": reply, "tool_calls": tool_calls})
+            except HTTPException as e:
+                await queue.put({"type": "error", "detail": e.detail})
+            except Exception as e:
+                await queue.put({"type": "error", "detail": str(e)})
+            finally:
+                await queue.put(None)  # sentinel: no more frames coming
+
+        # Deliberately not cancelled if the client disconnects mid-turn
+        # (tab closed, network drop): a HubSpot write or a sent email must
+        # never be torn down mid-tool-call just because nobody's watching
+        # the stream anymore. The task simply finishes on its own; nothing
+        # after this generator exits is reading the queue, which is a
+        # harmless no-op, not a leak (one bounded, small object).
+        asyncio.create_task(_runner())
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return StreamingResponse(_events(), media_type="text/event-stream")
 
 
 @api.get("/agents")

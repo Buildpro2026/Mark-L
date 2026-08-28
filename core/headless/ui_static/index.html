@@ -224,10 +224,20 @@
   @keyframes progress-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
   .msg .who { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin-bottom: 3px; font-family: var(--mono); }
   .msg .tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+  .msg .tools:empty { display: none; margin: 0; padding: 0; border: none; }
   .tool-chip {
     display: inline-flex; align-items: center; font-family: var(--mono); font-size: 10.5px;
     letter-spacing: 0.02em; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 3px 9px;
+  }
+  /* Live (in-flight) vs completed vs failed tool activity — distinct at a
+     glance, never all rendered the same way. */
+  .tool-chip-active { animation: tool-chip-pulse 1s ease-in-out infinite; }
+  @keyframes tool-chip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+  .tool-chip-done { opacity: 0.88; }
+  .tool-chip-failed {
+    color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent);
+    border-color: color-mix(in srgb, var(--bad) 35%, transparent); animation: none;
   }
   .msg.error { border-color: var(--bad); color: #ffb3ba; }
   .chat-input-row {
@@ -1079,12 +1089,61 @@ function showProgress(text) {
   const wrap = $('transcript');
   const d = document.createElement('div');
   d.className = 'msg progress';
-  d.innerHTML = `<div class="who">Jarvis</div><div>${escapeHtml(text)}</div>`;
+  d.innerHTML = `<div class="who">Jarvis</div><div>${escapeHtml(text)}</div><div class="tools" id="progress-tools"></div>`;
   wrap.appendChild(d);
   wrap.scrollTop = wrap.scrollHeight;
   _progressEl = d;
+  _activeToolChip = null;
 }
-function clearProgress() { if (_progressEl) { _progressEl.remove(); _progressEl = null; } }
+function clearProgress() { if (_progressEl) { _progressEl.remove(); _progressEl = null; } _activeToolChip = null; }
+
+// Live tool-activity chips inside the progress bubble — real tool_start/
+// tool_end events streamed from POST /ui/api/chat as they happen, not a
+// fabricated live feed. Tool calls run strictly sequentially server-side
+// (see core/headless/ui.py's provider loops), so at most one chip is ever
+// "active" at a time — no need to track more than the current one.
+let _activeToolChip = null;
+function addToolStartChip(name) {
+  const host = document.getElementById('progress-tools');
+  if (!host) return;
+  const chip = document.createElement('span');
+  chip.className = 'tool-chip tool-chip-active';
+  chip.textContent = `JARVIS → ${toolDisplayLabel(name)}`;
+  host.appendChild(chip);
+  _activeToolChip = chip;
+  const wrap = $('transcript');
+  wrap.scrollTop = wrap.scrollHeight;
+}
+function resolveToolChip(ok) {
+  if (!_activeToolChip) return;
+  _activeToolChip.classList.remove('tool-chip-active');
+  _activeToolChip.classList.add(ok ? 'tool-chip-done' : 'tool-chip-failed');
+  _activeToolChip = null;
+}
+
+// Parses one Server-Sent-Events response body into {type, ...} frames as
+// they arrive — POST /ui/api/chat streams tool_start/tool_end events live
+// during the turn, then a terminal done/error frame. Calls onEvent for
+// each frame as soon as its bytes are in, not after the whole body loads.
+async function streamSSE(res, onEvent) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 2);
+      if (!frame.startsWith('data:')) continue;
+      let evt;
+      try { evt = JSON.parse(frame.slice(5).trim()); } catch (e) { continue; }
+      onEvent(evt);
+    }
+  }
+}
 
 // Shared by the Command page's textarea AND the floating orb's own compact
 // input/mic — one conversation, one history, regardless of which surface
@@ -1099,12 +1158,30 @@ async function sendMessage(message) {
   if (window.setOrbState) window.setOrbState('thinking');
   $('send-btn').disabled = true;
   try {
-    const r = await api('/ui/api/chat', { method: 'POST', body: JSON.stringify({ message, history: chatHistory.slice(-20) }) });
-    chatHistory.push({ role: 'model', text: r.reply });
-    appendMessage('jarvis', r.reply, r.tool_calls);
+    const res = await fetch('/ui/api/chat', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, history: chatHistory.slice(-20) }),
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { const body = await res.json(); detail = body.detail || detail; } catch (e) {}
+      throw new Error(`HTTP ${res.status}: ${detail}`);
+    }
+    let finalReply = null, finalToolCalls = [], streamError = null;
+    await streamSSE(res, (evt) => {
+      if (evt.type === 'tool_start') addToolStartChip(evt.name);
+      else if (evt.type === 'tool_end') resolveToolChip(evt.ok);
+      else if (evt.type === 'done') { finalReply = evt.reply; finalToolCalls = evt.tool_calls || []; }
+      else if (evt.type === 'error') { streamError = evt.detail || 'Stream error'; }
+    });
+    if (streamError) throw new Error(streamError);
+    if (finalReply === null) throw new Error('Connection lost before JARVIS finished responding.');
+    chatHistory.push({ role: 'model', text: finalReply });
+    appendMessage('jarvis', finalReply, finalToolCalls);
     loadHistory();
-    if (window.speakReply) window.speakReply(r.reply);
-    return r.reply;
+    if (window.speakReply) window.speakReply(finalReply);
+    return finalReply;
   } catch (e) {
     appendError(e.message);
     if (window.setOrbState) window.setOrbState('idle');
