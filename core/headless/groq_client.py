@@ -51,6 +51,31 @@ _GEMINI_TO_JSON_SCHEMA_TYPE = {
     "NUMBER": "number", "BOOLEAN": "boolean", "ARRAY": "array",
 }
 
+# Groq's free tier caps at 8,000 tokens/minute (TPM) — far below Gemini's
+# and Anthropic's limits, which is why the full, prose-length tool
+# descriptions (written for those larger-context models; several run
+# 800-1600+ characters each) were blowing the budget on their own, before
+# the system prompt or the user's message were even counted (a real
+# request measured 9,276 tokens against an 8,000 limit). Capping
+# description length — for Groq's request only, nothing else — keeps
+# every tool, every parameter, and every required field fully intact;
+# only the descriptive prose shrinks. No tool becomes uncallable.
+_MAX_DESCRIPTION_CHARS = 60
+
+
+def _trim_descriptions(node: Any) -> Any:
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if k == "description" and isinstance(v, str) and len(v) > _MAX_DESCRIPTION_CHARS:
+                out[k] = v[:_MAX_DESCRIPTION_CHARS].rsplit(" ", 1)[0] + "..."
+            else:
+                out[k] = _trim_descriptions(v)
+        return out
+    if isinstance(node, list):
+        return [_trim_descriptions(v) for v in node]
+    return node
+
 
 def _convert_schema_types(node: Any) -> Any:
     if isinstance(node, dict):
@@ -67,7 +92,10 @@ def gemini_tools_to_openai(tool_declarations: list[dict]) -> list[dict]:
     """Converts this codebase's Gemini-dialect tool declarations (name/
     description/parameters) into OpenAI/Groq's tool schema (a
     {"type": "function", "function": {...}} wrapper around name/
-    description/parameters)."""
+    description/parameters), with every description (tool-level and
+    parameter-level) capped to _MAX_DESCRIPTION_CHARS — see that
+    constant's comment for why this exists and why it's safe."""
+    trimmed = [_trim_descriptions(t) for t in tool_declarations]
     return [
         {
             "type": "function",
@@ -77,5 +105,5 @@ def gemini_tools_to_openai(tool_declarations: list[dict]) -> list[dict]:
                 "parameters": _convert_schema_types(t.get("parameters") or {"type": "object", "properties": {}}),
             },
         }
-        for t in tool_declarations
+        for t in trimmed
     ]

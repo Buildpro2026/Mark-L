@@ -508,7 +508,11 @@ async def _run_chat_turn_groq(
     tools = gemini_tools_to_openai(_chat_tool_declarations())
 
     messages: list[dict] = [{"role": "system", "content": _chat_system_prompt()}]
-    for turn in history[-20:]:
+    # 10, not the 20 the other providers use — Groq's free tier caps at
+    # 8,000 tokens/minute, so history gets a tighter budget here too (on
+    # top of the tool-description trim above) to keep real headroom under
+    # that limit rather than relying on the tool trim alone.
+    for turn in history[-10:]:
         role = "assistant" if turn.get("role") == "model" else "user"
         text = str(turn.get("text") or "")
         if text:

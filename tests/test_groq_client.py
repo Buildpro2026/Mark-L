@@ -98,3 +98,45 @@ def test_every_real_tool_declaration_converts_without_error():
         assert tool["function"]["parameters"]["type"] == "object"
         found = set(_walk_type_values(tool["function"]["parameters"]))
         assert not (found & gemini_dialect), f"{tool['function']['name']} still has Gemini-dialect types: {found & gemini_dialect}"
+
+
+def test_gemini_tools_to_openai_trims_verbose_descriptions_for_groqs_tpm_limit():
+    """The actual live bug: Groq's free tier caps at 8,000 tokens/minute,
+    and the full, prose-length tool descriptions (written for Gemini's/
+    Anthropic's much larger context budgets) alone exceeded it — a real
+    request measured 9,276 tokens against that 8,000 limit before any
+    trimming existed. Every tool/parameter must survive; only verbose
+    description text shrinks."""
+    long_desc = "x" * 500
+    tools = [{
+        "name": "verbose_tool",
+        "description": long_desc,
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {"arg": {"type": "STRING", "description": long_desc}},
+            "required": ["arg"],
+        },
+    }]
+    out = gemini_tools_to_openai(tools)
+    assert len(out) == 1  # tool itself is never dropped
+    fn = out[0]["function"]
+    assert fn["name"] == "verbose_tool"  # name intact
+    assert len(fn["description"]) < 100  # description actually shrank
+    assert "arg" in fn["parameters"]["properties"]  # parameter still present
+    assert fn["parameters"]["required"] == ["arg"]  # required-ness preserved
+    assert len(fn["parameters"]["properties"]["arg"]["description"]) < 100
+
+
+def test_real_tool_declarations_fit_groqs_tpm_budget_after_trimming():
+    """Direct proof against the real, full tool set (not a synthetic
+    example) that the fix actually solves the reported failure."""
+    import json
+    from core.headless.tool_registry import TOOL_DECLARATIONS, SESSION_ONLY_TOOLS
+    real_tools = [t for t in TOOL_DECLARATIONS if t["name"] not in SESSION_ONLY_TOOLS]
+    trimmed_json = json.dumps(gemini_tools_to_openai(real_tools))
+    # Calibrated against the live failure (9,276 real tokens measured for
+    # ~52,000 untrimmed chars => ~5.6 chars/token for this JSON-heavy
+    # content) — a generous 5.0 chars/token keeps this a safety-margin
+    # check, not a brittle exact-count assertion.
+    estimated_tokens = len(trimmed_json) / 5.0
+    assert estimated_tokens < 7000, f"tool schema alone estimated at {estimated_tokens:.0f} tokens"
