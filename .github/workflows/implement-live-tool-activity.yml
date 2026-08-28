@@ -1,0 +1,100 @@
+name: Implement live tool activity stream
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply live tool activity implementation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path('main.py')
+          text = main.read_text(encoding='utf-8')
+
+          old = '''        print(f"[JARVIS] 🔧 {name}  {args}")\n        self.ui.set_state("THINKING")\n'''
+          new = '''        print(f"[JARVIS] 🔧 {name}  {args}")\n        tool_event_id = f"{name}:{time.monotonic_ns()}"\n        _tool_failed = False\n        if self._dashboard:\n            await self._dashboard.broadcast({\n                "type": "tool_activity",\n                "event": "start",\n                "id": tool_event_id,\n                "tool": name,\n                "ts": datetime.now().isoformat(),\n            })\n        self.ui.set_state("THINKING")\n'''
+          if old not in text:
+              raise SystemExit('main.py start anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''            if not self.ui.muted:\n                self.ui.set_state("LISTENING")\n            return types.FunctionResponse(\n                id=fc.id, name=name,\n                response={"result": "ok", "silent": True}\n            )\n'''
+          new = '''            if self._dashboard:\n                await self._dashboard.broadcast({\n                    "type": "tool_activity",\n                    "event": "complete",\n                    "id": tool_event_id,\n                    "tool": name,\n                    "ts": datetime.now().isoformat(),\n                    "result": "ok",\n                })\n            if not self.ui.muted:\n                self.ui.set_state("LISTENING")\n            return types.FunctionResponse(\n                id=fc.id, name=name,\n                response={"result": "ok", "silent": True}\n            )\n'''
+          if old not in text:
+              raise SystemExit('main.py save_memory anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        except Exception as e:\n            result = f"Tool '{name}' failed: {e}"\n            traceback.print_exc()\n            self.speak_error(name, e)\n\n        if not self.ui.muted:\n            self.ui.set_state("LISTENING")\n\n        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")\n'''
+          new = '''        except Exception as e:\n            _tool_failed = True\n            result = f"Tool '{name}' failed: {e}"\n            traceback.print_exc()\n            self.speak_error(name, e)\n\n        if self._dashboard:\n            await self._dashboard.broadcast({\n                "type": "tool_activity",\n                "event": "error" if _tool_failed else "complete",\n                "id": tool_event_id,\n                "tool": name,\n                "ts": datetime.now().isoformat(),\n                "result": str(result)[:240],\n            })\n\n        if not self.ui.muted:\n            self.ui.set_state("LISTENING")\n\n        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")\n'''
+          if old not in text:
+              raise SystemExit('main.py completion anchor not found')
+          text = text.replace(old, new, 1)
+          main.write_text(text, encoding='utf-8')
+
+          app = Path('dashboard/static/app.html')
+          text = app.read_text(encoding='utf-8')
+
+          old = '''    .msg-sys { align-self:center; font-size:11px; color:var(--muted); padding:2px 0; background:transparent; border:none; letter-spacing:0.3px; }\n    .lbl { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; margin-bottom:4px; }\n'''
+          new = '''    .msg-sys { align-self:center; font-size:11px; color:var(--muted); padding:2px 0; background:transparent; border:none; letter-spacing:0.3px; }\n\n    /* ── LIVE TOOL ACTIVITY ── */\n    .tool-activity {\n      align-self: flex-start; display:flex; align-items:center; gap:8px;\n      max-width:82%; padding:7px 11px; border-radius:9px;\n      background:rgba(99,102,241,0.07); border:1px solid rgba(99,102,241,0.16);\n      color:var(--text); font-family:ui-monospace,SFMono-Regular,Consolas,monospace;\n      font-size:11px; letter-spacing:.2px; animation:pop .16s ease;\n    }\n    .tool-activity .tool-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); flex-shrink:0; }\n    .tool-activity .tool-status { color:var(--muted); margin-left:2px; font-size:10px; }\n    .tool-activity.active .tool-dot { animation:toolpulse 1s ease-in-out infinite; }\n    .tool-activity.done { border-color:rgba(34,197,94,.2); background:rgba(34,197,94,.06); }\n    .tool-activity.done .tool-dot { background:var(--green); }\n    .tool-activity.done .tool-status { color:var(--green); }\n    .tool-activity.error { border-color:rgba(248,113,113,.25); background:rgba(248,113,113,.07); }\n    .tool-activity.error .tool-dot { background:#f87171; }\n    .tool-activity.error .tool-status { color:#f87171; }\n    @keyframes toolpulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.35;transform:scale(.7)} }\n\n    .lbl { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; margin-bottom:4px; }\n'''
+          if old not in text:
+              raise SystemExit('app.html CSS anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    const feed  = document.getElementById('feed');\n    const pill  = document.getElementById('pill');\n    const stTxt = document.getElementById('st');\n    const wake  = document.getElementById('wake');\n'''
+          new = '''    const feed  = document.getElementById('feed');\n    const pill  = document.getElementById('pill');\n    const stTxt = document.getElementById('st');\n    const wake  = document.getElementById('wake');\n    const _toolActivities = new Map();\n'''
+          if old not in text:
+              raise SystemExit('app.html state anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''      if (m.type === 'wake')          sys('Wake word detected — connecting…');\n      if (m.type === 'sys')           sys(m.text);\n      if (m.type === 'file_received') _onFileReceived(m);\n    };\n'''
+          new = '''      if (m.type === 'wake')          sys('Wake word detected — connecting…');\n      if (m.type === 'sys')           sys(m.text);\n      if (m.type === 'file_received') _onFileReceived(m);\n      if (m.type === 'tool_activity') handleToolActivity(m);\n    };\n'''
+          if old not in text:
+              raise SystemExit('app.html websocket anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    function sys(text) {\n      const d = document.createElement('div');\n      d.className = 'msg msg-sys'; d.textContent = text;\n      feed.appendChild(d); feed.scrollTop = feed.scrollHeight;\n    }\n\n    function esc(s) {\n'''
+          new = '''    function sys(text) {\n      const d = document.createElement('div');\n      d.className = 'msg msg-sys'; d.textContent = text;\n      feed.appendChild(d); feed.scrollTop = feed.scrollHeight;\n    }\n\n    function _toolLabel(name) {\n      return String(name || 'unknown').replace(/_/g, ' ');\n    }\n\n    function handleToolActivity(m) {\n      if (!m || !m.id || !m.tool) return;\n\n      let d = _toolActivities.get(m.id);\n      if (!d) {\n        d = document.createElement('div');\n        d.className = 'tool-activity active';\n        d.dataset.toolId = m.id;\n        d.innerHTML = `<span class="tool-dot"></span><strong>JARVIS → ${esc(_toolLabel(m.tool))}</strong><span class="tool-status">working</span>`;\n        feed.appendChild(d);\n        _toolActivities.set(m.id, d);\n      }\n\n      const status = d.querySelector('.tool-status');\n      if (m.event === 'start') {\n        d.className = 'tool-activity active';\n        if (status) status.textContent = 'working';\n      } else if (m.event === 'error') {\n        d.className = 'tool-activity error';\n        if (status) status.textContent = 'failed';\n        if (m.result) d.title = String(m.result);\n      } else if (m.event === 'complete') {\n        d.className = 'tool-activity done';\n        if (status) status.textContent = 'complete';\n      }\n\n      feed.scrollTop = feed.scrollHeight;\n    }\n\n    function _markToolActivitiesDisconnected() {\n      for (const d of _toolActivities.values()) {\n        if (!d.classList.contains('active')) continue;\n        d.className = 'tool-activity error';\n        const status = d.querySelector('.tool-status');\n        if (status) status.textContent = 'connection lost';\n      }\n    }\n\n    function esc(s) {\n'''
+          if old not in text:
+              raise SystemExit('app.html helper anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = "    ws.onclose   = () => sys('Connection lost — refresh to reconnect.');\n"
+          new = "    ws.onclose   = () => { _markToolActivitiesDisconnected(); sys('Connection lost — refresh to reconnect.'); };\n"
+          if old not in text:
+              raise SystemExit('app.html ws close anchor not found')
+          text = text.replace(old, new, 1)
+          app.write_text(text, encoding='utf-8')
+
+          tests = Path('tests/test_tool_activity_stream.py')
+          tests.parent.mkdir(exist_ok=True)
+          tests.write_text(r'''from pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\nMAIN = (ROOT / "main.py").read_text(encoding="utf-8")\nAPP = (ROOT / "dashboard" / "static" / "app.html").read_text(encoding="utf-8")\n\n\ndef test_tool_start_event_contract_reaches_dashboard():\n    assert '"type": "tool_activity"' in MAIN\n    assert '"event": "start"' in MAIN\n    assert '"tool": name' in MAIN\n    assert 'await self._dashboard.broadcast' in MAIN\n\n\ndef test_tool_completion_and_failure_events_are_exposed():\n    assert '"event": "error" if _tool_failed else "complete"' in MAIN\n    assert '"result": str(result)[:240]' in MAIN\n\n\ndef test_multiple_tool_calls_have_unique_activity_ids():\n    assert 'tool_event_id = f"{name}:{time.monotonic_ns()}"' in MAIN\n    assert '_toolActivities = new Map()' in APP\n\n\ndef test_ui_renders_real_backend_tool_events():\n    assert "m.type === 'tool_activity'" in APP\n    assert "handleToolActivity(m)" in APP\n    assert "m.tool" in APP\n    assert "JARVIS → ${esc(_toolLabel(m.tool))}" in APP\n\n\ndef test_connection_loss_does_not_leave_tools_stuck_as_working():\n    assert "_markToolActivitiesDisconnected()" in APP\n    assert "connection lost" in APP\n\n\ndef test_ordinary_chat_and_3d_are_not_replaced_by_tool_stream():\n    assert "m.type === 'log'" in APP\n    assert "function append(speaker, text)" in APP\n    assert not (ROOT / "dashboard" / "static" / "3d").exists()\n'''.replace('\\n', '\n'), encoding='utf-8')
+          PY
+
+      - name: Syntax check
+        run: |
+          python -m py_compile main.py dashboard/server.py
+
+      - name: Run tool activity tests
+        run: |
+          python -m pytest -q tests/test_tool_activity_stream.py
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.py dashboard/static/app.html tests/test_tool_activity_stream.py
+          git commit -m "Add live JARVIS tool activity streaming [skip ci]"
+          git push
