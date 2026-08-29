@@ -67,6 +67,11 @@ _MAX_TOOL_CALL_ROUNDS = 4            # caps a runaway tool-call chain, not norma
 
 STATIC_DIR = Path(__file__).parent / "ui_static"
 INDEX_FILE = STATIC_DIR / "index.html"
+AVATAR_DIR = STATIC_DIR / "avatar"
+# Pre-generated (SadTalker/MuseTalk, offline, $0, CPU) — see FaceRenderer in
+# index.html. An allowlist rather than trusting the path param directly,
+# even though FastAPI path params can't contain "/" on their own.
+_AVATAR_ASSETS = {"idle_loop.mp4", "speaking_sample.mp4"}
 
 COOKIE_NAME = "jarvis_ui_session"
 SESSION_TTL_SECONDS = 365 * 24 * 3600   # Lee's call 2026-08-19: was 12h, too short for a tool left open across a workday
@@ -826,6 +831,20 @@ def ui_execute_task(task_id: str):
 @api.get("/events")
 def ui_list_events(agent_id: str | None = None, limit: int = 50):
     return orchestrator_api.list_events(agent_id=agent_id, limit=limit)
+
+
+@api.get("/avatar/asset/{filename}")
+def ui_avatar_asset(filename: str) -> FileResponse:
+    """Serves a pre-generated avatar video (idle/speaking) — see
+    FaceRenderer in index.html. Session-gated like the rest of /ui/api,
+    matching the protection the raw reference photo had before it was
+    replaced with these generated assets."""
+    if filename not in _AVATAR_ASSETS:
+        raise HTTPException(status_code=404, detail="not found")
+    path = AVATAR_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(path, media_type="video/mp4")
 
 
 @router.get("")

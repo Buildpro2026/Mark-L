@@ -361,41 +361,49 @@
             drop-shadow(0 8px 28px rgba(0,0,0,0.5));
     transition: filter .4s ease;
   }
-  /* ── The real-photo presence ─────────────────────────────────────────
-     Lee's actual likeness, layered over the ambient canvas (halo/ring/
-     particles still render behind and around it — see draw() below).
-     No pixel-level face rig: every AI cue (ring color/speed, halo glow,
-     whole-portrait lean/breathing) comes from the same --orb-state-color
-     and currentState the canvas already tracks, driven by updatePortrait()
-     in the orb script block. Ported from the Aegis concept artifact. */
-  #orb-portrait-wrap {
+  /* ── JARVIS's rendered likeness of Lee ───────────────────────────────
+     A real, locally-generated video of Lee (SadTalker for idle/listening/
+     thinking/tool/error motion, MuseTalk for audio-driven speaking) — never
+     the raw reference photo displayed directly, never a live camera feed.
+     Assets are pre-generated offline and served as static files (see
+     AVATAR_ASSETS in the orb script block below and /ui/api/avatar/asset/*
+     in ui.py) — nothing here calls a model at request time. This is the
+     single swap point for a future engine (on-demand cloud/GPU generation,
+     truly live per-utterance lip sync): replacing it only requires touching
+     AVATAR_ASSETS and FaceRenderer.update(), since both already consume the
+     same --orb-state-color / currentState signals as the rest of the orb.
+     Deliberately no Three.js/GLTF here — the earlier rigged 3D face was
+     reported "creepy" (see test_ui_command_center.py) and explicitly
+     replaced with the plain canvas orb this sits on top of. */
+  #orb-face-wrap {
     position: absolute; left: 50%; top: 50%; width: 74%; aspect-ratio: 1;
-    transform: translate(-50%, -50%); pointer-events: none; z-index: 1; perspective: 900px;
+    transform: translate(-50%, -50%); pointer-events: none; z-index: 1;
   }
-  #orb-portrait-ring {
+  #orb-face-ring {
     position: absolute; inset: -13%; border-radius: 50%; pointer-events: none;
     background: conic-gradient(from 0deg, transparent 0%, var(--orb-state-color) 10%, transparent 26%, transparent 100%);
     -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
     mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
-    animation: orb-portrait-ring-spin 8s linear infinite;
+    animation: orb-face-ring-spin 8s linear infinite;
     filter: drop-shadow(0 0 10px var(--orb-state-color));
     opacity: .85; transition: filter .4s ease;
   }
-  @keyframes orb-portrait-ring-spin { to { transform: rotate(360deg); } }
-  #orb-portrait-halo {
+  @keyframes orb-face-ring-spin { to { transform: rotate(360deg); } }
+  #orb-face-halo {
     position: absolute; inset: -30%; border-radius: 50%; pointer-events: none; z-index: -1;
     background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 30%, transparent), transparent 70%);
     filter: blur(6px); transition: background .4s ease;
   }
-  #orb-portrait-frame {
+  #orb-face-frame {
     position: relative; width: 100%; height: 100%; border-radius: 50%; overflow: hidden;
-    transform-style: preserve-3d; will-change: transform;
-    box-shadow: 0 0 0 2px rgba(255,255,255,.09), 0 14px 34px rgba(0,0,0,.5);
+    background: radial-gradient(circle at 50% 30%, #10151d, #05070a 78%);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.05), 0 14px 34px rgba(0,0,0,.5);
   }
-  #orb-portrait-frame img { width: 100%; height: 100%; object-fit: cover; display: block; filter: saturate(1.05) contrast(1.03); }
-  #orb-portrait-frame::after {
+  #orb-face-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #orb-face-frame::after {
     content: ""; position: absolute; inset: 0; pointer-events: none;
-    background: linear-gradient(135deg, rgba(255,255,255,.10), transparent 42%, transparent 68%, rgba(0,0,0,.2));
+    background: linear-gradient(135deg, rgba(255,255,255,.08), transparent 42%, transparent 68%, rgba(0,0,0,.22)),
+                repeating-linear-gradient(0deg, rgba(255,255,255,.025) 0px, rgba(255,255,255,.025) 1px, transparent 1px, transparent 3px);
   }
   #orb-resize-handle {
     position: absolute; width: 16px; height: 16px; right: -2px; bottom: 34px; border-radius: 50%;
@@ -914,11 +922,16 @@
 <div id="orb-widget">
   <div id="orb-resize-handle" title="Drag to resize"></div>
   <canvas id="orb-canvas"></canvas>
-  <div id="orb-portrait-wrap">
-    <div id="orb-portrait-halo"></div>
-    <div id="orb-portrait-ring"></div>
-    <div id="orb-portrait-frame">
-      <img id="orb-portrait-img" src="data:image/jpeg;base64,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" alt="">
+  <div id="orb-face-wrap">
+    <div id="orb-face-halo"></div>
+    <div id="orb-face-ring"></div>
+    <div id="orb-face-frame">
+      <!-- JARVIS's rendered likeness of Lee: a real, locally-generated video
+           (SadTalker for idle/listening/thinking/tool/error, MuseTalk for
+           audio-driven speaking) — never the raw reference photo displayed
+           directly. Source swapped by FaceRenderer based on currentState;
+           see AVATAR_ASSETS below and /ui/api/avatar/asset/* in ui.py. -->
+      <video id="orb-face-video" muted playsinline loop autoplay></video>
     </div>
   </div>
   <div id="orb-controls">
@@ -2123,56 +2136,63 @@ checkSession();
     return `rgb(${r}, ${g}, ${b})`;
   }
 
-  // ── portrait: Lee's real photo drives presence, the environment reacts
-  // around it. No pixel-level eye/mouth rig on the actual face — that would
-  // need real landmark tracking this page can't do and reads as a glitchy
-  // photo edit when faked; instead every AI cue (ring color/speed, halo
-  // glow, whole-portrait lean/breathing/tilt toward the pointer) comes from
-  // currentState, the same source of truth setOrbState already maintains.
-  const portraitFrame = document.getElementById("orb-portrait-frame");
-  const portraitRing = document.getElementById("orb-portrait-ring");
-  const portraitHalo = document.getElementById("orb-portrait-halo");
-  const STATE_MOTION = {
-    idle: { tilt: 0, bobAmp: 0.012, bobSpeed: 0.5, sway: 0.003, ringSpeed: 8 },
-    listening: { tilt: 0.5, bobAmp: 0.007, bobSpeed: 0.85, sway: 0.006, ringSpeed: 5.5 },
-    thinking: { tilt: -0.8, bobAmp: 0.004, bobSpeed: 1.3, sway: 0.012, ringSpeed: 2.4 },
-    tool: { tilt: 0.3, bobAmp: 0.005, bobSpeed: 1.05, sway: 0.006, ringSpeed: 3.6 },
-    speaking: { tilt: 0, bobAmp: 0.009, bobSpeed: 2.0, sway: 0.004, ringSpeed: 3.8 },
-    error: { tilt: -0.35, bobAmp: 0.004, bobSpeed: 3.2, sway: 0.01, ringSpeed: 1.3 },
-    interrupted: { tilt: -0.35, bobAmp: 0.004, bobSpeed: 3.2, sway: 0.01, ringSpeed: 1.3 },
+  // ── FaceRenderer: JARVIS's own rendered likeness of Lee — a real,
+  // locally-generated video (no photo pixels or synthetic drawing), swapped
+  // by currentState. idle/listening/thinking/tool/error/interrupted all
+  // share one SadTalker-generated natural-motion loop today (the ring/halo
+  // color+speed below already carries the per-state visual distinction,
+  // same as before); speaking swaps to a MuseTalk audio-driven clip. Both
+  // are pre-generated offline and served as static files — nothing here
+  // calls a model at request time, so switching states never blocks the
+  // UI. AVATAR_ASSETS + this object are the single seam for a future
+  // upgrade (distinct per-state loops, true on-demand live lip sync):
+  // everything else (ring/halo/canvas, currentState, priority engine)
+  // keeps working unchanged. Deliberately no Three.js/GLTF: the earlier
+  // rigged 3D face was reported "creepy" (see test_ui_command_center.py)
+  // and pulled for the plain canvas orb this sits on top of.
+  const AVATAR_ASSETS = {
+    idle: "/ui/api/avatar/asset/idle_loop.mp4",
+    speaking: "/ui/api/avatar/asset/speaking_sample.mp4",
   };
-  let pointerX = 0.5, pointerY = 0.42, hasPointer = false;
-  window.addEventListener("pointermove", (e) => {
-    hasPointer = true;
-    pointerX = e.clientX / window.innerWidth;
-    pointerY = e.clientY / window.innerHeight;
-  });
-  let headLean = 0, headTilt = 0, breathPhase = 0, lastPortraitT = 0;
-  function updatePortrait(t) {
-    if (!portraitFrame) return;
-    const dt = lastPortraitT ? Math.min(0.1, t - lastPortraitT) : 0;
-    lastPortraitT = t;
-    const motion = STATE_MOTION[currentState] || STATE_MOTION.idle;
-    const eyeX = hasPointer ? (pointerX - 0.5) : Math.sin(t * 0.15) * 0.15;
-    const eyeY = hasPointer ? (pointerY - 0.42) : Math.cos(t * 0.12) * 0.08;
-    breathPhase += dt * motion.bobSpeed * motionScale;
-    headLean += (motion.tilt - headLean) * Math.min(1, dt * 2.2);
-    const tiltTarget = eyeY * 5 + Math.sin(breathPhase * 0.6 + 1.3) * motion.sway * 40;
-    headTilt += (tiltTarget - headTilt) * Math.min(1, dt * 3);
-    const rotY = eyeX * 6 + headLean;
-    const scale = 1 + Math.sin(breathPhase) * motion.bobAmp;
-    const liftPx = Math.sin(breathPhase) * motion.bobAmp * 30;
-    portraitFrame.style.transform = `translateY(${liftPx}px) rotateX(${-headTilt}deg) rotateY(${rotY}deg) scale(${scale})`;
-    if (portraitRing) {
-      portraitRing.style.animationDuration = motion.ringSpeed + "s";
-      portraitRing.style.filter = `drop-shadow(0 0 ${8 + (currentState === "speaking" ? 6 : 0)}px var(--orb-state-color))`;
+  const STATE_RING_SPEED = {
+    idle: 8, listening: 5.5, thinking: 2.4, tool: 3.6, speaking: 3.8,
+    error: 1.3, interrupted: 1.3,
+  };
+  const FaceRenderer = (() => {
+    const video = document.getElementById("orb-face-video");
+    const ring = document.getElementById("orb-face-ring");
+    const halo = document.getElementById("orb-face-halo");
+    let currentAsset = null;
+
+    function assetForState(state) {
+      return state === "speaking" ? AVATAR_ASSETS.speaking : AVATAR_ASSETS.idle;
     }
-    if (portraitHalo) {
-      const pulse = currentState === "thinking" ? 0.22 * (0.5 + 0.5 * Math.sin(t * 2))
-        : currentState === "speaking" ? 0.18 * (0.5 + 0.5 * Math.sin(t * 9)) : 0;
-      portraitHalo.style.opacity = String(0.5 + pulse);
+
+    function syncVideo() {
+      if (!video) return;
+      const wanted = assetForState(currentState);
+      if (wanted === currentAsset) return;
+      currentAsset = wanted;
+      video.src = wanted;
+      video.play().catch(() => {}); // autoplay can be blocked pre-gesture; retried on next state change
     }
-  }
+
+    function update(t) {
+      syncVideo();
+      const ringSpeed = STATE_RING_SPEED[currentState] || STATE_RING_SPEED.idle;
+      if (ring) {
+        ring.style.animationDuration = ringSpeed + "s";
+        ring.style.filter = `drop-shadow(0 0 ${8 + (currentState === "speaking" ? 6 : 0)}px var(--orb-state-color))`;
+      }
+      if (halo) {
+        const pulse = currentState === "thinking" ? 0.22 * (0.5 + 0.5 * Math.sin(t * 2))
+          : currentState === "speaking" ? 0.18 * (0.5 + 0.5 * Math.sin(t * 9)) : 0;
+        halo.style.opacity = String(0.5 + pulse);
+      }
+    }
+
+    return { update };
+  })();
 
   function draw(t) {
     const size = orbCssSize;
@@ -2251,7 +2271,7 @@ checkSession();
     }
     ctx.shadowBlur = 0;
 
-    updatePortrait(t);
+    FaceRenderer.update(t);
 
     requestAnimationFrame((t2) => draw(t2 / 1000));
   }
