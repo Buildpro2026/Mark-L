@@ -75,7 +75,15 @@
   .field-label { display: block; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
 
   /* ── shell: orb-first command space ───────────────────────────────── */
-  #shell { display: none; height: 100vh; }
+  /* overflow-x:hidden here, not on any inner container: purely decorative
+     bleed effects (the avatar's ambient glow — see #orb-face-wrap::before
+     — has a deliberately negative inset so it spills past its own frame
+     into the panel behind it) were inflating the real page's scrollWidth
+     past the viewport at every width, producing an actual horizontal
+     scrollbar with nothing meaningful to see past the fold. Clipping at
+     the outermost shell boundary stops that without touching #content's
+     or #sidebar's own (vertical) scrolling. */
+  #shell { display: none; height: 100vh; overflow-x: hidden; }
   #shell.active { display: flex; }
   #sidebar {
     width: 208px; flex: none; background: var(--panel); border-right: 1px solid var(--line);
@@ -92,6 +100,23 @@
     border-radius: 8px; font-size: 12px; color: var(--text); cursor: pointer;
   }
   #approval-badge .count { font-weight: 700; background: var(--bad); color: #1a0505; padding: 1px 7px; border-radius: 8px; font-size: 11px; }
+  /* Same "impossible to miss" treatment as #approval-badge, for real
+     priority items (risks/follow-ups/recommendations — see
+     renderPriorityRow) that aren't waiting on an approval click but still
+     deserve more visibility than being buried in Home's list. Driven by
+     the same /ui/api/priorities fetch loadHomePriorities() already makes
+     every 30s — no extra request. Amber by default, escalates to the
+     same red as approvals only when a severity-4 (top tier) item is
+     present, so this doesn't cry wolf at the same volume for a stale
+     follow-up as for an actual risk. */
+  #priority-badge {
+    display: none; align-items: center; gap: 8px; margin: 0; padding: 9px 12px;
+    background: color-mix(in srgb, var(--hud-warning) 14%, transparent); border: 1px solid var(--hud-warning);
+    border-radius: 8px; font-size: 12px; color: var(--text); cursor: pointer;
+  }
+  #priority-badge.priority-badge-high { background: color-mix(in srgb, var(--bad) 14%, transparent); border-color: var(--bad); }
+  #priority-badge .count { font-weight: 700; background: var(--hud-warning); color: #1a1305; padding: 1px 7px; border-radius: 8px; font-size: 11px; }
+  #priority-badge.priority-badge-high .count { background: var(--bad); color: #1a0505; }
 
   /* ── 3D Command Center launcher — obvious, not a hidden URL ────────── */
   #command-center-link {
@@ -128,12 +153,21 @@
     background: color-mix(in srgb, var(--panel) 45%, transparent);
     border: 1px solid var(--line); border-radius: 8px;
   }
-  section.block::before, section.block::after {
+  /* #chat-wrap (Command) is the one top-level page panel that isn't a
+     <section class="block"> — it already shares that class's glass-panel
+     background (see the #chat-wrap rule further down) but was missing the
+     corner-bracket instrument framing every other panel in the app has.
+     Included here, not folded into .row-list generally, because several
+     pages nest a .row-list *inside* an already-bracketed section.block
+     (Tasks & Approvals, Agents) — bracketing those too would double-frame
+     them. */
+  section.block::before, section.block::after, #chat-wrap::before, #chat-wrap::after {
     content: ""; position: absolute; width: 9px; height: 9px; pointer-events: none;
     border: 1.5px solid color-mix(in srgb, var(--accent) 50%, transparent);
   }
-  section.block::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 4px; }
-  section.block::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; border-bottom-right-radius: 4px; }
+  section.block::before, #chat-wrap::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 4px; }
+  section.block::after, #chat-wrap::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; border-bottom-right-radius: 4px; }
+  #chat-wrap { position: relative; }
   section.block h2 {
     font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim);
     margin: 0 0 10px; padding: 0 0 8px 10px; border-bottom: 1px solid var(--line);
@@ -232,9 +266,17 @@
   .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } #sidebar { width: 168px; } }
 
-  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
+  /* A fine top accent line, not a full bracket frame — stat tiles are
+     small and repeated (three to a row), so the full corner-bracket
+     treatment reads as visual noise here; a single technical line in the
+     same state color the number already uses is enough to tie them into
+     the same HUD language without turning the dashboard neon. */
+  .stat { position: relative; background: var(--panel); border: 1px solid var(--line); border-top: 2px solid var(--line-strong); border-radius: 6px; padding: 14px 16px; }
   .stat .num { font-family: var(--mono); font-size: 22px; font-weight: 600; }
   .stat .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+  .stat.warn { border-top-color: var(--hud-warning); }
+  .stat.bad { border-top-color: var(--hud-error); }
+  .stat.ok { border-top-color: var(--hud-success); }
   .stat.warn .num { color: var(--warn); }
   .stat.bad .num { color: var(--bad); }
   .stat.ok .num { color: var(--ok); }
@@ -628,7 +670,7 @@
   #page-home .page-head { display: none; }
   #home-greeting { max-width: 540px; margin: 0 auto 28px; text-align: center; font-size: 16px; }
   #page-home .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 980px; margin: 0 auto; }
-  #page-home section.block, .page:not(#page-home) section.block, .page:not(#page-home) .row-list, #chat-wrap, #buildpro-body, #ddf-body, #intelligence-body, #ceo-body {
+  #page-home section.block, .page:not(#page-home) section.block, .page:not(#page-home) .row-list, #chat-wrap, #buildpro-body, #ddf-body, #intelligence-body, #ceo-body, #careerrocket-body {
     background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--line); border-radius: 18px;
     backdrop-filter: blur(12px); padding: 16px 18px; box-shadow: 0 20px 70px rgba(0,0,0,.13);
   }
@@ -651,7 +693,7 @@
   .page:not(#page-home) { max-width: 900px; margin: 0 auto; }
   .page:not(#page-home) section.block { margin-bottom: 18px; }
   #chat-wrap { max-width: 780px; }
-  #buildpro-body, #ddf-body, #intelligence-body, #ceo-body { padding: 18px; }
+  #buildpro-body, #ddf-body, #intelligence-body, #ceo-body, #careerrocket-body { padding: 18px; }
   #orb-input-row input { font-size: 13px; padding: 10px 15px; }
   #orb-state-label { color: var(--accent); }
   @media (max-width: 900px) {
@@ -704,7 +746,7 @@
     #orb-input-row, #orb-state-label { display: none; }
   }
   @media (max-width: 640px) {
-    .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text, .ch-sys-status { display: none; }
+    .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text, #priority-badge-text, .ch-sys-status { display: none; }
     #content { padding: 20px 16px 80px; }
     #page-home { padding-top: 0; }
     #page-home .grid2 { grid-template-columns: 1fr; }
@@ -742,6 +784,7 @@
       <span class="ch-stat ch-stat-agents" title="Agents actively working right now"><b id="header-agent-count">0</b><label>Agents</label></span>
       <span class="ch-stat ch-stat-objective" title="Strategic objective progress"><b id="header-objective-pct">—</b><label>Objective</label></span>
       <div id="approval-badge"><span id="approval-badge-text">Tasks waiting on you</span><span class="count" id="approval-count">0</span></div>
+      <div id="priority-badge" title="Real priority items flagged by JARVIS — risks, follow-ups, and recommendations. Click to review."><span id="priority-badge-text">Needs attention</span><span class="count" id="priority-count">0</span></div>
       <span class="ch-stat ch-clock" id="header-clock"></span>
     </div>
     <button class="ghost ch-logout" id="logout-btn">Log out</button>
@@ -755,6 +798,7 @@
         <button class="nav-item" data-report="ceo" type="button"><span class="nav-marker"></span>CEO Brief</button>
         <button class="nav-item" data-report="buildpro" type="button"><span class="nav-marker"></span>BuildPro</button>
         <button class="nav-item" data-report="ddf" type="button"><span class="nav-marker"></span>DDF</button>
+        <button class="nav-item" data-report="careerrocket" type="button"><span class="nav-marker"></span>CareerRocket</button>
         <button class="nav-item" data-report="intelligence" type="button"><span class="nav-marker"></span>Intelligence</button>
         <button class="nav-item" data-report="knowledge" type="button"><span class="nav-marker"></span>Knowledge</button>
         <button class="nav-item" data-report="communications" type="button"><span class="nav-marker"></span>Communications</button>
@@ -853,6 +897,21 @@
       <div id="ddf-body"><div class="empty">Loading…</div></div>
     </div>
 
+    <!-- CareerRocket — no dedicated resume/application/job-match data
+         model exists in the backend yet (see actions/business_intelligence.py's
+         BUSINESSES set and agent_orchestrator's business tag — "careerrocket"
+         is a real category agents/opportunities/research entries are
+         already tagged with, same as buildpro/ddf, but there is no
+         resumes.py or applications store to surface). This page is
+         therefore built from the SAME real, already-working cross-business
+         feeds BuildPro/DDF/Intelligence use, filtered to business ===
+         "careerrocket" — never invented resume/application counts. -->
+    <div class="page" id="page-careerrocket">
+      <div class="page-head"><h1>CareerRocket</h1><button class="ghost small" id="refresh-careerrocket-btn">Refresh</button></div>
+      <div class="knowledge-intro">Resume intake, job-match scoring, and application tracking aren't wired into JARVIS's data model yet. This page reflects what JARVIS already tracks for CareerRocket today — research, ranked opportunities, and agent activity — the same categories every other business page here draws from.</div>
+      <div id="careerrocket-body"><div class="empty">Loading…</div></div>
+    </div>
+
     <!-- Intelligence -->
     <div class="page" id="page-intelligence">
       <div class="page-head"><h1>Intelligence</h1><button class="ghost small" id="refresh-intel-btn">Refresh</button></div>
@@ -871,20 +930,21 @@
         <span class="sub" id="knowledge-count-label">JARVIS Brain</span>
         <button class="ghost small" id="refresh-knowledge-btn">Refresh</button>
       </div>
-      <div id="knowledge-body">
-        <div class="knowledge-intro">The real notes JARVIS consults before executive decisions — founder context, company facts, SOPs, and past decisions from <code>knowledge/JARVIS Brain/</code>.</div>
-        <div class="knowledge-search">
-          <input id="knowledge-search-input" type="text" placeholder="Search the Brain…" autocomplete="off" />
-          <button id="knowledge-search-btn" class="small">Search</button>
-          <button id="knowledge-clear-btn" class="ghost small">All notes</button>
-        </div>
+      <div class="knowledge-intro">The real notes JARVIS consults before executive decisions — founder context, company facts, SOPs, and past decisions from <code>knowledge/JARVIS Brain/</code>.</div>
+      <div class="knowledge-search">
+        <input id="knowledge-search-input" type="text" placeholder="Search the Brain…" autocomplete="off" />
+        <button id="knowledge-search-btn" class="small">Search</button>
+        <button id="knowledge-clear-btn" class="ghost small">All notes</button>
+      </div>
+      <section class="block" id="knowledge-body">
+        <h2>JARVIS Brain</h2>
         <div id="knowledge-list" class="row-list"><div class="empty">Loading…</div></div>
         <div id="knowledge-reader" style="display:none">
           <div class="knowledge-reader-back" id="knowledge-reader-back">&lsaquo; Back to Brain</div>
           <div class="knowledge-reader-path" id="knowledge-reader-path"></div>
           <pre id="knowledge-reader-content"></pre>
         </div>
-      </div>
+      </section>
     </div>
 
     <!-- Communications — real connection status only, via the existing
@@ -894,7 +954,10 @@
     <div class="page" id="page-communications">
       <div class="page-head"><h1>Communications</h1><button class="ghost small" id="refresh-communications-btn">Refresh</button></div>
       <div class="knowledge-intro">Real connection status for JARVIS's external systems — a channel showing CONNECTED means credentials are present and verified, not that live message content is pulled in here yet.</div>
-      <div id="communications-body"><div class="empty">Loading…</div></div>
+      <section class="block">
+        <h2>Integration Status</h2>
+        <div id="communications-body"><div class="empty">Loading…</div></div>
+      </section>
     </div>
 
     <!-- Agents -->
@@ -935,7 +998,10 @@
     <div class="page" id="page-history">
       <div class="page-head"><h1>History</h1><button class="ghost small" id="refresh-history-btn">Refresh</button></div>
       <div class="search-row"><input id="history-search" placeholder="Search history…"></div>
-      <div class="row-list" id="history-list"><div class="empty">Loading…</div></div>
+      <section class="block">
+        <h2>Activity History</h2>
+        <div class="row-list" id="history-list"><div class="empty">Loading…</div></div>
+      </section>
     </div>
 
     <!-- Settings -->
@@ -1185,6 +1251,7 @@ document.querySelectorAll('.nav-item[data-report]').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.report));
 });
 $('approval-badge').addEventListener('click', () => switchTab('tasks'));
+$('priority-badge').addEventListener('click', () => switchTab('home'));
 document.querySelectorAll('.home-stat-card[data-report]').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.report));
 });
@@ -1203,6 +1270,17 @@ async function loadHomePriorities() {
     const r = await api('/ui/api/priorities?limit=6');
     const items = r.priorities || [];
     el.innerHTML = items.length ? items.map(renderPriorityRow).join('') : '<div class="empty">Nothing urgent right now.</div>';
+    // Header "needs attention" badge — same fetch, no extra request. Only
+    // counts severity>=3 (risk/urgent-followup tier, matching .priority-row's
+    // own accent threshold) so a quiet week shows nothing rather than
+    // crying wolf over routine low-severity follow-ups.
+    const flagged = items.filter(p => p.severity >= 3);
+    const badge = $('priority-badge');
+    if (badge) {
+      badge.style.display = flagged.length ? 'flex' : 'none';
+      badge.classList.toggle('priority-badge-high', flagged.some(p => p.severity >= 4));
+      $('priority-count').textContent = flagged.length;
+    }
   } catch (e) {
     el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
   }
@@ -1695,6 +1773,45 @@ async function loadIntelligence() {
 }
 $('refresh-intel-btn').addEventListener('click', loadIntelligence);
 
+/* ── CareerRocket — filters the same cross-business feeds Intelligence
+   uses down to business === "careerrocket", plus the real agent roster
+   from Agents (agentsCache) filtered the same way. See the page markup
+   comment for why there's no resume/application section: that data
+   doesn't exist in the backend, so it isn't shown as if it did. ── */
+async function loadCareerRocket() {
+  const el = $('careerrocket-body');
+  try {
+    const d = await api('/ui/api/intelligence');
+    const opps = (d.opportunities || []).filter(o => o.business === 'careerrocket');
+    const entries = (d.recent_entries || []).filter(e => e.business === 'careerrocket');
+    const agents = agentsCache.filter(a => a.business === 'careerrocket');
+    el.innerHTML = `
+      <div class="grid3" style="margin-bottom:22px">
+        <div class="stat"><div class="num">${agents.length}</div><div class="lbl">Agents</div></div>
+        <div class="stat"><div class="num">${opps.length}</div><div class="lbl">Opportunities</div></div>
+        <div class="stat"><div class="num">${entries.length}</div><div class="lbl">Research entries</div></div>
+      </div>
+      <section class="block">
+        <h2>Opportunities</h2>
+        <div class="row-list">${opps.map(o => `<div class="row"><div class="main"><div class="title">${escapeHtml(o.title)}</div><div class="detail">${escapeHtml(o.opp_type)} · score ${o.score}</div></div></div>`).join('') || '<div class="empty">No CareerRocket opportunities logged yet.</div>'}</div>
+      </section>
+      <div class="grid2">
+        <section class="block">
+          <h2>Research &amp; findings</h2>
+          <div class="row-list">${entries.map(e => `<div class="row"><div class="main"><div class="title">${escapeHtml(e.title)}</div><div class="detail">${escapeHtml(e.category)}</div></div></div>`).join('') || '<div class="empty">Nothing logged yet.</div>'}</div>
+        </section>
+        <section class="block">
+          <h2>Agent activity</h2>
+          <div class="row-list">${agents.map(a => `<div class="row"><div class="main"><div class="title"><span class="badge ${a.status === 'running' ? 'running' : (a.status === 'error' ? 'bad' : 'idle')}">${escapeHtml(a.status)}</span> ${escapeHtml(a.name)}</div><div class="detail">${agentWhat(a, null, null)}</div></div></div>`).join('') || '<div class="empty">No CareerRocket agents registered.</div>'}</div>
+        </section>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+$('refresh-careerrocket-btn').addEventListener('click', () => loadAgents().then(loadCareerRocket));
+
 /* ── Knowledge / JARVIS Brain — real data only, via the existing
    /3d/api/module/knowledge endpoint (see the page markup comment for
    why this reuses that route instead of duplicating backend code). ── */
@@ -1945,7 +2062,10 @@ setInterval(() => {
     el.textContent = secs < 60 ? `running ${secs}s` : `running ${Math.floor(secs / 60)}m ${secs % 60}s`;
   });
 }, 1000);
-setInterval(() => { if ($('page-agents').classList.contains('active')) loadAgents(); }, 10000);
+setInterval(() => {
+  if ($('page-agents').classList.contains('active')) loadAgents();
+  if ($('page-careerrocket').classList.contains('active')) loadAgents().then(loadCareerRocket);
+}, 10000);
 
 $('assign-task-btn').addEventListener('click', async () => {
   const agent_id = $('task-agent').value;
@@ -1983,17 +2103,24 @@ async function loadTasksAndApprovals() {
       if (homeObjRing) homeObjRing.innerHTML = pct === null ? '' : renderRadialMetric(pct, { size: 40, stroke: 4, colorVar: '--hud-active' });
     }
 
-    approvalsEl.innerHTML = approvals.length ? approvals.map(t => `
-      <div class="row">
+    approvalsEl.innerHTML = approvals.length ? approvals.map(t => {
+      // agentsCache is populated by loadAgents(), called at startup
+      // alongside this — falls back to the raw id on the rare chance this
+      // renders before that first fetch resolves.
+      const agent = agentsCache.find(a => a.id === t.agent_id);
+      const ago = timeAgo(t.created_ts);
+      return `
+      <div class="row priority-row priority-medium">
         <div class="main">
-          <div class="title">${escapeHtml(t.agent_id)}</div>
-          <div class="detail">${escapeHtml(t.description || '')}</div>
+          <div class="title"><span class="status-dot processing"></span> <span class="hud-label">Pending approval</span> ${escapeHtml(agent ? agent.name : t.agent_id)}</div>
+          <div class="detail">${escapeHtml(t.description || '')}${ago ? ' · requested ' + ago : ''}</div>
         </div>
         <div class="actions">
           <button class="small" onclick="approveTask('${t.id}')">Approve</button>
           <button class="small danger" onclick="rejectTask('${t.id}')">Reject</button>
         </div>
-      </div>`).join('') : '<div class="empty">Nothing waiting on you right now.</div>';
+      </div>`;
+    }).join('') : '<div class="empty">Nothing waiting on you right now.</div>';
 
     const events = r.events || [];
     recentEl.innerHTML = events.length ? events.slice(0, 20).map(e => `
@@ -2159,7 +2286,7 @@ function loadAll() {
   loadIntelligence();
   loadKnowledge();
   loadCommunications();
-  loadAgents();
+  loadAgents().then(loadCareerRocket);
   loadTasksAndApprovals();
   loadHistory();
   loadTools();
@@ -2208,7 +2335,7 @@ checkSession();
   // everywhere it's already wired (SSE handlers, tests); only the text a
   // person reads changes, so "JARVIS is executing" replaces "Tool" without
   // touching any of the event plumbing above.
-  const STATE_LABELS = { tool: "Executing", offline: "Offline", success: "Success" };
+  const STATE_LABELS = { idle: "Ready", tool: "Executing", offline: "Offline", success: "Success" };
   const widget = document.getElementById("orb-widget");
   const canvas = document.getElementById("orb-canvas");
   const stateLabel = document.getElementById("orb-state-label");
