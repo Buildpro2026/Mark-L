@@ -111,12 +111,66 @@
   .page-head h1 { font-size: 17px; margin: 0; letter-spacing: 0.01em; }
   .page-head .sub { color: var(--muted); font-size: 12px; }
 
-  section.block { margin-bottom: 26px; }
-  section.block h2 {
-    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim);
-    margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
-    display: flex; justify-content: space-between; align-items: center;
+  /* ── HUD design system ────────────────────────────────────────────────
+     One shared upgrade to the primitives every existing page already
+     uses (section.block, h2, .row) — every report (Home, Command, CEO
+     Brief, BuildPro, DDF, Intelligence, Knowledge, Communications,
+     Agents, Tasks, History) picks up the technical-instrument look at
+     once, with no per-page rewrite and no new data. Restrained on
+     purpose: two corner accents per panel, not four — this is a CEO's
+     operating system, not a HUD from a game. */
+  :root {
+    --hud-active: var(--accent); --hud-processing: #b98bff; --hud-success: #34d17c;
+    --hud-warning: var(--warn); --hud-error: var(--bad); --hud-offline: #5a6470;
   }
+  section.block {
+    position: relative; margin-bottom: 22px; padding: 16px 18px 14px;
+    background: color-mix(in srgb, var(--panel) 45%, transparent);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  section.block::before, section.block::after {
+    content: ""; position: absolute; width: 9px; height: 9px; pointer-events: none;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+  section.block::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 4px; }
+  section.block::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; border-bottom-right-radius: 4px; }
+  section.block h2 {
+    font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim);
+    margin: 0 0 10px; padding: 0 0 8px 10px; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center; position: relative;
+  }
+  section.block h2::before {
+    content: ""; position: absolute; left: 0; top: 1px; bottom: 9px; width: 2px;
+    background: var(--accent); opacity: .55;
+  }
+  /* Small uppercase technical label + status-dot — the shared building
+     blocks for "system status" style readouts (see #command-header and
+     the Home live-activity panel below). */
+  .hud-label { font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+  .status-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex: none;
+    background: var(--hud-offline);
+  }
+  .status-dot.active { background: var(--hud-active); box-shadow: 0 0 6px color-mix(in srgb, var(--hud-active) 70%, transparent); }
+  .status-dot.processing { background: var(--hud-processing); animation: hud-dot-pulse 1.3s ease-in-out infinite; }
+  .status-dot.success { background: var(--hud-success); }
+  .status-dot.warning { background: var(--hud-warning); }
+  .status-dot.error { background: var(--hud-error); animation: hud-dot-pulse 0.8s ease-in-out infinite; }
+  @keyframes hud-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+  /* Radial metric: a compact SVG progress ring + center value, built via
+     renderRadialMetric() below — reusable wherever a real 0-100 number
+     exists (objective %, agent load, etc.), never a decorative filler. */
+  .radial-metric { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .radial-metric svg { display: block; }
+  .radial-metric .rm-track { fill: none; stroke: var(--line-strong); }
+  .radial-metric .rm-fill { fill: none; stroke-linecap: round; transition: stroke-dasharray .5s ease; }
+  .radial-metric .rm-value { font-size: 11px; font-weight: 700; fill: var(--text); }
+  .radial-metric .rm-label { margin-top: -2px; }
+  /* Priority rows: a colored left accent by severity, not a wall of red —
+     "what needs my attention" should read at a glance without shouting. */
+  .priority-row { border-left: 2px solid var(--line-strong); padding-left: 10px !important; margin-left: -1px; }
+  .priority-row.priority-high { border-left-color: var(--hud-error); }
+  .priority-row.priority-medium { border-left-color: var(--hud-warning); }
   .row-list { display: flex; flex-direction: column; }
   .row {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -187,7 +241,8 @@
 
   .risk-item { border-left: 2px solid var(--bad); padding: 8px 0 8px 12px; margin-bottom: 8px; font-size: 12px; }
   .risk-item .kind { color: var(--bad); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; font-weight: 700; }
-  .priority-item { border-left: 2px solid var(--line-strong); padding: 8px 0 8px 12px; margin-bottom: 6px; font-size: 13px; }
+  .priority-item { display: flex; align-items: baseline; gap: 7px; border-left: 2px solid var(--line-strong); padding: 8px 0 8px 12px; margin-bottom: 6px; font-size: 13px; }
+  .priority-item .status-dot { position: relative; top: 1px; }
   .priority-item.sev-4 { border-left-color: var(--bad); }
   .priority-item.sev-3 { border-left-color: var(--warn); }
   .priority-item.sev-2 { border-left-color: var(--accent); }
@@ -511,6 +566,7 @@
   .ch-stat { display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
   .ch-stat b { font-size: 13px; color: var(--text); font-weight: 700; }
   .ch-stat label { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+  .ch-sys-status { gap: 12px; padding-left: 12px; border-left: 1px solid var(--line); margin-left: 4px; }
   #mic-status {
     padding: 4px 10px 4px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-alt);
     transition: border-color .25s ease, background .25s ease;
@@ -590,8 +646,8 @@
   .home-stat-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--panel) 88%, transparent); }
   .hsc-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
   .hsc-value { font-size: 14px; font-weight: 700; color: var(--text); }
-  .hsc-bar { margin-top: 8px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--line-strong) 100%, transparent); overflow: hidden; }
-  .hsc-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width .4s ease; }
+  .hsc-with-ring { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .hsc-with-ring .radial-metric { flex: none; }
   .page:not(#page-home) { max-width: 900px; margin: 0 auto; }
   .page:not(#page-home) section.block { margin-bottom: 18px; }
   #chat-wrap { max-width: 780px; }
@@ -616,7 +672,7 @@
     #command-center-link.nav-item { margin-top: 0; margin-left: 6px; }
   }
   @media (max-width: 640px) {
-    .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text { display: none; }
+    .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text, .ch-sys-status { display: none; }
     #content { padding: 20px 16px 80px; }
     #page-home { padding-top: 0; }
     #page-home .grid2 { grid-template-columns: 1fr; }
@@ -642,6 +698,10 @@
     <div class="ch-group ch-brand-group">
       <span class="brand"><span class="dot" id="conn-dot"></span> JARVIS</span>
       <span id="identity-badge">Executive</span>
+      <span class="ch-stat ch-sys-status" title="From the same /health check the Command page's connection status uses">
+        <span class="hud-label" id="header-network-label">NETWORK —</span>
+        <span class="hud-label" id="header-ai-label">AI —</span>
+      </span>
     </div>
     <div class="ch-group ch-mode-group">
       <span class="ch-stat" id="mic-status" title="Voice state"><span class="mic-dot" id="mic-dot"></span><span id="mic-label">Idle</span></span>
@@ -712,12 +772,18 @@
           <div class="hsc-label">JARVIS Brain</div>
           <div class="hsc-value" id="home-knowledge-value">—</div>
         </button>
-        <button class="home-stat-card" data-report="ceo" type="button">
-          <div class="hsc-label">Strategic Objective</div>
-          <div class="hsc-value" id="home-objective-value">—</div>
-          <div class="hsc-bar"><div class="hsc-bar-fill" id="home-objective-bar"></div></div>
+        <button class="home-stat-card hsc-with-ring" data-report="ceo" type="button">
+          <div>
+            <div class="hsc-label">Strategic Objective</div>
+            <div class="hsc-value" id="home-objective-value">—</div>
+          </div>
+          <div class="radial-metric" id="home-objective-ring"></div>
         </button>
       </div>
+      <section class="block" id="home-activity-block" style="margin-top: 22px;">
+        <h2>Live System Activity</h2>
+        <div class="row-list" id="home-activity"><div class="empty">Loading…</div></div>
+      </section>
     </div>
 
     <!-- Command -->
@@ -1018,10 +1084,16 @@ async function pollHealth() {
     const h = await api('/health');
     $('conn-dot').className = 'dot ok';
     $('conn-text').textContent = `connected · uptime ${Math.round(h.uptime_seconds)}s`;
+    // Same /health payload — not a second, separately-invented status
+    // source — also drives the header's NETWORK/AI readouts.
+    $('header-network-label').textContent = 'NETWORK ONLINE';
+    $('header-ai-label').textContent = 'AI ' + (h.provider_selected ? h.provider_selected.toUpperCase() : '—');
     if (window.setOrbReason) window.setOrbReason('offline', false);
   } catch (e) {
     $('conn-dot').className = 'dot bad';
     $('conn-text').textContent = 'disconnected';
+    $('header-network-label').textContent = 'NETWORK OFFLINE';
+    $('header-ai-label').textContent = 'AI —';
     // Same /health check the connection dot above already used — not a
     // second, separately-invented signal. Outranks every other orb state
     // (see PRIORITY): none of them mean anything while the backend is
@@ -1088,7 +1160,9 @@ document.querySelectorAll('.home-stat-card[data-report]').forEach(btn => {
 /* ── Home ──────────────────────────────────────────────────────────── */
 function renderPriorityRow(p) {
   const kindLabel = { risk: 'Risk', approval: 'Approval needed', followup: 'Follow-up', recommendation: 'Recommendation' }[p.kind] || p.kind;
-  return `<div class="priority-item sev-${p.severity}"><b>${escapeHtml(kindLabel)}</b> — ${escapeHtml(p.title)}</div>`;
+  const dotClass = p.severity >= 4 ? 'error' : p.severity >= 3 ? 'warning' : 'active';
+  const rowClass = p.severity >= 4 ? 'priority-high' : p.severity >= 3 ? 'priority-medium' : '';
+  return `<div class="priority-item priority-row ${rowClass} sev-${p.severity}"><span class="status-dot ${dotClass}"></span><span class="hud-label">${escapeHtml(kindLabel)}</span> — ${escapeHtml(p.title)}</div>`;
 }
 
 async function loadHomePriorities() {
@@ -1178,12 +1252,49 @@ async function renderGreeting() {
   }
 }
 
+function renderRadialMetric(pct, opts) {
+  const o = Object.assign({ size: 40, stroke: 4, colorVar: '--hud-active' }, opts);
+  const r = (o.size - o.stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const p = Math.max(0, Math.min(100, pct));
+  const dash = (p / 100) * c;
+  const cx = o.size / 2, cy = o.size / 2;
+  return `<svg width="${o.size}" height="${o.size}" viewBox="0 0 ${o.size} ${o.size}">
+    <circle class="rm-track" cx="${cx}" cy="${cy}" r="${r}" stroke-width="${o.stroke}"></circle>
+    <circle class="rm-fill" cx="${cx}" cy="${cy}" r="${r}" stroke-width="${o.stroke}" stroke="var(${o.colorVar})"
+      stroke-dasharray="${dash} ${c}" transform="rotate(-90 ${cx} ${cy})"></circle>
+    <text class="rm-value" x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central">${Math.round(p)}</text>
+  </svg>`;
+}
+
+function _activityDotClass(kind) {
+  const k = String(kind || '').toLowerCase();
+  if (/error|fail|bad|reject/.test(k)) return 'error';
+  if (/pending|due|running/.test(k)) return 'processing';
+  if (/ok|success|complete|approved/.test(k)) return 'success';
+  return 'active';
+}
+
+async function loadHomeActivity() {
+  const el = $('home-activity');
+  try {
+    const r = await api('/ui/api/activity?limit=8');
+    const items = r.activity || [];
+    el.innerHTML = items.length ? items.map(a => `
+      <div class="row"><div class="main"><div class="title"><span class="status-dot ${_activityDotClass(a.kind)}"></span> <span class="hud-label">${escapeHtml(a.source || '')}</span> ${escapeHtml(a.message || a.kind || '')}</div></div></div>
+    `).join('') : '<div class="empty">No recent activity.</div>';
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+  }
+}
+
 function loadHome() {
   renderGreeting();
   loadHomePriorities();
   loadHomeCalendar();
   loadHomeAgents();
   loadHomeOpportunities();
+  loadHomeActivity();
 }
 
 /* ── Command (chat) ───────────────────────────────────────────────── */
@@ -1833,11 +1944,11 @@ async function loadTasksAndApprovals() {
     const objEl = $('header-objective-pct');
     if (objEl) objEl.textContent = (typeof objective.progress_pct === 'number') ? objective.progress_pct + '%' : '—';
     const homeObjVal = $('home-objective-value');
-    const homeObjBar = $('home-objective-bar');
+    const homeObjRing = $('home-objective-ring');
     if (homeObjVal) {
       const pct = typeof objective.progress_pct === 'number' ? Math.max(0, Math.min(100, objective.progress_pct)) : null;
-      homeObjVal.textContent = pct === null ? '—' : `$${Math.round(objective.cumulative_revenue_usd || 0).toLocaleString()} of $${Math.round(objective.target_amount_usd || 0).toLocaleString()} (${pct}%)`;
-      if (homeObjBar) homeObjBar.style.width = (pct || 0) + '%';
+      homeObjVal.textContent = pct === null ? '—' : `$${Math.round(objective.cumulative_revenue_usd || 0).toLocaleString()} of $${Math.round(objective.target_amount_usd || 0).toLocaleString()}`;
+      if (homeObjRing) homeObjRing.innerHTML = pct === null ? '' : renderRadialMetric(pct, { size: 40, stroke: 4, colorVar: '--hud-active' });
     }
 
     approvalsEl.innerHTML = approvals.length ? approvals.map(t => `
