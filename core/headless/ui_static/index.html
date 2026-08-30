@@ -19,6 +19,12 @@
     --warn: #e0a83c;
     --bad: #e0555c;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    /* JARVIS's presence panel width — the one place this is ever set.
+       Everything that positions/sizes #orb-widget (base rule, left/right/
+       center variants, the tablet/mobile collapse) reads this instead of
+       repeating a literal px value, so resizing JARVIS's footprint is a
+       one-line change, not a hunt through every breakpoint. */
+    --avatar-panel-width: 280px;
   }
   /* Business identity - accent color only. Same environment, same
      layout, same everything else - per Part 5, business identity is a
@@ -40,6 +46,13 @@
     }
   }
 
+  /* One branded focus ring for every interactive element instead of the
+     browser default (a plain blue ring would clash with the rest of the
+     visual system) or, worse, no visible focus at all — keyboard
+     navigation must stay usable everywhere clickable things exist. */
+  :focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; border-radius: 2px;
+  }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
@@ -482,7 +495,7 @@
   #orb-widget {
     /* Hidden until showShell() reveals it — see showLogin()'s comment. */
     display: none; flex-direction: column; align-items: center; gap: 14px;
-    width: 240px; flex-shrink: 0; padding: 20px 16px; box-sizing: border-box;
+    width: var(--avatar-panel-width); flex-shrink: 0; padding: 20px 16px; box-sizing: border-box;
     background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, transparent), var(--panel));
     border-left: 1px solid var(--line); border-right: 1px solid var(--line);
     position: relative; z-index: 10;
@@ -496,6 +509,15 @@
     box-shadow: 0 20px 50px rgba(0,0,0,.5); backdrop-filter: blur(10px);
   }
   body[data-avatar-position="center"] #orb-face-wrap { width: 72px; }
+  /* Center position turns #orb-widget into a horizontal bar (see above),
+     so the presence/command seam becomes a vertical divider on the left
+     instead of a horizontal one on top, and the dock stops trying to
+     claim 100% of a row it's sharing with the frame + state label. */
+  body[data-avatar-position="center"] .orb-command-dock {
+    width: auto; flex-direction: row; border-top: 0; border-left: 1px solid var(--line);
+    padding-top: 0; padding-left: 18px;
+  }
+  body[data-avatar-position="center"] .orb-command-dock-label { display: none; }
   /* State color reads on the visible HUD frame now, not the hidden canvas
      (see #orb-canvas below) — same six states, same colors as before. */
   #orb-widget.listening #orb-face-frame { box-shadow: 0 0 0 2px var(--bad), inset 0 0 0 1px rgba(255,255,255,.05); }
@@ -657,6 +679,15 @@
   #orb-mic-btn.listening { background: var(--bad); color: #1a0505; border-color: var(--bad); animation: orb-mic-pulse 1.1s infinite; }
   @keyframes orb-mic-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(224,85,92,0.5); } 50% { box-shadow: 0 0 0 9px rgba(224,85,92,0); } }
   .orb-control:has(#orb-mic-btn) .orb-caption { font-weight: 700; color: color-mix(in srgb, var(--accent) 70%, var(--dim)); }
+  /* The command dock: everything JARVIS can be TOLD, visually seamed off
+     from everything above that shows what JARVIS IS (the frame). A thin
+     top divider plus a small caption is the whole seam — restrained, not
+     a second panel-in-a-panel. */
+  .orb-command-dock {
+    width: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding-top: 14px; border-top: 1px solid var(--line);
+  }
+  .orb-command-dock-label { text-align: center; }
   #orb-input-row { width: 100%; }
   #orb-input-row input {
     width: 100%; text-align: center; border-radius: 999px; font-size: 12px; padding: 8px 14px;
@@ -889,6 +920,8 @@
       border-radius: 0; box-shadow: none; backdrop-filter: none;
     }
     #orb-face-wrap, body[data-avatar-position="center"] #orb-face-wrap { width: 56px; flex: none; }
+    .orb-command-dock { width: auto; flex-direction: row; border-top: 0; padding-top: 0; }
+    .orb-command-dock-label { display: none; }
     #orb-controls { align-items: center; }
     .orb-control .orb-caption { display: none; }
     .orb-icon-btn { width: 28px; height: 28px; }
@@ -961,8 +994,9 @@
         <button class="nav-item" data-report="careerrocket" type="button"><span class="nav-marker"></span>CareerRocket</button>
         <button class="nav-item" data-report="intelligence" type="button"><span class="nav-marker"></span>Intelligence</button>
         <button class="nav-item" data-report="knowledge" type="button"><span class="nav-marker"></span>Knowledge</button>
-        <div class="nav-section-label">Operations</div>
+        <div class="nav-section-label">Communications</div>
         <button class="nav-item" data-report="communications" type="button"><span class="nav-marker"></span>Communications</button>
+        <div class="nav-section-label">Operations</div>
         <button class="nav-item" data-report="agents" type="button"><span class="nav-marker"></span>Agents</button>
         <button class="nav-item" data-report="tasks" type="button"><span class="nav-marker"></span>Tasks &amp; Approvals</button>
         <button class="nav-item" data-report="history" type="button"><span class="nav-marker"></span>History</button>
@@ -1295,29 +1329,38 @@
         <div class="hud-corner hud-corner-bl"></div>
         <div class="hud-corner hud-corner-br"></div>
       </div>
-      <div id="orb-controls">
-        <div class="orb-control">
-          <button id="orb-mic-btn" class="orb-icon-btn" type="button" title="Click, then speak">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18v3"/></svg>
-          </button>
-          <span class="orb-caption">Talk</span>
+      <!-- Everything JARVIS can be TOLD, as opposed to everything above
+           that shows what JARVIS IS — a deliberate seam so the panel
+           reads as "presence, then command," not a stack of unrelated
+           controls under a photo. Ids/JS bindings on the children are
+           unchanged; this only adds a wrapping parent for the divider
+           and label. -->
+      <div class="orb-command-dock">
+        <div class="orb-command-dock-label hud-label">Tell JARVIS what you need</div>
+        <div id="orb-controls">
+          <div class="orb-control">
+            <button id="orb-mic-btn" class="orb-icon-btn" type="button" title="Click, then speak">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18v3"/></svg>
+            </button>
+            <span class="orb-caption">Talk</span>
+          </div>
+          <div class="orb-control">
+            <button id="orb-continuous-toggle" class="orb-icon-btn" type="button" title="Keep listening after every reply, instead of one click per turn">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+            </button>
+            <span class="orb-caption">Always on</span>
+          </div>
+          <div class="orb-control">
+            <button id="orb-voice-toggle" class="orb-icon-btn" type="button" title="Speak replies out loud">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            </button>
+            <span class="orb-caption">Voice reply</span>
+          </div>
         </div>
-        <div class="orb-control">
-          <button id="orb-continuous-toggle" class="orb-icon-btn" type="button" title="Keep listening after every reply, instead of one click per turn">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
-          </button>
-          <span class="orb-caption">Always on</span>
-        </div>
-        <div class="orb-control">
-          <button id="orb-voice-toggle" class="orb-icon-btn" type="button" title="Speak replies out loud">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-          </button>
-          <span class="orb-caption">Voice reply</span>
-        </div>
+        <form id="orb-input-row" autocomplete="off">
+          <input id="orb-input" type="text" placeholder="Ask Jarvis, or click the mic…">
+        </form>
       </div>
-      <form id="orb-input-row" autocomplete="off">
-        <input id="orb-input" type="text" placeholder="Ask Jarvis, or click the mic…">
-      </form>
       <div id="orb-state-label">idle</div>
     </aside>
   </div>
