@@ -342,6 +342,8 @@
   #orb-widget.orb-state-tool #orb-canvas { outline: 2px solid #ffb454; outline-offset: 6px; border-radius: 50%; }
   #orb-widget.orb-state-error #orb-canvas { outline: 2px solid var(--bad); outline-offset: 6px; border-radius: 50%; animation: orb-error-flash 0.5s ease-in-out infinite; }
   @keyframes orb-error-flash { 0%, 100% { outline-color: var(--bad); } 50% { outline-color: transparent; } }
+  #orb-widget.orb-state-success #orb-canvas { outline: 2px solid #34d17c; outline-offset: 6px; border-radius: 50%; }
+  #orb-widget.orb-state-offline #orb-canvas { outline: 2px dashed #5a6470; outline-offset: 6px; border-radius: 50%; filter: grayscale(0.6) brightness(0.8); }
   /* A soft ambient presence bleeding into the page behind the orb itself —
      part of the "layered energy/light" the core alone can't carry, and the
      one piece of motion that's always on, even at idle, so JARVIS reads as
@@ -361,22 +363,24 @@
             drop-shadow(0 8px 28px rgba(0,0,0,0.5));
     transition: filter .4s ease;
   }
-  /* ── JARVIS's rendered likeness of Lee ───────────────────────────────
-     A real, locally-generated video of Lee (SadTalker for idle/listening/
-     thinking/tool/error motion, MuseTalk for audio-driven speaking) — never
-     the raw reference photo displayed directly, never a live camera feed.
+  /* ── JARVIS's avatar ──────────────────────────────────────────────────
+     Today: a real, locally-generated video (SadTalker for idle/listening/
+     thinking/tool/error/success/offline motion, MuseTalk for audio-driven
+     speaking) — never the raw reference photo, never a live camera feed.
      Assets are pre-generated offline and served as static files (see
-     AVATAR_ASSETS in the orb script block below and /ui/api/avatar/asset/*
-     in ui.py) — nothing here calls a model at request time. This is the
-     single swap point for a future engine (on-demand cloud/GPU generation,
-     truly live per-utterance lip sync): replacing it only requires touching
-     AVATAR_ASSETS and FaceRenderer.update(), since both already consume the
-     same --orb-state-color / currentState signals as the rest of the orb.
+     AVATAR_CONFIG in the orb script block below and /ui/api/avatar/asset/*
+     in ui.py) — nothing here calls a model at request time. AVATAR_CONFIG
+     is the single drop-in point for the future full-body asset: its
+     `shape` (aspect ratio / corner radius, applied below as
+     --avatar-aspect/--avatar-radius) and `assets` map are the only things
+     that need to change — no markup or layout rewrite — when a tall
+     full-body clip replaces today's square headshot-crop placeholder.
      Deliberately no Three.js/GLTF here — the earlier rigged 3D face was
      reported "creepy" (see test_ui_command_center.py) and explicitly
      replaced with the plain canvas orb this sits on top of. */
   #orb-face-wrap {
-    position: absolute; left: 50%; top: 50%; width: 74%; aspect-ratio: 1;
+    --avatar-aspect: 1; --avatar-radius: 50%;
+    position: absolute; left: 50%; top: 50%; width: 74%; aspect-ratio: var(--avatar-aspect);
     transform: translate(-50%, -50%); pointer-events: none; z-index: 1;
   }
   #orb-face-ring {
@@ -395,7 +399,7 @@
     filter: blur(6px); transition: background .4s ease;
   }
   #orb-face-frame {
-    position: relative; width: 100%; height: 100%; border-radius: 50%; overflow: hidden;
+    position: relative; width: 100%; height: 100%; border-radius: var(--avatar-radius); overflow: hidden;
     background: radial-gradient(circle at 50% 30%, #10151d, #05070a 78%);
     box-shadow: inset 0 0 0 1px rgba(255,255,255,.05), 0 14px 34px rgba(0,0,0,.5);
   }
@@ -999,9 +1003,15 @@ async function pollHealth() {
     const h = await api('/health');
     $('conn-dot').className = 'dot ok';
     $('conn-text').textContent = `connected · uptime ${Math.round(h.uptime_seconds)}s`;
+    if (window.setOrbReason) window.setOrbReason('offline', false);
   } catch (e) {
     $('conn-dot').className = 'dot bad';
     $('conn-text').textContent = 'disconnected';
+    // Same /health check the connection dot above already used — not a
+    // second, separately-invented signal. Outranks every other orb state
+    // (see PRIORITY): none of them mean anything while the backend is
+    // actually unreachable.
+    if (window.setOrbReason) window.setOrbReason('offline', true);
   }
 }
 
@@ -1271,6 +1281,14 @@ function resolveToolChip(ok) {
   // particular call had no visible chip host, so multi-tool turns never
   // leave the orb stuck showing a tool that already finished.
   if (window.setOrbReason) window.setOrbReason('tool', false);
+  if (ok && window.setOrbReason) {
+    // Real outcome, not a fabricated timer: this only ever runs from an
+    // actual tool_end frame that reported ok:true. Brief, self-clearing —
+    // a receipt that the action landed, not a state anyone has to notice.
+    window.setOrbReason('success', true);
+    clearTimeout(window._orbSuccessFallback);
+    window._orbSuccessFallback = setTimeout(() => window.setOrbReason('success', false), 1200);
+  }
   if (!_activeToolChip) return;
   _activeToolChip.classList.remove('tool-chip-active');
   _activeToolChip.classList.add(ok ? 'tool-chip-done' : 'tool-chip-failed');
@@ -2024,8 +2042,13 @@ checkSession();
    compatibility surface, matches the original orb's own reasoning for
    staying off a 3D engine. */
 (function () {
-  const STATE_COLORS = { idle: "#4b6b7c", listening: "#00d4ff", thinking: "#b98bff", tool: "#ffb454", speaking: "#5cffc4", error: "#ff5c6c", interrupted: "#ff5c6c" };
-  const STATE_PULSE_SPEED = { idle: 0.7, listening: 1.6, thinking: 2.6, tool: 3.1, speaking: 2.1, error: 5.5, interrupted: 5.5 };
+  const STATE_COLORS = { idle: "#4b6b7c", listening: "#00d4ff", thinking: "#b98bff", tool: "#ffb454", speaking: "#5cffc4", error: "#ff5c6c", interrupted: "#ff5c6c", success: "#34d17c", offline: "#5a6470" };
+  const STATE_PULSE_SPEED = { idle: 0.7, listening: 1.6, thinking: 2.6, tool: 3.1, speaking: 2.1, error: 5.5, interrupted: 5.5, success: 1.8, offline: 0.4 };
+  // Executive-facing labels — the internal reason name ("tool") stays as-is
+  // everywhere it's already wired (SSE handlers, tests); only the text a
+  // person reads changes, so "JARVIS is executing" replaces "Tool" without
+  // touching any of the event plumbing above.
+  const STATE_LABELS = { tool: "Executing", offline: "Offline", success: "Success" };
   const widget = document.getElementById("orb-widget");
   const canvas = document.getElementById("orb-canvas");
   const stateLabel = document.getElementById("orb-state-label");
@@ -2042,10 +2065,12 @@ checkSession();
     currentState = STATE_COLORS[state] ? state : "idle";
     if (currentState === "interrupted") stateHoldUntil = now + 600;
     if (currentState === "error") stateHoldUntil = now + 1400;
-    if (stateLabel) stateLabel.textContent = currentState;
+    if (stateLabel) stateLabel.textContent = (STATE_LABELS[currentState] || currentState).toLowerCase();
     widget.classList.toggle("listening", currentState === "listening");
     widget.classList.toggle("orb-state-tool", currentState === "tool");
     widget.classList.toggle("orb-state-error", currentState === "error");
+    widget.classList.toggle("orb-state-success", currentState === "success");
+    widget.classList.toggle("orb-state-offline", currentState === "offline");
     document.documentElement.style.setProperty("--orb-state-color", STATE_COLORS[currentState]);
     // Always clear first: this same function is also what a real TTS
     // onstart event calls (see speakReply below) — without clearing here,
@@ -2068,7 +2093,7 @@ checkSession();
     if (headerMicDot) headerMicDot.className = "mic-dot " + currentState;
     if (headerMicLabel) headerMicLabel.textContent = (currentState === "tool" && activeToolLabel)
       ? ("→ " + activeToolLabel)
-      : currentState.charAt(0).toUpperCase() + currentState.slice(1);
+      : (STATE_LABELS[currentState] || currentState.charAt(0).toUpperCase() + currentState.slice(1));
   };
 
   // ── priority-driven state arbitration ──────────────────────────────────
@@ -2082,8 +2107,14 @@ checkSession();
   // requirement: an error always outranks everything, even a reply already
   // being spoken; a running tool call outranks the generic "thinking" spinner
   // so the orb reflects what's actually happening, not just "processing."
-  const PRIORITY = ["error", "speaking", "tool", "thinking", "listening"];
-  const reasons = { error: false, speaking: false, tool: false, thinking: false, listening: false };
+  // "offline" leads even "error": a real backend error is meaningless
+  // information the moment the connection itself is down (see pollHealth's
+  // setOrbReason('offline', ...) below — driven by the same real /health
+  // check the Command page's connection dot already used, not a new signal
+  // invented for this). "success" sits right after "tool" since it only
+  // ever fires the instant a real tool_end frame reports ok:true.
+  const PRIORITY = ["offline", "error", "speaking", "tool", "success", "thinking", "listening"];
+  const reasons = { offline: false, error: false, speaking: false, tool: false, success: false, thinking: false, listening: false };
   let activeToolLabel = "";
   function applyPriority() {
     const winner = PRIORITY.find((r) => reasons[r]);
@@ -2150,22 +2181,39 @@ checkSession();
   // keeps working unchanged. Deliberately no Three.js/GLTF: the earlier
   // rigged 3D face was reported "creepy" (see test_ui_command_center.py)
   // and pulled for the plain canvas orb this sits on top of.
-  const AVATAR_ASSETS = {
-    idle: "/ui/api/avatar/asset/idle_loop.mp4",
-    speaking: "/ui/api/avatar/asset/speaking_sample.mp4",
+  // Single config object for the whole avatar — this is the drop-in point
+  // for the future full-body asset. `shape` controls the container's
+  // aspect ratio/corner treatment (today: square + circular, matching a
+  // headshot crop) as CSS custom properties, never hard-coded pixel sizes,
+  // so a future tall full-body clip is a config change (e.g. aspect:
+  // "3 / 5", radius: "18px") not a markup/CSS rewrite. `assets` maps
+  // currentState -> a video URL; any state without its own clip falls back
+  // to idle (see assetForState) rather than erroring.
+  const AVATAR_CONFIG = {
+    shape: { aspect: "1", radius: "50%" },
+    assets: {
+      idle: "/ui/api/avatar/asset/idle_loop.mp4",
+      speaking: "/ui/api/avatar/asset/speaking_sample.mp4",
+    },
   };
   const STATE_RING_SPEED = {
     idle: 8, listening: 5.5, thinking: 2.4, tool: 3.6, speaking: 3.8,
-    error: 1.3, interrupted: 1.3,
+    error: 1.3, interrupted: 1.3, success: 2.8, offline: 10,
   };
   const FaceRenderer = (() => {
+    const wrap = document.getElementById("orb-face-wrap");
     const video = document.getElementById("orb-face-video");
     const ring = document.getElementById("orb-face-ring");
     const halo = document.getElementById("orb-face-halo");
     let currentAsset = null;
 
+    if (wrap) {
+      wrap.style.setProperty("--avatar-aspect", AVATAR_CONFIG.shape.aspect);
+      wrap.style.setProperty("--avatar-radius", AVATAR_CONFIG.shape.radius);
+    }
+
     function assetForState(state) {
-      return state === "speaking" ? AVATAR_ASSETS.speaking : AVATAR_ASSETS.idle;
+      return AVATAR_CONFIG.assets[state] || AVATAR_CONFIG.assets.idle;
     }
 
     function syncVideo() {
