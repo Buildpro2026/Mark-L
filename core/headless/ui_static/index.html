@@ -670,6 +670,38 @@
     .nav-item.active::before { left: 14%; right: 14%; top: auto; bottom: -9px; width: auto; height: 2px; }
     .nav-divider { width: 1px; height: 22px; margin: 0 6px; }
     #command-center-link.nav-item { margin-top: 0; margin-left: 6px; }
+
+    /* JARVIS's presence panel: #shell-body just became a single column
+       above, and #content's flex:1 share of that fixed-height column is
+       whatever's left over after every flex-shrink:0 sibling takes its
+       natural size first. The panel's desktop size (full face-wrap +
+       captioned controls + text input, ~450-500px tall) was one of those
+       siblings, so #content was measured at ~400px tall on a real 768px
+       tablet — Home's actual content (1800px+) was only reachable by
+       finding and scrolling *inside* that cramped box, which read as the
+       panel "covering" Priorities/the objective ring/Live Activity even
+       though nothing was technically overlapping in z-index terms.
+       Collapsing the panel to a slim horizontal strip here — for every
+       avatar_position, since there's no side column left to dock into
+       once the layout is one stack — shrinks its natural height to
+       ~70-90px so #content gets essentially the whole column back. */
+    #orb-widget {
+      width: 100%; max-width: 100%; flex-direction: row; flex-shrink: 0;
+      align-items: center; justify-content: flex-start; gap: 12px;
+      padding: 8px 16px; border-left: 0; border-right: 0; border-top: 1px solid var(--line);
+    }
+    body[data-avatar-position="left"] #orb-widget,
+    body[data-avatar-position="right"] #orb-widget,
+    body[data-avatar-position="center"] #orb-widget {
+      position: static; order: 2; left: auto; bottom: auto; transform: none;
+      border-radius: 0; box-shadow: none; backdrop-filter: none;
+    }
+    #orb-face-wrap, body[data-avatar-position="center"] #orb-face-wrap { width: 56px; flex: none; }
+    #orb-controls { align-items: center; }
+    .orb-control .orb-caption { display: none; }
+    .orb-icon-btn { width: 28px; height: 28px; }
+    #orb-mic-btn { width: 34px; height: 34px; }
+    #orb-input-row, #orb-state-label { display: none; }
   }
   @media (max-width: 640px) {
     .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text, .ch-sys-status { display: none; }
