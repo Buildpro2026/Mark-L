@@ -319,50 +319,61 @@
   .identity-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .identity-card .swatch { width: 100%; height: 28px; border-radius: 4px; margin-bottom: 8px; }
 
-  /* ── The floating orb ─────────────────────────────────────────────────
-     A genuine floating presence, not a docked sidebar icon: fixed
-     position anywhere on screen, draggable, resizable, and — see
-     window.onReportOpened in the orb script — hops to a fresh corner
-     whenever a different report opens so it never sits on top of what
-     you're reading. --orb-state-color drives the glow/pulse color;
-     JS sets it per idle/listening/thinking/speaking/interrupted. */
-  :root { --orb-size: 260px; --orb-state-color: #4b6b7c; }
+  /* ── JARVIS's presence panel ──────────────────────────────────────────
+     Lee's direction 2026-08-29: JARVIS is no longer a face floating inside
+     an orb — the panel docks into the shell layout itself (a flex sibling
+     of #sidebar/#content, order-controlled by data-avatar-position on
+     <body> — see Settings) so it never overlaps content and never needs
+     the old drag/resize/corner-hop machinery that existed only to keep a
+     free-floating circle out of the way. left/right dock as a permanent
+     side column; center takes it out of flow as a fixed bottom-anchored
+     command bar instead. --orb-state-color still drives every state's
+     glow/pulse color, same source of truth as before. */
+  :root { --orb-state-color: #4b6b7c; }
   #orb-widget {
-    /* Hidden until showShell() (see the login script block) reveals it —
-       its default centered-near-top position would otherwise sit directly
-       over the login card before checkSession() resolves and silently eat
-       the Sign In click. */
-    position: fixed; z-index: 60; display: none; flex-direction: column; align-items: center; gap: 10px;
-    left: var(--orb-x, calc(100vw - 128px - 32px)); top: var(--orb-y, calc(100vh - 128px - 32px));
-    width: var(--orb-size); touch-action: none; user-select: none;
-    transition: left .55s cubic-bezier(.2,.8,.2,1), top .55s cubic-bezier(.2,.8,.2,1);
+    /* Hidden until showShell() reveals it — see showLogin()'s comment. */
+    display: none; flex-direction: column; align-items: center; gap: 14px;
+    width: 240px; flex-shrink: 0; padding: 20px 16px; box-sizing: border-box;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, transparent), var(--panel));
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    position: relative; z-index: 10;
   }
-  #orb-widget.dragging { transition: none; cursor: grabbing; }
-  #orb-widget.listening #orb-canvas { outline: 2px solid var(--bad); outline-offset: 6px; border-radius: 50%; }
-  #orb-widget.orb-state-tool #orb-canvas { outline: 2px solid #ffb454; outline-offset: 6px; border-radius: 50%; }
-  #orb-widget.orb-state-error #orb-canvas { outline: 2px solid var(--bad); outline-offset: 6px; border-radius: 50%; animation: orb-error-flash 0.5s ease-in-out infinite; }
-  @keyframes orb-error-flash { 0%, 100% { outline-color: var(--bad); } 50% { outline-color: transparent; } }
-  #orb-widget.orb-state-success #orb-canvas { outline: 2px solid #34d17c; outline-offset: 6px; border-radius: 50%; }
-  #orb-widget.orb-state-offline #orb-canvas { outline: 2px dashed #5a6470; outline-offset: 6px; border-radius: 50%; filter: grayscale(0.6) brightness(0.8); }
-  /* A soft ambient presence bleeding into the page behind the orb itself —
-     part of the "layered energy/light" the core alone can't carry, and the
+  body[data-avatar-position="left"] #orb-widget { order: -1; border-right: 1px solid var(--line); border-left: 0; }
+  body[data-avatar-position="right"] #orb-widget { order: 99; }
+  body[data-avatar-position="center"] #orb-widget {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    flex-direction: row; width: auto; max-width: min(640px, 92vw); gap: 18px;
+    border: 1px solid var(--line-strong); border-radius: 14px; padding: 14px 20px;
+    box-shadow: 0 20px 50px rgba(0,0,0,.5); backdrop-filter: blur(10px);
+  }
+  body[data-avatar-position="center"] #orb-face-wrap { width: 72px; }
+  /* State color reads on the visible HUD frame now, not the hidden canvas
+     (see #orb-canvas below) — same six states, same colors as before. */
+  #orb-widget.listening #orb-face-frame { box-shadow: 0 0 0 2px var(--bad), inset 0 0 0 1px rgba(255,255,255,.05); }
+  #orb-widget.orb-state-tool #orb-face-frame { box-shadow: 0 0 0 2px #ffb454, inset 0 0 0 1px rgba(255,255,255,.05); }
+  #orb-widget.orb-state-error #orb-face-frame { box-shadow: 0 0 0 2px var(--bad), inset 0 0 0 1px rgba(255,255,255,.05); animation: orb-error-flash 0.5s ease-in-out infinite; }
+  @keyframes orb-error-flash { 0%, 100% { box-shadow: 0 0 0 2px var(--bad), inset 0 0 0 1px rgba(255,255,255,.05); } 50% { box-shadow: 0 0 0 2px transparent, inset 0 0 0 1px rgba(255,255,255,.05); } }
+  #orb-widget.orb-state-success #orb-face-frame { box-shadow: 0 0 0 2px #34d17c, inset 0 0 0 1px rgba(255,255,255,.05); }
+  #orb-widget.orb-state-offline #orb-face-frame { box-shadow: 0 0 0 2px #5a6470, inset 0 0 0 1px rgba(255,255,255,.05); filter: grayscale(0.6) brightness(0.8); }
+  /* A soft ambient presence bleeding into the panel behind the frame — the
      one piece of motion that's always on, even at idle, so JARVIS reads as
-     alive rather than a static icon. */
-  #orb-widget::before {
-    content: ""; position: absolute; inset: -34%; z-index: -1; border-radius: 50%;
-    background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 24%, transparent), transparent 68%);
-    filter: blur(6px); pointer-events: none;
+     alive rather than a static image. Rectangular now, not a circular glow. */
+  #orb-face-wrap::before {
+    content: ""; position: absolute; inset: -18% -30%; z-index: -1;
+    background: radial-gradient(ellipse, color-mix(in srgb, var(--orb-state-color) 22%, transparent), transparent 70%);
+    filter: blur(10px); pointer-events: none;
     animation: orb-ambient-pulse 4.6s ease-in-out infinite;
     transition: background .5s ease;
   }
-  @keyframes orb-ambient-pulse { 0%, 100% { opacity: .5; transform: scale(0.95); } 50% { opacity: .9; transform: scale(1.05); } }
-  #orb-canvas {
-    width: var(--orb-size); height: var(--orb-size); border-radius: 50%; cursor: grab; display: block;
-    filter: drop-shadow(0 0 calc(var(--orb-size) * 0.045) color-mix(in srgb, var(--orb-state-color) 85%, transparent))
-            drop-shadow(0 0 calc(var(--orb-size) * 0.18) color-mix(in srgb, var(--orb-state-color) 42%, transparent))
-            drop-shadow(0 8px 28px rgba(0,0,0,0.5));
-    transition: filter .4s ease;
-  }
+  @keyframes orb-ambient-pulse { 0%, 100% { opacity: .5; transform: scale(0.97); } 50% { opacity: .9; transform: scale(1.03); } }
+  /* The old canvas sphere is retired from view (Lee: keep JARVIS out of
+     any orb/circular frame) but stays in the DOM, hidden, rather than
+     removed: the orb script's guard (`if (!widget || !canvas) return`)
+     and its per-frame draw() loop — which is also what drives
+     FaceRenderer.update() every tick — both still expect it to exist.
+     Removing it outright means re-plumbing that guard and the animation
+     loop for near-zero visual gain, since nothing here is rendered. */
+  #orb-canvas { display: none; }
   /* ── JARVIS's avatar ──────────────────────────────────────────────────
      Today: a real, locally-generated video (SadTalker for idle/listening/
      thinking/tool/error/success/offline motion, MuseTalk for audio-driven
@@ -372,36 +383,26 @@
      in ui.py) — nothing here calls a model at request time. AVATAR_CONFIG
      is the single drop-in point for the future full-body asset: its
      `shape` (aspect ratio / corner radius, applied below as
-     --avatar-aspect/--avatar-radius) and `assets` map are the only things
-     that need to change — no markup or layout rewrite — when a tall
-     full-body clip replaces today's square headshot-crop placeholder.
-     Deliberately no Three.js/GLTF here — the earlier rigged 3D face was
-     reported "creepy" (see test_ui_command_center.py) and explicitly
-     replaced with the plain canvas orb this sits on top of. */
+     --avatar-aspect/--avatar-radius — a tall panel by default now, not a
+     circle, precisely so a future full-body clip is a config change, not
+     a layout rewrite) and `assets` map are the only things that need to
+     change when that clip replaces today's headshot-crop placeholder.
+     No ring/halo circling it and nothing calls this an "orb" anymore —
+     Lee's direction 2026-08-29 was explicit that the avatar itself must
+     never read as framed inside one. Corner brackets (.hud-corner below)
+     mark it as an instrument readout instead. Deliberately no Three.js/
+     GLTF here — the earlier rigged 3D face was reported "creepy" (see
+     test_ui_command_center.py) and explicitly replaced with the plain
+     (now-hidden) canvas this used to sit on top of. */
   #orb-face-wrap {
-    --avatar-aspect: 1; --avatar-radius: 50%;
-    position: absolute; left: 50%; top: 50%; width: 74%; aspect-ratio: var(--avatar-aspect);
-    transform: translate(-50%, -50%); pointer-events: none; z-index: 1;
-  }
-  #orb-face-ring {
-    position: absolute; inset: -13%; border-radius: 50%; pointer-events: none;
-    background: conic-gradient(from 0deg, transparent 0%, var(--orb-state-color) 10%, transparent 26%, transparent 100%);
-    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
-    mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
-    animation: orb-face-ring-spin 8s linear infinite;
-    filter: drop-shadow(0 0 10px var(--orb-state-color));
-    opacity: .85; transition: filter .4s ease;
-  }
-  @keyframes orb-face-ring-spin { to { transform: rotate(360deg); } }
-  #orb-face-halo {
-    position: absolute; inset: -30%; border-radius: 50%; pointer-events: none; z-index: -1;
-    background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 30%, transparent), transparent 70%);
-    filter: blur(6px); transition: background .4s ease;
+    --avatar-aspect: 3 / 4; --avatar-radius: 10px;
+    position: relative; width: 100%; aspect-ratio: var(--avatar-aspect); pointer-events: none;
   }
   #orb-face-frame {
     position: relative; width: 100%; height: 100%; border-radius: var(--avatar-radius); overflow: hidden;
     background: radial-gradient(circle at 50% 30%, #10151d, #05070a 78%);
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,.05), 0 14px 34px rgba(0,0,0,.5);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 14px 34px rgba(0,0,0,.5);
+    transition: box-shadow .3s ease;
   }
   #orb-face-video { width: 100%; height: 100%; object-fit: cover; display: block; }
   #orb-face-frame::after {
@@ -409,13 +410,17 @@
     background: linear-gradient(135deg, rgba(255,255,255,.08), transparent 42%, transparent 68%, rgba(0,0,0,.22)),
                 repeating-linear-gradient(0deg, rgba(255,255,255,.025) 0px, rgba(255,255,255,.025) 1px, transparent 1px, transparent 3px);
   }
-  #orb-resize-handle {
-    position: absolute; width: 16px; height: 16px; right: -2px; bottom: 34px; border-radius: 50%;
-    background: var(--panel-alt); border: 1px solid var(--line-strong); cursor: nwse-resize;
-    display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .2s;
+  /* Instrument-panel corner brackets — the restrained HUD tell that reads
+     as "this is a live readout," not a photo frame or a circular orb. */
+  .hud-corner {
+    position: absolute; width: 16px; height: 16px; pointer-events: none;
+    border: 2px solid var(--orb-state-color); opacity: .75; transition: border-color .4s ease;
   }
-  #orb-resize-handle::before { content: ""; width: 6px; height: 6px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); }
-  #orb-widget:hover #orb-resize-handle { opacity: 1; }
+  .hud-corner-tl { top: -1px; left: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 6px; }
+  .hud-corner-tr { top: -1px; right: -1px; border-left: 0; border-bottom: 0; border-top-right-radius: 6px; }
+  .hud-corner-bl { bottom: -1px; left: -1px; border-right: 0; border-top: 0; border-bottom-left-radius: 6px; }
+  .hud-corner-br { bottom: -1px; right: -1px; border-left: 0; border-top: 0; border-bottom-right-radius: 6px; }
+  body[data-avatar-position="center"] .hud-corner { width: 10px; height: 10px; }
   /* Controls are always visible — hover-to-reveal made three unlabeled
      icons genuinely hard to learn (Lee: "the buttons are confusing").
      Each one now carries its own text caption underneath. */
@@ -453,7 +458,11 @@
   #orb-state-label {
     font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
   }
-  @media (max-width: 640px) { #orb-widget { --orb-size: 112px !important; } }
+  @media (max-width: 640px) {
+    #orb-widget { width: 100%; padding: 12px 14px; }
+    body[data-avatar-position="left"] #orb-widget,
+    body[data-avatar-position="right"] #orb-widget { order: 2; border-left: 0; border-right: 0; border-top: 1px solid var(--line); }
+  }
 
   /* Global JARVIS shell: a persistent top command/status bar plus a real
      left navigation rail (see the audit report: an earlier "lens" pass
@@ -587,8 +596,6 @@
   .page:not(#page-home) section.block { margin-bottom: 18px; }
   #chat-wrap { max-width: 780px; }
   #buildpro-body, #ddf-body, #intelligence-body, #ceo-body { padding: 18px; }
-  #orb-widget { left: var(--orb-x, calc(50vw - var(--orb-size) / 2)); top: var(--orb-y, 96px); }
-  #orb-canvas { cursor: grab; }
   #orb-input-row input { font-size: 13px; padding: 10px 15px; }
   #orb-state-label { color: var(--accent); }
   @media (max-width: 900px) {
@@ -856,6 +863,10 @@
           <div><div class="label">Interface density</div></div>
           <div class="control"><select id="set-density"><option value="compact">Compact</option><option value="normal">Normal</option><option value="spacious">Spacious</option></select></div>
         </div>
+        <div class="setting-row">
+          <div><div class="label">JARVIS avatar position</div><div class="sub">Where JARVIS's presence panel docks in the interface</div></div>
+          <div class="control"><select id="set-avatar-position"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></div>
+        </div>
       </section>
 
       <section class="block">
@@ -916,52 +927,56 @@
     </div>
 
     </div>
-  </div>
-</div>
 
-<!-- ── The floating orb: JARVIS's actual presence on this page. Draggable,
-     resizable, hops corners when a report opens, carries voice input/output
-     and a compact always-available chat input — see the orb script block
-     near the end of this file (window.setOrbState / window.speakReply). ── -->
-<div id="orb-widget">
-  <div id="orb-resize-handle" title="Drag to resize"></div>
-  <canvas id="orb-canvas"></canvas>
-  <div id="orb-face-wrap">
-    <div id="orb-face-halo"></div>
-    <div id="orb-face-ring"></div>
-    <div id="orb-face-frame">
-      <!-- JARVIS's rendered likeness of Lee: a real, locally-generated video
-           (SadTalker for idle/listening/thinking/tool/error, MuseTalk for
-           audio-driven speaking) — never the raw reference photo displayed
-           directly. Source swapped by FaceRenderer based on currentState;
-           see AVATAR_ASSETS below and /ui/api/avatar/asset/* in ui.py. -->
-      <video id="orb-face-video" muted playsinline loop autoplay></video>
-    </div>
+    <!-- ── JARVIS's presence panel: docked into the shell layout itself
+         (a flex sibling of #sidebar/#content, positioned by
+         data-avatar-position on <body> — see Settings), never a floating
+         draggable circle. Carries voice input/output and a compact
+         always-available chat input — see the orb script block near the
+         end of this file (window.setOrbState / window.speakReply). ── -->
+    <aside id="orb-widget">
+      <canvas id="orb-canvas"></canvas>
+      <div id="orb-face-wrap">
+        <div id="orb-face-frame">
+          <!-- JARVIS's rendered likeness: a real, locally-generated video
+               (SadTalker for idle/listening/thinking/tool/error/success/
+               offline, MuseTalk for audio-driven speaking) — never a raw
+               photo displayed directly. Source swapped by FaceRenderer
+               based on currentState; see AVATAR_CONFIG below and
+               /ui/api/avatar/asset/* in ui.py. -->
+          <video id="orb-face-video" muted playsinline loop autoplay></video>
+        </div>
+        <div class="hud-corner hud-corner-tl"></div>
+        <div class="hud-corner hud-corner-tr"></div>
+        <div class="hud-corner hud-corner-bl"></div>
+        <div class="hud-corner hud-corner-br"></div>
+      </div>
+      <div id="orb-controls">
+        <div class="orb-control">
+          <button id="orb-mic-btn" class="orb-icon-btn" type="button" title="Click, then speak">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18v3"/></svg>
+          </button>
+          <span class="orb-caption">Talk</span>
+        </div>
+        <div class="orb-control">
+          <button id="orb-continuous-toggle" class="orb-icon-btn" type="button" title="Keep listening after every reply, instead of one click per turn">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+          </button>
+          <span class="orb-caption">Always on</span>
+        </div>
+        <div class="orb-control">
+          <button id="orb-voice-toggle" class="orb-icon-btn" type="button" title="Speak replies out loud">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+          </button>
+          <span class="orb-caption">Voice reply</span>
+        </div>
+      </div>
+      <form id="orb-input-row" autocomplete="off">
+        <input id="orb-input" type="text" placeholder="Ask Jarvis, or click the mic…">
+      </form>
+      <div id="orb-state-label">idle</div>
+    </aside>
   </div>
-  <div id="orb-controls">
-    <div class="orb-control">
-      <button id="orb-mic-btn" class="orb-icon-btn" type="button" title="Click, then speak">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18v3"/></svg>
-      </button>
-      <span class="orb-caption">Talk</span>
-    </div>
-    <div class="orb-control">
-      <button id="orb-continuous-toggle" class="orb-icon-btn" type="button" title="Keep listening after every reply, instead of one click per turn">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
-      </button>
-      <span class="orb-caption">Always on</span>
-    </div>
-    <div class="orb-control">
-      <button id="orb-voice-toggle" class="orb-icon-btn" type="button" title="Speak replies out loud">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-      </button>
-      <span class="orb-caption">Voice reply</span>
-    </div>
-  </div>
-  <form id="orb-input-row" autocomplete="off">
-    <input id="orb-input" type="text" placeholder="Ask Jarvis, or click the mic…">
-  </form>
-  <div id="orb-state-label">idle</div>
 </div>
 
 <script>
@@ -1061,7 +1076,6 @@ $('logout-btn').addEventListener('click', async () => {
 function switchTab(tabId) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + tabId));
   document.querySelectorAll('.nav-item[data-report]').forEach(b => b.classList.toggle('active', b.dataset.report === tabId));
-  if (window.onReportOpened) window.onReportOpened(tabId);
 }
 document.querySelectorAll('.nav-item[data-report]').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.report));
@@ -1886,6 +1900,7 @@ function applyAppearance(settings) {
   document.body.dataset.identity = settings.business_identity || 'executive';
   document.body.dataset.theme = settings.theme || 'dark';
   $('identity-badge').textContent = IDENTITY_LABELS[settings.business_identity] || 'Executive';
+  if (window.setAvatarPosition) window.setAvatarPosition(settings.avatar_position || 'right');
 }
 
 function renderIdentityPicker(selected) {
@@ -1915,6 +1930,7 @@ async function loadSettingsAndApply() {
     $('set-theme').value = s.theme;
     $('set-animation').value = s.animation_intensity;
     $('set-density').value = s.interface_density;
+    $('set-avatar-position').value = s.avatar_position || 'right';
     $('set-voice-provider').value = s.voice_provider;
     populateVoiceOptions(s.available_voices, s.voice_name);
     $('set-voice-speed').value = s.voice_speed;
@@ -1952,6 +1968,7 @@ async function saveSetting(updates) {
 $('set-theme').addEventListener('change', (e) => saveSetting({ theme: e.target.value }));
 $('set-animation').addEventListener('change', (e) => saveSetting({ animation_intensity: e.target.value }));
 $('set-density').addEventListener('change', (e) => saveSetting({ interface_density: e.target.value }));
+$('set-avatar-position').addEventListener('change', (e) => saveSetting({ avatar_position: e.target.value }));
 $('set-voice-provider').addEventListener('change', async (e) => {
   await saveSetting({ voice_provider: e.target.value });
   const s = await api('/ui/api/settings');
@@ -2183,14 +2200,14 @@ checkSession();
   // and pulled for the plain canvas orb this sits on top of.
   // Single config object for the whole avatar — this is the drop-in point
   // for the future full-body asset. `shape` controls the container's
-  // aspect ratio/corner treatment (today: square + circular, matching a
-  // headshot crop) as CSS custom properties, never hard-coded pixel sizes,
-  // so a future tall full-body clip is a config change (e.g. aspect:
-  // "3 / 5", radius: "18px") not a markup/CSS rewrite. `assets` maps
-  // currentState -> a video URL; any state without its own clip falls back
-  // to idle (see assetForState) rather than erroring.
+  // aspect ratio/corner treatment (today: a tall rounded rectangle, no
+  // circular framing — see .hud-corner in the CSS above) as CSS custom
+  // properties, never hard-coded pixel sizes, so a future full-body clip
+  // is a config change (e.g. aspect: "9 / 16") not a markup/CSS rewrite.
+  // `assets` maps currentState -> a video URL; any state without its own
+  // clip falls back to idle (see assetForState) rather than erroring.
   const AVATAR_CONFIG = {
-    shape: { aspect: "1", radius: "50%" },
+    shape: { aspect: "3 / 4", radius: "10px" },
     assets: {
       idle: "/ui/api/avatar/asset/idle_loop.mp4",
       speaking: "/ui/api/avatar/asset/speaking_sample.mp4",
@@ -2325,120 +2342,16 @@ checkSession();
   }
   requestAnimationFrame((t) => draw(t / 1000));
 
-  // ── position + size persistence ─────────────────────────────────────
-  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-  function applyPosition(x, y) {
-    const size = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
-    // The widget is taller than just the canvas (mic/continuous/voice
-    // controls, the compact input, and the state label all sit below it),
-    // so the Y clamp must use its real rendered height — using `size`
-    // (canvas width) alone let a bottom-corner placement push the mic
-    // button itself off the bottom edge of the viewport.
-    const height = widget.getBoundingClientRect().height || size;
-    x = clamp(x, 8, window.innerWidth - size - 8);
-    y = clamp(y, 8, window.innerHeight - height - 8);
-    document.documentElement.style.setProperty("--orb-x", x + "px");
-    document.documentElement.style.setProperty("--orb-y", y + "px");
-    return { x, y };
-  }
-  function savePosition(x, y) { localStorage.setItem("jarvis_orb_pos", JSON.stringify({ x, y })); }
-  function saveSize(px) { localStorage.setItem("jarvis_orb_size", String(px)); }
-
-  (function restore() {
-    const savedSize = parseInt(localStorage.getItem("jarvis_orb_size") || "", 10);
-    if (savedSize) document.documentElement.style.setProperty("--orb-size", savedSize + "px");
-    let pos;
-    try { pos = JSON.parse(localStorage.getItem("jarvis_orb_pos") || "null"); } catch (e) { pos = null; }
-    if (pos && typeof pos.x === "number") applyPosition(pos.x, pos.y);
-    // Start JARVIS in the center of the command space. A saved position is
-    // always respected, so this changes the first-run experience only.
-    else applyPosition((window.innerWidth - (savedSize || 260)) / 2, 92);
-    orbCssSize = sizeCanvas();
-  })();
-
-  // ── drag ──────────────────────────────────────────────────────────────
-  let dragging = false, dragOffsetX = 0, dragOffsetY = 0, userHasDragged = false;
-  canvas.addEventListener("pointerdown", (e) => {
-    dragging = true;
-    widget.classList.add("dragging");
-    const rect = widget.getBoundingClientRect();
-    dragOffsetX = e.clientX - rect.left;
-    dragOffsetY = e.clientY - rect.top;
-    canvas.setPointerCapture(e.pointerId);
-  });
-  canvas.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    const { x, y } = applyPosition(e.clientX - dragOffsetX, e.clientY - dragOffsetY);
-    savePosition(x, y);
-  });
-  function endDrag() {
-    if (!dragging) return;
-    dragging = false;
-    userHasDragged = true;
-    widget.classList.remove("dragging");
-  }
-  canvas.addEventListener("pointerup", endDrag);
-  canvas.addEventListener("pointercancel", endDrag);
-  canvas.addEventListener("click", () => {
-    // A drag that never actually moved still fires "click" — only treat a
-    // real (non-dragged) click as "focus the input," handled via CSS hover
-    // already; nothing else needed here, kept as a hook point.
-  });
-
-  // ── resize ────────────────────────────────────────────────────────────
-  const resizeHandle = document.getElementById("orb-resize-handle");
-  let resizing = false, resizeStartX = 0, resizeStartSize = 128;
-  resizeHandle.addEventListener("pointerdown", (e) => {
-    resizing = true;
-    resizeStartX = e.clientX;
-    resizeStartSize = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
-    resizeHandle.setPointerCapture(e.pointerId);
-    e.stopPropagation();
-  });
-  resizeHandle.addEventListener("pointermove", (e) => {
-    if (!resizing) return;
-    const next = clamp(resizeStartSize + (e.clientX - resizeStartX), 112, 360);
-    document.documentElement.style.setProperty("--orb-size", next + "px");
-    orbCssSize = sizeCanvas();
-  });
-  function endResize(e) {
-    if (!resizing) return;
-    resizing = false;
-    const finalSize = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
-    saveSize(finalSize);
-  }
-  resizeHandle.addEventListener("pointerup", endResize);
-  resizeHandle.addEventListener("pointercancel", endResize);
-
-  // ── corner-hop when a different report opens ─────────────────────────
-  // "he moves out of the way" — cycles through the four corners so the
-  // orb never sits in the same spot two reports in a row. Paused for a
-  // while after a manual drag so it doesn't fight a position Lee chose.
-  // Right-side corners only — the persistent left nav rail (and its
-  // bottom-pinned "3D Command Center" link) live at the left edge of the
-  // screen at every breakpoint, so a left-side hop would park JARVIS
-  // directly on top of navigation the user still needs to click.
-  const CORNERS = ["br", "tr"];
-  let cornerIndex = 0;
-  let lastReport = null;
-  let dragCooldownUntil = 0;
-  canvas.addEventListener("pointerup", () => { if (userHasDragged) dragCooldownUntil = Date.now() + 60000; });
-
-  function moveToCorner(name) {
-    const size = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
-    const height = widget.getBoundingClientRect().height || size; // see applyPosition's comment
-    const margin = 32;
-    const x = name.includes("r") ? window.innerWidth - size - margin : margin;
-    const y = name.includes("b") ? window.innerHeight - height - margin : margin + 8;
-    const { x: fx, y: fy } = applyPosition(x, y);
-    savePosition(fx, fy);
-  }
-  window.onReportOpened = function onReportOpened(tabId) {
-    if (tabId === lastReport) return;
-    lastReport = tabId;
-    if (Date.now() < dragCooldownUntil) return;
-    cornerIndex = (cornerIndex + 1) % CORNERS.length;
-    moveToCorner(CORNERS[cornerIndex]);
+  // ── docked panel position ────────────────────────────────────────────
+  // Set once from Settings' avatar_position (left/center/right) via
+  // applyAppearance() below — CSS (body[data-avatar-position="..."]) does
+  // the actual layout work; JS only needs to set the attribute. No drag,
+  // no resize, no per-report corner-hop: a docked flex sibling of
+  // #sidebar/#content (or a fixed bottom-center bar for "center") never
+  // overlaps a report the way a free-floating circle used to have to
+  // dodge, so all of that machinery is gone rather than adapted.
+  window.setAvatarPosition = function setAvatarPosition(position) {
+    document.body.dataset.avatarPosition = position || "right";
   };
 
   // ── compact input ─────────────────────────────────────────────────────

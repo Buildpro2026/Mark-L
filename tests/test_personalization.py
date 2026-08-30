@@ -46,6 +46,20 @@ def test_save_preferences_rejects_unknown_alert_sensitivity():
         prefs.save_preferences({"alert_sensitivity": "screaming"})
 
 
+def test_avatar_position_defaults_to_right():
+    assert prefs.load_preferences()["avatar_position"] == "right"
+
+
+def test_save_preferences_persists_avatar_position():
+    prefs.save_preferences({"avatar_position": "left"})
+    assert prefs.load_preferences()["avatar_position"] == "left"
+
+
+def test_save_preferences_rejects_unknown_avatar_position():
+    with pytest.raises(ValueError, match="avatar_position"):
+        prefs.save_preferences({"avatar_position": "top"})
+
+
 def test_voice_volume_is_clamped_to_valid_range():
     prefs.save_preferences({"voice_volume": 9.0})
     assert prefs.load_preferences()["voice_volume"] == 1.5

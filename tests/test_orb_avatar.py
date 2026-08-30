@@ -84,17 +84,33 @@ def test_avatar_asset_files_actually_exist_on_disk():
         assert path.stat().st_size > 0
 
 
+def test_avatar_is_not_framed_in_a_circular_orb(monkeypatch):
+    # 2026-08-29: Lee's explicit direction — the avatar itself must never
+    # read as a face floating inside an orb. The circular ring/halo/canvas-
+    # sphere framing is gone (not just visually hidden by chance); the
+    # avatar's default shape is a rounded rectangle, not a circle; and the
+    # panel is a docked layout element, not a free-floating widget.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert 'id="orb-face-ring"' not in html
+    assert 'id="orb-face-halo"' not in html
+    assert '--avatar-aspect: 3 / 4; --avatar-radius: 10px;' in html
+    assert "hud-corner" in html  # the instrument-panel framing that replaced the ring
+
+
 def test_avatar_container_shape_is_config_driven_not_hard_coded(monkeypatch):
-    # The future full-body asset needs a tall container, not today's square
-    # headshot crop. Swapping AVATAR_CONFIG.shape must be enough — no
-    # markup/CSS rewrite — so the container's aspect ratio and corner
+    # The future full-body asset needs an even taller container than
+    # today's placeholder. Swapping AVATAR_CONFIG.shape must be enough —
+    # no markup/CSS rewrite — so the container's aspect ratio and corner
     # radius must come from CSS custom properties JS sets from that one
-    # config object, not literal values baked into the stylesheet.
+    # config object, not literal values baked into the stylesheet. Default
+    # shape is a rounded rectangle, not a circle — see
+    # test_avatar_is_not_framed_in_a_circular_orb for why that matters.
     client = _client(monkeypatch)
     html = client.get("/ui").text
     assert "aspect-ratio: var(--avatar-aspect)" in html
     assert "border-radius: var(--avatar-radius)" in html
-    assert 'shape: { aspect: "1", radius: "50%" }' in html
+    assert 'shape: { aspect: "3 / 4", radius: "10px" }' in html
     assert 'wrap.style.setProperty("--avatar-aspect", AVATAR_CONFIG.shape.aspect);' in html
     assert 'wrap.style.setProperty("--avatar-radius", AVATAR_CONFIG.shape.radius);' in html
 

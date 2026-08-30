@@ -152,16 +152,26 @@ def test_served_page_has_the_floating_orb_wired_into_the_chat_lifecycle(monkeypa
     assert "setOrbReason('error', true)" in html
 
 
-def test_orb_is_draggable_resizable_and_repositions_on_report_change(monkeypatch):
+def test_orb_is_a_docked_panel_not_a_draggable_floating_circle(monkeypatch):
+    # 2026-08-29: Lee's direction reversed the 2026-08-19 "floating,
+    # draggable, resizable" requirement — JARVIS's presence panel now
+    # docks into the shell layout (left/center/right, a real flex sibling
+    # of #sidebar/#content, or a fixed bottom-center bar for "center") so
+    # it never overlaps a report in the first place, rather than dragging
+    # or hopping corners to get out of the way. All of the old
+    # drag/resize/reposition machinery is gone, not just unused.
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert "orb-resize-handle" in html
-    assert "pointerdown" in html
-    assert "savePosition" in html
-    assert "saveSize" in html
-    assert "window.onReportOpened" in html
-    assert "jarvis_orb_pos" in html
-    assert "jarvis_orb_size" in html
+    assert "orb-resize-handle" not in html
+    assert "savePosition" not in html
+    assert "saveSize" not in html
+    assert "window.onReportOpened" not in html
+    assert "jarvis_orb_pos" not in html
+    assert "jarvis_orb_size" not in html
+    assert "window.setAvatarPosition = function setAvatarPosition(position)" in html
+    assert 'body[data-avatar-position="left"] #orb-widget { order: -1;' in html
+    assert 'body[data-avatar-position="center"] #orb-widget {' in html
+    assert 'body[data-avatar-position="right"] #orb-widget { order: 99; }' in html
 
 
 def test_orb_has_real_voice_input_and_output(monkeypatch):

@@ -55,6 +55,7 @@ DEFAULT_PREFERENCES: dict[str, Any] = {
     "accent_color": "#4f8cff",
     "animation_intensity": "normal",        # minimal | normal | full
     "interface_density": "normal",          # compact | normal | spacious
+    "avatar_position": "right",             # left | center | right — where JARVIS's presence panel docks
 
     # ── voice — the one genuinely new voice setting, output gain on the
     # Gemini audio path (see main.py's _AudioSink.set_gain) ────────────
@@ -135,6 +136,8 @@ def _validate(updates: dict) -> dict:
         raise ValueError(f"Unknown animation_intensity: {clean['animation_intensity']!r}.")
     if "interface_density" in clean and clean["interface_density"] not in ("compact", "normal", "spacious"):
         raise ValueError(f"Unknown interface_density: {clean['interface_density']!r}.")
+    if "avatar_position" in clean and clean["avatar_position"] not in ("left", "center", "right"):
+        raise ValueError(f"Unknown avatar_position: {clean['avatar_position']!r}. Valid: left, center, right")
     return clean
 
 
