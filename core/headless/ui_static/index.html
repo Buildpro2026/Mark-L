@@ -4,21 +4,32 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JARVIS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0a0c10;
-    --panel: #0f1218;
-    --panel-alt: #12151c;
-    --line: rgba(255,255,255,0.08);
-    --line-strong: rgba(255,255,255,0.16);
-    --text: #e4e7ec;
-    --muted: #7c8493;
-    --dim: #565d6b;
-    --accent: #4f8cff;
-    --ok: #35c987;
-    --warn: #e0a83c;
-    --bad: #e0555c;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    /* Palette + type system translated from the "Aegis Command Deck"
+       reference (2026-08-31, Lee's spec): a cooler, ink-deep background,
+       an icy-blue text tone instead of neutral gray, and a cyan accent —
+       same variable NAMES as before (every existing rule already
+       references them), just richer values, so this is a one-block swap
+       that cascades to all 13 pages instead of a per-rule rewrite. */
+    --bg: #04070d;
+    --panel: rgba(9,18,30,0.74);
+    --panel-alt: #0a1420;
+    --line: rgba(120,185,225,0.16);
+    --line-strong: rgba(120,185,225,0.34);
+    --text: #dcefff;
+    --muted: #7f9db3;
+    --dim: #465b6e;
+    --accent: #1fe0ff;
+    --accent-dim: rgba(31,224,255,0.14);
+    --ok: #35e5a0;
+    --warn: #ffb454;
+    --bad: #ff5c72;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --font-display: 'Rajdhani', -apple-system, sans-serif;
     /* JARVIS's presence panel width — the one place this is ever set.
        Everything that positions/sizes #orb-widget (base rule, left/right/
        center variants, the tablet/mobile collapse) reads this instead of
@@ -57,7 +68,7 @@
   html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 14px;
   }
   /* Ambient command-center environment (see #bg-field markup comment).
@@ -214,7 +225,7 @@
   section.block::after, #chat-wrap::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
   #chat-wrap { position: relative; }
   section.block h2 {
-    font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim);
+    font-family: var(--font-display); font-weight: 600; font-size: 11.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim);
     margin: 0 0 10px; padding: 0 0 8px 10px; border-bottom: 1px solid var(--line);
     display: flex; justify-content: space-between; align-items: center; position: relative;
   }
@@ -695,9 +706,23 @@
     width: 100%; text-align: center; border-radius: 999px; font-size: 12px; padding: 8px 14px;
     background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px);
   }
+  /* Bigger, bolder state readout (2026-08-31, reference-driven): JARVIS
+     announcing its own state should read with real presence, not as a
+     small caption — display font, letter-spacing, a glow that matches
+     --orb-state-color exactly (same source of truth the frame/ring/ground
+     light already use), and a pulsing dot rather than plain text alone. */
   #orb-state-label {
-    font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+    display: flex; align-items: center; gap: 8px; justify-content: center;
+    font-family: var(--font-display); font-weight: 600; font-size: 13px; letter-spacing: 0.24em; text-transform: uppercase;
+    color: var(--orb-state-color); text-shadow: 0 0 14px color-mix(in srgb, var(--orb-state-color) 65%, transparent);
+    transition: color .4s ease, text-shadow .4s ease;
   }
+  .orb-state-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--orb-state-color);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--orb-state-color) 80%, transparent);
+    animation: orb-state-dot-blink 1.8s ease-in-out infinite;
+  }
+  @keyframes orb-state-dot-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
   @media (max-width: 640px) {
     #orb-widget { width: 100%; padding: 12px 14px; }
     body[data-avatar-position="left"] #orb-widget,
@@ -735,8 +760,8 @@
   }
   .ch-group { display: flex; align-items: center; gap: 14px; }
   .ch-brand-group .brand {
-    display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: 0.16em; font-size: 13px;
-    text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 35%, transparent);
+    display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: 0.22em; font-size: 15px;
+    font-family: var(--font-display); text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .ch-brand-group .brand .dot {
     width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none;
@@ -822,7 +847,7 @@
 
   #content { flex: 1; overflow-y: auto; padding: clamp(24px, 5vh, 56px) clamp(20px, 6vw, 100px) 90px; max-width: 1320px; width: 100%; margin: 0 auto; }
   .page-head { max-width: 780px; margin-left: auto; margin-right: auto; }
-  .page-head h1 { font-size: 11px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
+  .page-head h1 { font-family: var(--font-display); font-weight: 600; font-size: 13px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
   .page.active { animation: lens-arrive .34s ease both; }
   @keyframes lens-arrive { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
   #page-home { min-height: calc(100vh - 180px); padding-top: min(28vh, 260px); }
@@ -877,7 +902,6 @@
   #chat-wrap { max-width: 780px; }
   #buildpro-body, #ddf-body, #intelligence-body, #ceo-body, #careerrocket-body { padding: 18px; }
   #orb-input-row input { font-size: 13px; padding: 10px 15px; }
-  #orb-state-label { color: var(--accent); }
   @media (max-width: 900px) {
     #command-header { height: auto; flex-wrap: wrap; padding: 10px 14px; gap: 8px 14px; }
     .ch-metrics-group { margin-left: 0; flex-wrap: wrap; gap: 8px 14px; }
@@ -1363,7 +1387,7 @@
           <input id="orb-input" type="text" placeholder="Ask Jarvis, or click the mic…">
         </form>
       </div>
-      <div id="orb-state-label">idle</div>
+      <div id="orb-state-label"><span class="orb-state-dot"></span><span id="orb-state-text">Ready</span></div>
     </aside>
   </div>
 </div>
@@ -2624,7 +2648,6 @@ checkSession();
    staying off a 3D engine. */
 (function () {
   const STATE_COLORS = { idle: "#4b6b7c", listening: "#00d4ff", thinking: "#b98bff", tool: "#ffb454", speaking: "#5cffc4", error: "#ff5c6c", interrupted: "#ff5c6c", success: "#34d17c", offline: "#5a6470" };
-  const STATE_PULSE_SPEED = { idle: 0.7, listening: 1.6, thinking: 2.6, tool: 3.1, speaking: 2.1, error: 5.5, interrupted: 5.5, success: 1.8, offline: 0.4 };
   // Executive-facing labels — the internal reason name ("tool") stays as-is
   // everywhere it's already wired (SSE handlers, tests); only the text a
   // person reads changes, so "JARVIS is executing" replaces "Tool" without
@@ -2632,9 +2655,8 @@ checkSession();
   const STATE_LABELS = { idle: "Ready", tool: "Executing", offline: "Offline", success: "Success" };
   const widget = document.getElementById("orb-widget");
   const canvas = document.getElementById("orb-canvas");
-  const stateLabel = document.getElementById("orb-state-label");
+  const stateLabel = document.getElementById("orb-state-text");
   if (!widget || !canvas) return;
-  const ctx = canvas.getContext("2d");
 
   let currentState = "idle";
   let stateHoldUntil = 0;
@@ -2646,7 +2668,7 @@ checkSession();
     currentState = STATE_COLORS[state] ? state : "idle";
     if (currentState === "interrupted") stateHoldUntil = now + 600;
     if (currentState === "error") stateHoldUntil = now + 1400;
-    if (stateLabel) stateLabel.textContent = (STATE_LABELS[currentState] || currentState).toLowerCase();
+    if (stateLabel) stateLabel.textContent = STATE_LABELS[currentState] || (currentState.charAt(0).toUpperCase() + currentState.slice(1));
     widget.classList.toggle("listening", currentState === "listening");
     widget.classList.toggle("orb-state-thinking", currentState === "thinking");
     widget.classList.toggle("orb-state-speaking", currentState === "speaking");
@@ -2716,39 +2738,12 @@ checkSession();
     if (currentState === "tool") applyPriority();
   };
 
-  // ── canvas: breathing gradient core + a few slowly orbiting particles ──
-  function sizeCanvas() {
-    const cssSize = widget.getBoundingClientRect().width || parseInt(getComputedStyle(document.documentElement).getPropertyValue("--orb-size")) || 128;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = cssSize * dpr;
-    canvas.height = cssSize * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return cssSize;
-  }
-  let orbCssSize = sizeCanvas();
-  window.addEventListener("resize", () => { orbCssSize = sizeCanvas(); });
-
-  const particles = Array.from({ length: 5 }, (_, i) => ({
-    angle: (i / 5) * Math.PI * 2, radiusFactor: 0.62 + (i % 2) * 0.1, speed: 0.25 + i * 0.05,
-  }));
-
-  // Respected here too, not just by the global CSS freeze: the draw loop
-  // itself is JS-driven (requestAnimationFrame), outside any CSS
+  // Respected here too, not just by the global CSS freeze: the presence
+  // loop itself is JS-driven (requestAnimationFrame), outside any CSS
   // animation-duration override, so it needs its own reduced-motion check
   // to actually calm down rather than just stop retriggering.
   const reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const motionScale = reducedMotion ? 0.08 : 1;
-
-  // Darkens (negative percent) or lightens a "#rrggbb" state color for the
-  // core gradient's shadow falloff — small, local, no color library needed.
-  function shadeColor(hex, percent) {
-    const num = parseInt(hex.slice(1), 16);
-    const clamp255 = (v) => Math.max(0, Math.min(255, Math.round(v)));
-    const r = clamp255(((num >> 16) & 0xff) * (1 + percent));
-    const g = clamp255(((num >> 8) & 0xff) * (1 + percent));
-    const b = clamp255((num & 0xff) * (1 + percent));
-    return `rgb(${r}, ${g}, ${b})`;
-  }
 
   // ── FaceRenderer: JARVIS's own rendered likeness of Lee — a real,
   // locally-generated video (no photo pixels or synthetic drawing), swapped
@@ -2779,15 +2774,33 @@ checkSession();
       speaking: "/ui/api/avatar/asset/speaking_sample.mp4",
     },
   };
-  const STATE_RING_SPEED = {
-    idle: 8, listening: 5.5, thinking: 2.4, tool: 3.6, speaking: 3.8,
-    error: 1.3, interrupted: 1.3, success: 2.8, offline: 10,
+  // Whole-presence motion (2026-08-31, reference-driven): translated from
+  // the "Aegis Command Deck" reference's updatePortrait(), which found the
+  // same limitation this codebase already documented above — real per-
+  // pixel face animation (blink/lip-sync) on a static/near-static asset
+  // needs ML-grade landmark alignment that isn't available here — and
+  // solved it the same honest way: animate the whole presence as a unit
+  // (a real behavior; heads move as a unit while listening/thinking) via
+  // CSS transforms driven by state, instead of faking facial detail. Kept
+  // to translateY/scale/rotateZ (in-plane) rather than the reference's
+  // rotateX/Y 3D tilt: JARVIS's frame shows a real rectangular video, and
+  // 3D perspective tilt on rectangular video content reads as the footage
+  // itself warping, not a head turning — rotateZ has no such distortion.
+  const STATE_MOTION = {
+    idle:      { bobAmp: 3,   bobSpeed: 0.5,  swayDeg: 0.3, swaySpeed: 0.6 },
+    listening: { bobAmp: 2,   bobSpeed: 0.85, swayDeg: 0.6, swaySpeed: 0.9 },
+    thinking:  { bobAmp: 1.5, bobSpeed: 1.3,  swayDeg: 1.1, swaySpeed: 0.35 },
+    tool:      { bobAmp: 1.5, bobSpeed: 1.05, swayDeg: 0.5, swaySpeed: 1.2 },
+    speaking:  { bobAmp: 2.5, bobSpeed: 2.1,  swayDeg: 0.4, swaySpeed: 1.6 },
+    error:     { bobAmp: 1,   bobSpeed: 3.2,  swayDeg: 0.8, swaySpeed: 3.0 },
+    interrupted: { bobAmp: 1, bobSpeed: 3.2,  swayDeg: 0.8, swaySpeed: 3.0 },
+    success:   { bobAmp: 1,   bobSpeed: 1.8,  swayDeg: 0.3, swaySpeed: 1.0 },
+    offline:   { bobAmp: 0,   bobSpeed: 0,    swayDeg: 0,   swaySpeed: 0 },
   };
   const FaceRenderer = (() => {
     const wrap = document.getElementById("orb-face-wrap");
     const video = document.getElementById("orb-face-video");
-    const ring = document.getElementById("orb-face-ring");
-    const halo = document.getElementById("orb-face-halo");
+    const frame = document.getElementById("orb-face-frame");
     let currentAsset = null;
 
     if (wrap) {
@@ -2810,100 +2823,26 @@ checkSession();
 
     function update(t) {
       syncVideo();
-      const ringSpeed = STATE_RING_SPEED[currentState] || STATE_RING_SPEED.idle;
-      if (ring) {
-        ring.style.animationDuration = ringSpeed + "s";
-        ring.style.filter = `drop-shadow(0 0 ${8 + (currentState === "speaking" ? 6 : 0)}px var(--orb-state-color))`;
-      }
-      if (halo) {
-        const pulse = currentState === "thinking" ? 0.22 * (0.5 + 0.5 * Math.sin(t * 2))
-          : currentState === "speaking" ? 0.18 * (0.5 + 0.5 * Math.sin(t * 9)) : 0;
-        halo.style.opacity = String(0.5 + pulse);
+      if (frame) {
+        const m = STATE_MOTION[currentState] || STATE_MOTION.idle;
+        const bob = Math.sin(t * m.bobSpeed) * m.bobAmp * motionScale;
+        const scale = 1 + Math.abs(Math.sin(t * m.bobSpeed)) * 0.006 * motionScale;
+        const sway = Math.sin(t * m.swaySpeed + 0.6) * m.swayDeg * motionScale;
+        frame.style.transform = `translateY(${bob.toFixed(2)}px) rotateZ(${sway.toFixed(2)}deg) scale(${scale.toFixed(4)})`;
       }
     }
 
     return { update };
   })();
 
+  // #orb-canvas is display:none (see its rule above) — JARVIS's presence
+  // is the real video + FaceRenderer's whole-frame motion now, not a
+  // canvas-drawn sphere. This loop used to also render an elaborate
+  // gradient-sphere-and-particles orb onto that hidden canvas every
+  // frame — pure wasted CPU on an element nobody could ever see. Cut
+  // down to exactly what's actually needed: ticking FaceRenderer.
   function draw(t) {
-    const size = orbCssSize;
-    const cx = size / 2, cy = size / 2;
-    const speed = (STATE_PULSE_SPEED[currentState] || 1) * motionScale;
-    const pulse = 1 + Math.sin(t * speed) * 0.055;
-    const r = (size / 2 - 4) * pulse;
-    const color = STATE_COLORS[currentState];
-
-    ctx.clearRect(0, 0, size, size);
-
-    // Ambient halo — soft light behind the core, the layered depth a flat
-    // filled circle can't give on its own.
-    const halo = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, size / 2);
-    halo.addColorStop(0, color + "33");
-    halo.addColorStop(1, color + "00");
-    ctx.beginPath();
-    ctx.arc(cx, cy, size / 2, 0, Math.PI * 2);
-    ctx.fillStyle = halo;
-    ctx.fill();
-
-    // Slowly rotating dashed ring — present even at idle so the orb reads
-    // as alive, not static chrome; speed still tracks the current state.
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(t * speed * 0.35);
-    ctx.beginPath();
-    ctx.setLineDash([r * 0.09, r * 0.16]);
-    ctx.arc(0, 0, r * 1.14, 0, Math.PI * 1.5);
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.3;
-    ctx.lineWidth = Math.max(1, size * 0.006);
-    ctx.stroke();
-    ctx.restore();
-    ctx.globalAlpha = 1;
-
-    // Core: layered radial gradient sphere — a specular highlight near the
-    // top-left, the state color through the middle, a darker shadow
-    // falloff toward the rim for real dimensionality instead of a flat disc.
-    const grad = ctx.createRadialGradient(cx - r * 0.32, cy - r * 0.38, r * 0.04, cx, cy, r);
-    grad.addColorStop(0, "#ffffff");
-    grad.addColorStop(0.17, color);
-    grad.addColorStop(0.6, shadeColor(color, -0.35));
-    grad.addColorStop(1, "#02060b");
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // Thin bright rim.
-    ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.985, 0, Math.PI * 2);
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.55;
-    ctx.lineWidth = Math.max(1, size * 0.01);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-
-    // Orbiting particles — brand motif shared with the /3d command center's
-    // orbiting nuclei, so the two surfaces read as the same product. Each
-    // carries a soft glow instead of a flat dot, for the same layered-light
-    // feel as the halo and core above.
-    ctx.shadowColor = color;
-    for (const p of particles) {
-      const angle = t * p.speed * motionScale + p.angle;
-      const pr = r * p.radiusFactor;
-      const px = cx + Math.cos(angle) * pr;
-      const py = cy + Math.sin(angle) * pr * 0.5; // flattened ellipse orbit
-      ctx.shadowBlur = size * 0.03;
-      ctx.beginPath();
-      ctx.arc(px, py, Math.max(1.4, size * 0.014), 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.globalAlpha = 0.85;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-    ctx.shadowBlur = 0;
-
     FaceRenderer.update(t);
-
     requestAnimationFrame((t2) => draw(t2 / 1000));
   }
   requestAnimationFrame((t) => draw(t / 1000));
