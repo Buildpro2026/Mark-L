@@ -525,16 +525,11 @@
   }
   body[data-avatar-position="left"] #orb-widget { order: -1; border-right: 1px solid var(--line); border-left: 0; }
   body[data-avatar-position="right"] #orb-widget { order: 99; }
-  /* Home is the flagship "JARVIS is here" screen (2026-08-31, single-view
-     composition pass) — the presence panel grows noticeably wider there
-     specifically, still the same docked/configurable panel (Settings'
-     avatar_position still controls left/center/right), just visually
-     dominant on the one screen the directive calls out for it most.
-     :has() scopes this to when Home is the active page without any new
-     JS state to keep in sync with switchTab(). Left unscoped from the
-     900px tablet collapse below, which already overrides width directly
-     regardless of this variable. */
-  body:has(#page-home.active) #orb-widget { --avatar-panel-width: 380px; }
+  /* Home overrides avatar_position entirely (2026-08-31 stage rebuild) —
+     see the dedicated Home stage rules further down. Settings'
+     avatar_position (left/center/right) still fully controls docking on
+     every one of the other 12 pages; Home just isn't a docked-panel page
+     anymore, it's the one screen where JARVIS's presence IS the layout. */
   body[data-avatar-position="center"] #orb-widget {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
     flex-direction: row; width: auto; max-width: min(640px, 92vw); gap: 18px;
@@ -656,6 +651,12 @@
      GLTF here — the earlier rigged 3D face was reported "creepy" (see
      test_ui_command_center.py) and explicitly replaced with the plain
      (now-hidden) canvas this used to sit on top of. */
+  /* The screen housing (2026-08-31 stage rebuild): a passthrough wrapper
+     everywhere except Home, where it becomes the big instrument-panel
+     "monitor" JARVIS's own frame sits inside — see the Home stage rules
+     further down for the actual size/corner-bracket treatment. */
+  #orb-screen { position: relative; width: 100%; }
+  .orb-screen-corner { position: absolute; width: 0; height: 0; pointer-events: none; opacity: 0; }
   #orb-face-wrap {
     --avatar-aspect: 3 / 4; --avatar-radius: 10px;
     position: relative; width: 100%; aspect-ratio: var(--avatar-aspect); pointer-events: none;
@@ -871,52 +872,10 @@
      content-covering overlap risk at the very bottom of a scrolled page
      that the generic 90px padding above doesn't clear. Scoped to center
      specifically rather than raised for everyone, since left/right dock
-     in-flow and never overlap anything. */
+     in-flow and never overlap anything. Excluded on Home, which ignores
+     avatar_position entirely (see below) and defines its own padding. */
   @media (min-width: 901px) {
-    body[data-avatar-position="center"] #content { padding-bottom: 170px; }
-    /* Home single-view stage (2026-08-31, reference-driven): a true
-       non-scrolling command deck when the avatar docks to a side (the
-       default). #content itself stops scrolling; only the two rails
-       below scroll internally, so nothing is ever lost, it just moves
-       into its own scrollbar instead of the page's. Left alone for
-       avatar_position="center" — that mode already turns the presence
-       panel into its own floating fixed bar (see above), so Home there
-       keeps the simpler scrolling single-column layout from the base
-       rules rather than fighting for the same non-scrolling real estate
-       a fixed bottom bar also wants. */
-    body:has(#page-home.active):not([data-avatar-position="center"]) #content {
-      overflow: hidden; height: 100%; max-width: none;
-      padding: clamp(20px, 3.5vh, 40px) clamp(20px, 6vw, 72px) 0;
-      display: flex;
-    }
-    body:has(#page-home.active):not([data-avatar-position="center"]) #page-home {
-      min-height: 0; height: 100%; width: 100%; padding-top: 0;
-      display: flex; flex-direction: column;
-    }
-    body:has(#page-home.active):not([data-avatar-position="center"]) #home-greeting,
-    body:has(#page-home.active):not([data-avatar-position="center"]) .home-telemetry,
-    body:has(#page-home.active):not([data-avatar-position="center"]) .home-status-strip {
-      flex: none;
-    }
-    body:has(#page-home.active):not([data-avatar-position="center"]) .home-stage-rails {
-      flex: 1; min-height: 0; margin-top: 18px; max-width: none;
-      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;
-    }
-    body:has(#page-home.active):not([data-avatar-position="center"]) .home-rail {
-      min-height: 0; overflow-y: auto; padding-right: 6px;
-    }
-    /* The command dock reads as its own floating surface on the stage
-       instead of an in-flow strip glued under the frame — same controls,
-       same ids/behavior, just visually detached (no more top divider;
-       a real bordered/blurred pill instead). Excluded for "center",
-       which is already a floating bar in its own right. */
-    body:has(#page-home.active):not([data-avatar-position="center"]) .orb-command-dock {
-      border-top: 0; margin-top: 6px;
-      background: color-mix(in srgb, var(--panel-alt) 88%, transparent);
-      border: 1px solid var(--line-strong); border-radius: 16px; padding: 14px 16px;
-      box-shadow: 0 14px 30px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.05);
-      backdrop-filter: blur(10px);
-    }
+    body[data-avatar-position="center"]:not(:has(#page-home.active)) #content { padding-bottom: 170px; }
   }
   .page-head { max-width: 780px; margin-left: auto; margin-right: auto; }
   .page-head h1 { font-family: var(--font-display); font-weight: 600; font-size: 13px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
@@ -931,57 +890,122 @@
     border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
   }
   .home-telemetry .hud-label { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); }
-  /* Fallback/narrow-width Home content: a single stacked column — both
-     rails one after another, normal document flow, normal page scroll.
-     This is also the PERMANENT behavior below 901px and whenever the
-     avatar is center-docked (see the stage upgrade in the 901px query
-     below) — nothing here depends on JS, so it just works. */
-  .home-stage-rails { display: flex; flex-direction: column; gap: 14px; max-width: 980px; margin: 18px auto 0; }
-  .home-rail { display: flex; flex-direction: column; gap: 14px; }
-  #page-home .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 980px; margin: 0 auto; }
-  /* HUD module geometry — replaces the earlier soft 18px-radius "SaaS
-     card" look with a technical instrument-panel shape: two corners
-     (top-left/bottom-right) stay sharp and carry the bracket framing
-     from section.block::before/::after above; the other two are angle-
-     clipped, the "clipped corner" sci-fi panel silhouette. A faint top
-     highlight (inset box-shadow) plus a real drop shadow gives the panel
-     lift off the background field instead of sitting flat on it. */
-  #page-home section.block, .page:not(#page-home) section.block, .page:not(#page-home) .row-list, #chat-wrap, #buildpro-body, #ddf-body, #intelligence-body, #ceo-body, #careerrocket-body {
+  /* Fallback/narrow-width Home content: a single stacked column of
+     compact rows, normal document flow, normal page scroll. Permanent
+     behavior below 901px (see the mobile stage rules further down, which
+     restyle without restructuring) — nothing here depends on JS. */
+  .home-rail-section { margin: 0 auto 18px; max-width: 620px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+  .home-rail-section:last-child { border-bottom: 0; margin-bottom: 0; }
+  .home-rail-section h2 {
+    margin: 0 0 10px; font-family: var(--font-display); font-size: 11px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--dim); display: flex; align-items: center; gap: 8px;
+  }
+  .home-rail-section h2::before { content: ""; width: 12px; height: 1px; background: var(--accent); flex: none; }
+  .home-status-strip { display: flex; flex-direction: column; gap: 0; }
+  .home-stat-card {
+    min-width: 0; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px;
+    text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+    padding: 10px 0; cursor: pointer; font-family: inherit; color: var(--text); box-shadow: none;
+    transition: background .15s ease;
+  }
+  .home-stat-card:last-child { border-bottom: 0; }
+  .home-stat-card:hover { background: var(--accent-dim); }
+  .hsc-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
+  .hsc-value { font-size: 14px; font-weight: 700; color: var(--text); }
+  .hsc-with-ring { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 1; }
+  .hsc-with-ring .radial-metric { flex: none; }
+  /* HUD module geometry for every OTHER page's cards — unchanged from
+     before; Home no longer uses section.block at all (see .home-rail-section
+     above), so it's dropped from this selector list. */
+  .page:not(#page-home) section.block, .page:not(#page-home) .row-list, #chat-wrap, #buildpro-body, #ddf-body, #intelligence-body, #ceo-body, #careerrocket-body {
     background: linear-gradient(165deg, color-mix(in srgb, var(--panel) 88%, transparent), color-mix(in srgb, var(--panel) 72%, transparent));
     border: 1px solid var(--line); border-radius: 3px;
     clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px));
     backdrop-filter: blur(12px); padding: 16px 18px;
     box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 16px 40px rgba(0,0,0,.28);
   }
-  #page-home section.block { margin: 0; min-height: 135px; }
-  #page-home section.block h2 { border: 0; color: var(--accent); }
-  .home-status-strip {
-    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;
-    max-width: 980px; margin: 14px auto 0;
-  }
-  .home-stat-card {
-    min-width: 0;
-    position: relative; text-align: left; background: linear-gradient(165deg, color-mix(in srgb, var(--panel) 80%, transparent), color-mix(in srgb, var(--panel) 62%, transparent));
-    border: 1px solid var(--line); border-radius: 3px;
-    clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
-    padding: 12px 16px; cursor: pointer; font-family: inherit; color: var(--text);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
-    transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
-  }
-  .home-stat-card:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    background: linear-gradient(165deg, color-mix(in srgb, var(--panel) 90%, transparent), color-mix(in srgb, var(--panel) 74%, transparent));
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent), 0 10px 24px rgba(0,0,0,.25);
-  }
-  .hsc-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
-  .hsc-value { font-size: 14px; font-weight: 700; color: var(--text); }
-  .hsc-with-ring { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .hsc-with-ring .radial-metric { flex: none; }
   .page:not(#page-home) { max-width: 900px; margin: 0 auto; }
   .page:not(#page-home) section.block { margin-bottom: 18px; }
   #chat-wrap { max-width: 780px; }
   #buildpro-body, #ddf-body, #intelligence-body, #ceo-body, #careerrocket-body { padding: 18px; }
   #orb-input-row input { font-size: 13px; padding: 10px 15px; }
+
+  /* ══ Home stage: desktop (2026-08-31 full rebuild) ═══════════════════
+     Replaces the previous "two rails flanking a wider docked panel"
+     increment, which Lee rejected as still reading like a dashboard.
+     #shell-body becomes a real 3-column grid — nav | JARVIS stage | one
+     compact info rail — and avatar_position is ignored entirely: Home is
+     the one screen where JARVIS's presence dictates the composition
+     rather than a Settings toggle deciding where a docked panel sits.
+     --home-rail-w is a variable (not a hardcoded value sprinkled around)
+     so the one dimension most likely to need tuning later is one edit. */
+  @media (min-width: 901px) {
+    :root { --home-rail-w: 300px; }
+    body:has(#page-home.active) #shell-body {
+      display: grid; grid-template-columns: 216px minmax(0, 1fr) var(--home-rail-w);
+      grid-template-rows: minmax(0, 1fr);
+    }
+    body:has(#page-home.active) #sidebar { grid-column: 1; grid-row: 1; width: auto; }
+    body:has(#page-home.active) #orb-widget {
+      grid-column: 2; grid-row: 1; order: 0; display: flex; position: static;
+      width: 100%; max-width: none; flex-direction: column; align-items: center; justify-content: center;
+      gap: 0; left: auto; bottom: auto; transform: none;
+      border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+      border-radius: 0; box-shadow: none; backdrop-filter: none; overflow: hidden;
+      padding: clamp(20px, 4vh, 48px) clamp(16px, 3vw, 40px);
+    }
+    body:has(#page-home.active) #content {
+      grid-column: 3; grid-row: 1; overflow-y: auto; max-width: none; width: 100%;
+      margin: 0; padding: 24px 20px 32px; border-left: 1px solid var(--line);
+    }
+    body:has(#page-home.active) #page-home {
+      min-height: 0; padding-top: 0; display: flex; flex-direction: column; gap: 0;
+    }
+    body:has(#page-home.active) .home-rail-section { max-width: none; }
+
+    /* The screen: a big instrument-panel housing around JARVIS's existing
+       rectangular frame — the dominant element on Home, not a bigger
+       version of the small docked panel. Height-driven (not a hardcoded
+       width) since #orb-face-wrap keeps its real 3:4 aspect ratio, so it
+       scales cleanly at 1024/1280/1440 off the viewport instead of a
+       single guessed pixel value. */
+    body:has(#page-home.active) #orb-screen {
+      width: auto; max-width: 100%; padding: 32px;
+      border: 1px solid var(--line); border-radius: 20px;
+      background: linear-gradient(160deg, color-mix(in srgb, var(--panel) 55%, transparent), color-mix(in srgb, var(--panel-alt) 30%, transparent));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.03), 0 30px 80px rgba(0,0,0,.45);
+    }
+    body:has(#page-home.active) #orb-face-wrap { width: auto; height: clamp(360px, 62vh, 640px); }
+    body:has(#page-home.active) .orb-screen-corner { width: 30px; height: 30px; border: 1px solid var(--line-strong); opacity: .8; }
+    body:has(#page-home.active) .orb-screen-corner.tl { top: 8px; left: 8px; border-right: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.tr { top: 8px; right: 8px; border-left: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.bl { bottom: 8px; left: 8px; border-right: 0; border-top: 0; }
+    body:has(#page-home.active) .orb-screen-corner.br { bottom: 8px; right: 8px; border-left: 0; border-top: 0; }
+    body:has(#page-home.active) #orb-state-label { margin-top: 20px; font-size: 14px; }
+
+    /* The command bar: a real floating pill below the screen — input
+       first (reordered, no DOM change), icon controls after, so typing
+       or speaking to JARVIS reads as one action, not two stacked blocks
+       under a photo. */
+    body:has(#page-home.active) .orb-command-dock {
+      flex-direction: row; align-items: center; gap: 10px;
+      width: min(560px, 100%); margin-top: 28px; border-top: 0;
+      padding: 8px 10px 8px 22px; border-radius: 999px;
+      background: var(--panel); backdrop-filter: blur(14px);
+      border: 1px solid var(--line-strong); box-shadow: 0 20px 50px rgba(0,0,0,.5);
+    }
+    body:has(#page-home.active) .orb-command-dock-label { display: none; }
+    body:has(#page-home.active) #orb-input-row { order: 1; flex: 1; width: auto; }
+    body:has(#page-home.active) #orb-input-row input { text-align: left; }
+    body:has(#page-home.active) #orb-controls { order: 2; gap: 8px; align-items: center; }
+
+    /* The rail: subordinate to the stage — compact rows with a hairline
+       divider, no card chrome, no clipped-corner HUD styling. */
+    body:has(#page-home.active) #home-greeting { max-width: none; margin: 0 0 10px; text-align: left; font-size: 13px; }
+    body:has(#page-home.active) .home-telemetry {
+      justify-content: flex-start; max-width: none; margin: 0; padding: 0; border: 0; gap: 10px 16px; flex-wrap: wrap;
+    }
+  }
   @media (max-width: 900px) {
     #command-header { height: auto; flex-wrap: wrap; padding: 10px 14px; gap: 8px 14px; }
     .ch-metrics-group { margin-left: 0; flex-wrap: wrap; gap: 8px 14px; }
@@ -1013,7 +1037,9 @@
        Collapsing the panel to a slim horizontal strip here — for every
        avatar_position, since there's no side column left to dock into
        once the layout is one stack — shrinks its natural height to
-       ~70-90px so #content gets essentially the whole column back. */
+       ~70-90px so #content gets essentially the whole column back. Home
+       overrides this immediately below: JARVIS stays the dominant first
+       thing on Home even in the single-column collapse. */
     #orb-widget {
       width: 100%; max-width: 100%; flex-direction: row; flex-shrink: 0;
       align-items: center; justify-content: flex-start; gap: 12px;
@@ -1033,13 +1059,44 @@
     .orb-icon-btn { width: 28px; height: 28px; }
     #orb-mic-btn { width: 34px; height: 34px; }
     #orb-input-row, #orb-state-label { display: none; }
+
+    /* ══ Home stage: mobile/tablet ═══════════════════════════════════
+       Not "collapse the desktop rails into a stack" — an intentional
+       avatar-first composition: nav strip, then JARVIS (still a real
+       screen with a floating command pill, just smaller), then the one
+       compact rail below as normal scrolling content. JARVIS is still
+       the first thing reached, never squashed to the generic 56px icon
+       strip every other page uses here. */
+    body:has(#page-home.active) #sidebar { order: -2; }
+    body:has(#page-home.active) #orb-widget {
+      order: -1; flex-direction: column; height: auto; width: 100%;
+      padding: 22px 16px; gap: 0; border-left: 0; border-right: 0; border-bottom: 1px solid var(--line);
+      align-items: center; justify-content: center;
+    }
+    body:has(#page-home.active) #content { order: 0; }
+    body:has(#page-home.active) #orb-face-wrap { width: auto; height: clamp(220px, 40vh, 380px); flex: none; }
+    body:has(#page-home.active) #orb-screen { width: auto; max-width: 100%; padding: 18px; border-radius: 14px; border: 1px solid var(--line); }
+    body:has(#page-home.active) .orb-screen-corner { width: 20px; height: 20px; border: 1px solid var(--line-strong); opacity: .8; }
+    body:has(#page-home.active) .orb-screen-corner.tl { top: 6px; left: 6px; border-right: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.tr { top: 6px; right: 6px; border-left: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.bl { bottom: 6px; left: 6px; border-right: 0; border-top: 0; }
+    body:has(#page-home.active) .orb-screen-corner.br { bottom: 6px; right: 6px; border-left: 0; border-top: 0; }
+    body:has(#page-home.active) #orb-state-label { display: flex; margin-top: 14px; }
+    body:has(#page-home.active) .orb-command-dock {
+      display: flex; flex-direction: row; width: min(440px, 92%); margin-top: 16px; border-top: 0;
+      border-radius: 999px; padding: 6px 8px 6px 16px; border: 1px solid var(--line-strong);
+      background: var(--panel); backdrop-filter: blur(10px);
+    }
+    body:has(#page-home.active) .orb-command-dock-label { display: none; }
+    body:has(#page-home.active) #orb-input-row { display: block; order: 1; flex: 1; width: auto; }
+    body:has(#page-home.active) #orb-input-row input { text-align: left; }
+    body:has(#page-home.active) #orb-controls { order: 2; }
+    body:has(#page-home.active) .orb-control .orb-caption { display: none; }
   }
   @media (max-width: 640px) {
     .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text, #priority-badge-text, .ch-sys-status { display: none; }
     #content { padding: 20px 16px 80px; }
     #page-home { padding-top: 0; }
-    #page-home .grid2 { grid-template-columns: 1fr; }
-    .home-status-strip { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -1120,63 +1177,63 @@
     <div id="content">
 
     <!-- Home: the four permanent executive areas -->
+    <!-- Home stage (2026-08-31 rebuild): JARVIS's presence panel (#orb-widget,
+         a sibling of #content — see its own comment block) IS the stage;
+         #page-home's job is now only to BE the one slim, compact,
+         subordinate rail beside it — not a dashboard of equal-weight
+         cards. Every id below is unchanged from the previous dashboard
+         layout; only grouping/wrapper markup and heading text changed, so
+         every loadHome*() call keeps populating the exact same elements. -->
     <div class="page active" id="page-home">
       <div class="page-head"><h1 id="home-title">Home</h1></div>
-      <div id="home-greeting"></div>
-      <div class="home-telemetry" id="home-telemetry" title="Same live checks as the header — mirrored here so Home reads as JARVIS reporting its own status, not just a stat the app happens to show">
-        <span class="hud-label"><span class="status-dot active" id="home-tel-network-dot"></span> <span id="home-tel-network">NETWORK —</span></span>
-        <span class="hud-label" id="home-tel-ai">AI —</span>
-        <span class="hud-label" id="home-tel-uptime">UPTIME —</span>
-        <span class="hud-label" id="home-tel-agents">AGENTS —</span>
-      </div>
-      <div class="home-status-strip" id="home-status-strip">
-        <button class="home-stat-card" data-report="communications" type="button">
-          <div class="hsc-label">Communications</div>
-          <div class="hsc-value" id="home-comms-value">—</div>
-        </button>
-        <button class="home-stat-card" data-report="knowledge" type="button">
-          <div class="hsc-label">JARVIS Brain</div>
-          <div class="hsc-value" id="home-knowledge-value">—</div>
-        </button>
-        <button class="home-stat-card hsc-with-ring" data-report="ceo" type="button">
-          <div>
-            <div class="hsc-label">Strategic Objective</div>
-            <div class="hsc-value" id="home-objective-value">—</div>
-          </div>
-          <div class="radial-metric" id="home-objective-ring"></div>
-        </button>
-      </div>
-      <!-- Single-view stage composition (2026-08-31): the four working
-           panels + activity feed regroup into two rails flanking JARVIS's
-           presence panel (a flex sibling of #content — see #orb-widget)
-           instead of a flat 2x2 dashboard grid. Ids are unchanged, so
-           every loadHome*() call below keeps populating the exact same
-           elements; only their document position/grouping moved. -->
-      <div class="home-stage-rails">
-        <div class="home-rail home-rail-left">
-          <section class="block">
-            <h2>Today's Priorities</h2>
-            <div class="row-list" id="home-priorities"><div class="empty">Loading…</div></div>
-          </section>
-          <section class="block">
-            <h2>Calendar</h2>
-            <div class="row-list" id="home-calendar"><div class="empty">Loading…</div></div>
-          </section>
+      <div class="home-rail-section" id="home-greeting-section">
+        <div id="home-greeting"></div>
+        <div class="home-telemetry" id="home-telemetry" title="Same live checks as the header — mirrored here so Home reads as JARVIS reporting its own status, not just a stat the app happens to show">
+          <span class="hud-label"><span class="status-dot active" id="home-tel-network-dot"></span> <span id="home-tel-network">NETWORK —</span></span>
+          <span class="hud-label" id="home-tel-ai">AI —</span>
+          <span class="hud-label" id="home-tel-uptime">UPTIME —</span>
+          <span class="hud-label" id="home-tel-agents">AGENTS —</span>
         </div>
-        <div class="home-rail home-rail-right">
-          <section class="block">
-            <h2>Active Agents <span class="radial-metric radial-metric-inline" id="home-agents-ring"></span></h2>
-            <div class="row-list" id="home-agents"><div class="empty">Loading…</div></div>
-          </section>
-          <section class="block">
-            <h2>Opportunities</h2>
-            <div class="row-list" id="home-opportunities"><div class="empty">Loading…</div></div>
-          </section>
-          <section class="block" id="home-activity-block">
-            <h2>Live System Activity</h2>
-            <div class="row-list" id="home-activity"><div class="empty">Loading…</div></div>
-          </section>
+      </div>
+      <div class="home-rail-section">
+        <h2>Priorities</h2>
+        <div class="row-list" id="home-priorities"><div class="empty">Loading…</div></div>
+      </div>
+      <div class="home-rail-section">
+        <h2>Active Agents <span class="radial-metric radial-metric-inline" id="home-agents-ring"></span></h2>
+        <div class="row-list" id="home-agents"><div class="empty">Loading…</div></div>
+      </div>
+      <div class="home-rail-section">
+        <h2>Calendar</h2>
+        <div class="row-list" id="home-calendar"><div class="empty">Loading…</div></div>
+      </div>
+      <div class="home-rail-section">
+        <h2>Opportunities</h2>
+        <div class="row-list" id="home-opportunities"><div class="empty">Loading…</div></div>
+      </div>
+      <div class="home-rail-section" id="home-status-strip-section">
+        <h2>Executive Snapshot</h2>
+        <div class="home-status-strip" id="home-status-strip">
+          <button class="home-stat-card" data-report="communications" type="button">
+            <div class="hsc-label">Communications</div>
+            <div class="hsc-value" id="home-comms-value">—</div>
+          </button>
+          <button class="home-stat-card" data-report="knowledge" type="button">
+            <div class="hsc-label">JARVIS Brain</div>
+            <div class="hsc-value" id="home-knowledge-value">—</div>
+          </button>
+          <button class="home-stat-card hsc-with-ring" data-report="ceo" type="button">
+            <div>
+              <div class="hsc-label">Strategic Objective</div>
+              <div class="hsc-value" id="home-objective-value">—</div>
+            </div>
+            <div class="radial-metric" id="home-objective-ring"></div>
+          </button>
         </div>
+      </div>
+      <div class="home-rail-section" id="home-activity-block">
+        <h2>Live Activity</h2>
+        <div class="row-list" id="home-activity"><div class="empty">Loading…</div></div>
       </div>
     </div>
 
@@ -1418,7 +1475,18 @@
          end of this file (window.setOrbState / window.speakReply). ── -->
     <aside id="orb-widget">
       <canvas id="orb-canvas"></canvas>
-      <div id="orb-face-wrap">
+      <!-- The "screen": a big instrument-panel housing around the avatar
+           itself (2026-08-31 stage rebuild). On Home this is what makes
+           JARVIS read as the dominant stage rather than a dashboard
+           widget — #orb-face-wrap (unchanged inside) just grows to fill
+           much more of it there; on every other page this wrapper is a
+           harmless no-op passthrough at 100% width, same as before. -->
+      <div id="orb-screen">
+        <div class="orb-screen-corner tl" aria-hidden="true"></div>
+        <div class="orb-screen-corner tr" aria-hidden="true"></div>
+        <div class="orb-screen-corner bl" aria-hidden="true"></div>
+        <div class="orb-screen-corner br" aria-hidden="true"></div>
+        <div id="orb-face-wrap">
         <div class="orb-ground-light" aria-hidden="true"></div>
         <div id="orb-face-frame">
           <!-- JARVIS's rendered likeness: a real, locally-generated video
@@ -1444,7 +1512,9 @@
         <div class="hud-corner hud-corner-tr"></div>
         <div class="hud-corner hud-corner-bl"></div>
         <div class="hud-corner hud-corner-br"></div>
+        </div>
       </div>
+      <div id="orb-state-label"><span class="orb-state-dot"></span><span id="orb-state-text">Ready</span></div>
       <!-- Everything JARVIS can be TOLD, as opposed to everything above
            that shows what JARVIS IS — a deliberate seam so the panel
            reads as "presence, then command," not a stack of unrelated
@@ -1477,7 +1547,6 @@
           <input id="orb-input" type="text" placeholder="Ask Jarvis, or click the mic…">
         </form>
       </div>
-      <div id="orb-state-label"><span class="orb-state-dot"></span><span id="orb-state-text">Ready</span></div>
     </aside>
   </div>
 </div>

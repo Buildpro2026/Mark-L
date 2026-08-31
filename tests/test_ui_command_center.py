@@ -102,7 +102,7 @@ def test_served_page_contains_the_ceo_operating_system_navigation(monkeypatch):
 def test_served_page_contains_the_four_home_areas(monkeypatch):
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    for area in ("Today's Priorities", "Calendar", "Active Agents", "Opportunities"):
+    for area in ("Priorities", "Calendar", "Active Agents", "Opportunities"):
         assert area in html, f"missing home area: {area}"
 
 
