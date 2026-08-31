@@ -320,7 +320,9 @@
   .org-node.agent { align-items: flex-start; text-align: left; max-width: 190px; }
   .org-node .org-name { font-size: 12.5px; }
   .org-node .org-what { font-size: 11px; color: var(--muted); line-height: 1.4; }
-  .org-node .org-badges { display: flex; gap: 4px; flex-wrap: wrap; }
+  .org-node .org-badges { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .org-node .agent-toggle-btn { padding: 2px 8px; font-size: 10px; }
+  .org-node .org-schedule { font-size: 9.5px; color: var(--dim); margin-top: 2px; }
 
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
@@ -2245,15 +2247,36 @@ function agentWhat(agent, runningTask, latestTask) {
   return 'No activity yet';
 }
 
+// An agent registered in code (BUILTIN_AGENTS) sits at status "registered"
+// forever, and get_due_agents() only ever picks up status "idle" — a
+// scheduled agent that's never had start_agent() called on it will simply
+// never run, with nothing in the UI previously surfacing that or letting
+// Lee fix it. This is the fix: real calls to the existing, already-working
+// /ui/api/agents/{id}/start and /stop endpoints, not a new backend concept.
+const _AGENT_ACTIVE_STATUSES = new Set(['idle', 'running']);
 function orgAgentNode(agent, runningTask, latestTask) {
+  const isActive = _AGENT_ACTIVE_STATUSES.has(agent.status);
+  const scheduleNote = agent.schedule ? `runs every ${escapeHtml(agent.schedule)}` : 'on-demand only';
   return `<li><div class="org-node agent">
     <div class="org-badges">
       <span class="badge ${agent.permission_level}">${agent.permission_level}</span>
       <span class="badge ${agent.status === 'running' ? 'running' : (agent.status === 'error' ? 'bad' : 'idle')}">${agent.status}</span>
+      <button class="small ${isActive ? 'danger' : ''} agent-toggle-btn" type="button"
+        onclick="toggleAgent('${agent.id}', ${isActive})">${isActive ? 'Stop' : 'Start'}</button>
     </div>
     <div class="org-name">${escapeHtml(agent.name)}</div>
     <div class="org-what">${agentWhat(agent, runningTask, latestTask)}</div>
+    ${agent.schedule ? `<div class="org-schedule hud-label">${scheduleNote}${agent.status === 'registered' ? ' — not started, won’t run yet' : ''}</div>` : ''}
   </div></li>`;
+}
+
+async function toggleAgent(agentId, currentlyActive) {
+  try {
+    await api(`/ui/api/agents/${agentId}/${currentlyActive ? 'stop' : 'start'}`, { method: 'POST' });
+    loadAgents();
+  } catch (e) {
+    showError(e.message);
+  }
 }
 
 async function loadAgents() {
