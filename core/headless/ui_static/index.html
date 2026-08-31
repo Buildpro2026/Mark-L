@@ -960,7 +960,14 @@
       display: grid; grid-template-columns: 216px minmax(0, 1fr) var(--home-rail-w);
       grid-template-rows: minmax(0, 1fr);
     }
-    body:has(#page-home.active) #sidebar { grid-column: 1; grid-row: 1; width: auto; }
+    /* Nav recedes on Home specifically (2026-08-31, fidelity pass): still
+       full navigation, same items/handlers/active-state — just without
+       its own panel fill/border-right, so it reads as chrome around the
+       stage rather than a dashboard's sidebar competing with it. */
+    body:has(#page-home.active) #sidebar {
+      grid-column: 1; grid-row: 1; width: auto;
+      background: transparent; border-right: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+    }
     body:has(#page-home.active) #orb-widget {
       grid-column: 2; grid-row: 1; order: 0; display: flex; position: static;
       width: 100%; max-width: none; flex-direction: column; align-items: center; justify-content: center;
@@ -1029,19 +1036,45 @@
     body:has(#page-home.active) .hud-corner,
     body:has(#page-home.active) #orb-face-wrap::before,
     body:has(#page-home.active) .orb-ground-light { display: none; }
+    /* Ambient particle field (2026-08-31): fills the screen behind the
+       portrait — see initParticleField() near the end of this file.
+       Drawn low-opacity and z-index'd under the portrait (z:2) so it
+       never obscures the face; most particles drift outside the small
+       circular portrait footprint anyway. */
+    body:has(#page-home.active) #orb-canvas {
+      display: block; position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; opacity: .55;
+    }
+    /* Ring/halo color (2026-08-31, fidelity pass): blended with --accent
+       (this app's fixed bright cyan) rather than pure --orb-state-color,
+       which is intentionally muted gray-blue at idle/"Ready" — a
+       deliberate, pre-existing, app-wide state convention left
+       untouched. The blend keeps that convention working (still shifts
+       toward purple/amber/green for thinking/tool/success, etc.) while
+       giving the ring a consistently bright cyan presence at rest,
+       closer to the reference's constant bright ring. */
     body:has(#page-home.active) .orb-portrait-halo {
       display: block; position: absolute; inset: -38%; border-radius: 50%; z-index: -2; pointer-events: none;
-      background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 32%, transparent), transparent 70%);
-      filter: blur(8px); transition: background .5s ease;
+      background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 40%, var(--accent) 35%), transparent 70%);
+      filter: blur(9px); transition: background .5s ease;
     }
     body:has(#page-home.active) .orb-portrait-ring {
       display: block; position: absolute; inset: -16px; border-radius: 50%; z-index: 1; pointer-events: none;
-      background: conic-gradient(from 0deg, transparent 0%, var(--orb-state-color) 10%, transparent 26%, transparent 100%);
-      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
-      mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
-      animation: orb-portrait-ring-spin 7s linear infinite;
-      filter: drop-shadow(0 0 10px var(--orb-state-color));
-      opacity: .85; transition: filter .5s ease;
+      background: conic-gradient(from 0deg, transparent 0%, color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%) 12%, transparent 28%, transparent 100%);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+      animation: orb-portrait-ring-spin 6s linear infinite;
+      filter: drop-shadow(0 0 12px color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%));
+      opacity: .95; transition: filter .5s ease;
+    }
+    /* A thin, always-on cyan edge right at the portrait's own boundary —
+       "cleaner edge, stronger definition" separate from the spinning
+       highlight above. State-specific box-shadows (listening/tool/error/
+       etc., defined earlier) still fully replace this during active
+       states — box-shadow doesn't layer across rules, so this only shows
+       at rest, which is exactly when the ring most needs the extra
+       definition. */
+    body:has(#page-home.active) #orb-face-frame {
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 14px 34px rgba(0,0,0,.5), 0 0 0 1.5px color-mix(in srgb, var(--accent) 50%, transparent);
     }
     body:has(#page-home.active) #orb-state-label { margin-top: 20px; font-size: 14px; }
 
@@ -1065,6 +1098,11 @@
     body:has(#page-home.active) #orb-input-row { order: 1; flex: 1; width: auto; }
     body:has(#page-home.active) #orb-input-row input { text-align: left; border-radius: 4px; }
     body:has(#page-home.active) #orb-controls { order: 2; gap: 8px; align-items: center; }
+    /* Controls closer to the reference's rectangular chip buttons —
+       shape only. Same elements/ids/handlers/icons/captions; every mic,
+       continuous-mode, voice-reply and TTS behavior is untouched. */
+    body:has(#page-home.active) .orb-icon-btn { border-radius: 6px; }
+    body:has(#page-home.active) #orb-mic-btn.listening { border-radius: 6px; }
 
     /* The rail: subordinate to the stage — compact rows with a hairline
        divider, no card chrome, no clipped-corner HUD styling. */
@@ -1166,19 +1204,25 @@
     body:has(#page-home.active) .hud-corner,
     body:has(#page-home.active) #orb-face-wrap::before,
     body:has(#page-home.active) .orb-ground-light { display: none; }
+    body:has(#page-home.active) #orb-canvas {
+      display: block; position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; opacity: .5;
+    }
     body:has(#page-home.active) .orb-portrait-halo {
       display: block; position: absolute; inset: -38%; border-radius: 50%; z-index: -2; pointer-events: none;
-      background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 32%, transparent), transparent 70%);
-      filter: blur(8px);
+      background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 40%, var(--accent) 35%), transparent 70%);
+      filter: blur(9px);
     }
     body:has(#page-home.active) .orb-portrait-ring {
       display: block; position: absolute; inset: -12px; border-radius: 50%; z-index: 1; pointer-events: none;
-      background: conic-gradient(from 0deg, transparent 0%, var(--orb-state-color) 10%, transparent 26%, transparent 100%);
+      background: conic-gradient(from 0deg, transparent 0%, color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%) 12%, transparent 28%, transparent 100%);
       -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
       mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
-      animation: orb-portrait-ring-spin 7s linear infinite;
-      filter: drop-shadow(0 0 8px var(--orb-state-color));
-      opacity: .85;
+      animation: orb-portrait-ring-spin 6s linear infinite;
+      filter: drop-shadow(0 0 10px color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%));
+      opacity: .95;
+    }
+    body:has(#page-home.active) #orb-face-frame {
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 14px 34px rgba(0,0,0,.5), 0 0 0 1.5px color-mix(in srgb, var(--accent) 50%, transparent);
     }
     body:has(#page-home.active) #orb-state-label { display: flex; margin-top: 14px; }
     body:has(#page-home.active) .orb-command-dock {
@@ -1195,6 +1239,7 @@
     body:has(#page-home.active) #orb-input-row input { text-align: left; }
     body:has(#page-home.active) #orb-controls { order: 2; }
     body:has(#page-home.active) .orb-control .orb-caption { display: none; }
+    body:has(#page-home.active) .orb-icon-btn { border-radius: 6px; }
   }
   @media (max-width: 640px) {
     .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text, #priority-badge-text, .ch-sys-status { display: none; }
@@ -1577,7 +1622,6 @@
          always-available chat input — see the orb script block near the
          end of this file (window.setOrbState / window.speakReply). ── -->
     <aside id="orb-widget">
-      <canvas id="orb-canvas"></canvas>
       <!-- The stage (2026-08-31 rebuild, reference-accurate pass): on Home
            this reads as JARVIS's own instrument-panel monitor — the outer
            bracket frame belongs to the STAGE (#orb-widget), not the
@@ -1589,6 +1633,14 @@
       <div class="orb-screen-corner bl" aria-hidden="true"></div>
       <div class="orb-screen-corner br" aria-hidden="true"></div>
       <div id="orb-screen">
+        <!-- Ambient particle field (2026-08-31, sharpness/fidelity pass):
+             #orb-canvas already existed here — hidden everywhere since an
+             earlier phase retired the canvas-drawn sphere it used to hold
+             (see the comment above the draw() loop near the end of this
+             file). Reused rather than adding a new element; moved inside
+             #orb-screen so it can fill the screen behind the portrait on
+             Home. Still display:none (a no-op) on every other page. -->
+        <canvas id="orb-canvas"></canvas>
         <div id="orb-face-wrap">
         <div class="orb-ground-light" aria-hidden="true"></div>
         <!-- Reference-accurate presence treatment (2026-08-31): Lee's
@@ -3093,23 +3145,90 @@ checkSession();
       if (frame) {
         const m = STATE_MOTION[currentState] || STATE_MOTION.idle;
         const bob = Math.sin(t * m.bobSpeed) * m.bobAmp * motionScale;
-        const scale = 1 + Math.abs(Math.sin(t * m.bobSpeed)) * 0.006 * motionScale;
         const sway = Math.sin(t * m.swaySpeed + 0.6) * m.swayDeg * motionScale;
-        frame.style.transform = `translateY(${bob.toFixed(2)}px) rotateZ(${sway.toFixed(2)}deg) scale(${scale.toFixed(4)})`;
+        // No continuous scale() here anymore (2026-08-31, sharpness pass):
+        // a per-frame fractional scale forces the browser to re-filter the
+        // ENTIRE video texture every frame, which is a real, avoidable
+        // source of softness on top of the source video's own resolution
+        // (see AVATAR_CONFIG.assets — idle_loop.mp4 is 256x256, already
+        // rendered close to native size on Home's circular portrait, so
+        // continuous magnification/minification filtering was pure loss).
+        // translateY/rotateZ don't have the same cost — GPU compositing
+        // can translate/rotate a rasterized layer without re-filtering its
+        // pixel content the way a scale change requires.
+        frame.style.transform = `translateY(${bob.toFixed(2)}px) rotateZ(${sway.toFixed(2)}deg)`;
       }
     }
 
     return { update };
   })();
 
-  // #orb-canvas is display:none (see its rule above) — JARVIS's presence
-  // is the real video + FaceRenderer's whole-frame motion now, not a
-  // canvas-drawn sphere. This loop used to also render an elaborate
-  // gradient-sphere-and-particles orb onto that hidden canvas every
-  // frame — pure wasted CPU on an element nobody could ever see. Cut
-  // down to exactly what's actually needed: ticking FaceRenderer.
+  // #orb-canvas stays display:none on every page except Home (see the
+  // Home stage rules) — JARVIS's presence is the real video +
+  // FaceRenderer's whole-frame motion, not a canvas-drawn sphere, on the
+  // other 12 pages. On Home it's reused for one thing only: a subtle
+  // ambient particle field behind the portrait (2026-08-31, matching the
+  // reference's #orb-canvas). Deliberately NOT the reference's literal
+  // pointer-tracked particle sim — a small drifting/twinkling dot field
+  // colored from the same --orb-state-color every other cue uses, cheap
+  // enough to run every frame and skipped entirely (one property read)
+  // when the canvas isn't actually visible.
+  const particleField = (() => {
+    const canvasEl = document.getElementById("orb-canvas");
+    if (!canvasEl) return { draw() {} };
+    let particles = null, poolW = 0, poolH = 0;
+
+    function ensurePool(w, h) {
+      if (particles && poolW === w && poolH === h) return;
+      poolW = w; poolH = h;
+      const count = Math.max(8, Math.min(26, Math.round((w * h) / 11000)));
+      particles = Array.from({ length: count }, () => ({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        vx: (Math.random() - 0.5) * 5,
+        vy: (Math.random() - 0.5) * 5,
+        r: 0.6 + Math.random() * 1.5,
+        phase: Math.random() * Math.PI * 2,
+      }));
+    }
+
+    function draw(t) {
+      if (canvasEl.offsetWidth === 0) return; // hidden on every non-Home page — skip entirely
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(1, Math.round(canvasEl.offsetWidth));
+      const h = Math.max(1, Math.round(canvasEl.offsetHeight));
+      const wantW = Math.round(w * dpr), wantH = Math.round(h * dpr);
+      if (canvasEl.width !== wantW || canvasEl.height !== wantH) {
+        canvasEl.width = wantW;
+        canvasEl.height = wantH;
+      }
+      ensurePool(w, h);
+      const ctx = canvasEl.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      const color = getComputedStyle(document.documentElement).getPropertyValue("--orb-state-color").trim() || "#4b6b7c";
+      for (const p of particles) {
+        p.x += p.vx / 60;
+        p.y += p.vy / 60;
+        if (p.x < -8) p.x = w + 8; else if (p.x > w + 8) p.x = -8;
+        if (p.y < -8) p.y = h + 8; else if (p.y > h + 8) p.y = -8;
+        const twinkle = 0.4 + 0.4 * Math.sin(t * 1.3 + p.phase);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = Math.max(0, twinkle) * 0.55;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    return { draw };
+  })();
+
   function draw(t) {
     FaceRenderer.update(t);
+    particleField.draw(t);
     requestAnimationFrame((t2) => draw(t2 / 1000));
   }
   requestAnimationFrame((t) => draw(t / 1000));
