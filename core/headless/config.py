@@ -62,6 +62,7 @@ BUFFER_TOKEN = _env("BUFFER_TOKEN")
 TWILIO_ACCOUNT_SID = _env("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = _env("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER = _env("TWILIO_FROM_NUMBER")
+ELEVENLABS_API_KEY = _env("ELEVENLABS_API_KEY")
 
 def summarize() -> dict:
     return {
@@ -79,4 +80,5 @@ def summarize() -> dict:
         "hubspot_token_env_set": bool(HUBSPOT_TOKEN),
         "buffer_token_env_set": bool(BUFFER_TOKEN),
         "twilio_env_set": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER),
+        "elevenlabs_api_key_env_set": bool(ELEVENLABS_API_KEY),
     }

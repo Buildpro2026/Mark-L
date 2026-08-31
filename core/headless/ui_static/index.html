@@ -2930,7 +2930,10 @@ checkSession();
     localStorage.setItem("jarvis_orb_voice", voiceOn ? "1" : "0");
     voiceBtn.classList.toggle("active", voiceOn);
     widget.classList.toggle("voice-on", voiceOn);
-    if (!voiceOn && window.speechSynthesis) window.speechSynthesis.cancel();
+    if (!voiceOn) {
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      if (currentAudioEl) { currentAudioEl.pause(); currentAudioEl = null; }
+    }
   });
 
   // Chrome has two well-known speechSynthesis footguns that between them
@@ -2940,6 +2943,7 @@ checkSession();
   // alive; (2) calling speak() in the same tick as cancel() can silently
   // no-op — a zero-delay setTimeout defers to the next tick and avoids it.
   let currentUtterance = null;
+  let currentAudioEl = null;
 
   // Safari specifically requires speak() to happen while the page still
   // has "real" user-gesture activation — and by the time a voice command
@@ -2977,34 +2981,37 @@ checkSession();
     setTimeout(finish, 800);
   }
 
-  window.speakReply = function speakReply(text) {
-    if (!voiceOn || !window.speechSynthesis || !text) return;
+  function cleanForSpeech(text) {
+    return text
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/\*(.*?)\*/g, "$1")
+      .replace(/#{1,6}\s*/g, "")
+      .replace(/^\s*[-*+]\s+/gm, "")
+      .replace(/^\s*\d+\.\s+/gm, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[_~]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // Fallback voice: whatever OS/browser TTS voice happens to be installed
+  // on this machine — never great, never guaranteed human-sounding, but
+  // always available with zero configuration, so JARVIS is never silent.
+  function speakWithBrowserVoice(cleanText) {
     whenVoicesReady(() => {
       window.speechSynthesis.cancel();
       window.speechSynthesis.resume(); // Chrome can leave the engine "paused" after a tab loses focus, silently blocking every speak() after that until resumed
-    const cleanText = text
-  .replace(/```[\s\S]*?```/g, "")
-  .replace(/`([^`]+)`/g, "$1")
-  .replace(/\*\*(.*?)\*\*/g, "$1")
-  .replace(/\*(.*?)\*/g, "$1")
-  .replace(/#{1,6}\s*/g, "")
-  .replace(/^\s*[-*+]\s+/gm, "")
-  .replace(/^\s*\d+\.\s+/gm, "")
-  .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-  .replace(/[_~]/g, "")
-  .replace(/\s+/g, " ")
-  .trim();
-
-const utterance = new SpeechSynthesisUtterance(cleanText);
-const voices = window.speechSynthesis.getVoices();
-const preferredVoice =
-  voices.find(v => /Microsoft.*(Jenny|Aria|Guy|Ryan)/i.test(v.name) && /^en-US/i.test(v.lang)) ||
-  voices.find(v => /^en-US/i.test(v.lang) && /Neural|Natural/i.test(v.name)) ||
-  voices.find(v => /^en-US/i.test(v.lang));
-
-if (preferredVoice) utterance.voice = preferredVoice;
-utterance.rate = 1.0;
-utterance.pitch = 1.0;
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice =
+        voices.find(v => /Microsoft.*(Jenny|Aria|Guy|Ryan)/i.test(v.name) && /^en-US/i.test(v.lang)) ||
+        voices.find(v => /^en-US/i.test(v.lang) && /Neural|Natural/i.test(v.name)) ||
+        voices.find(v => /^en-US/i.test(v.lang));
+      if (preferredVoice) utterance.voice = preferredVoice;
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
       currentUtterance = utterance; // pin — see comment above
       utterance.onstart = () => { _speaking = true; window.setOrbReason("speaking", true); };
       utterance.onend = () => { _speaking = false; currentUtterance = null; window.setOrbReason("speaking", false); };
@@ -3014,6 +3021,48 @@ utterance.pitch = 1.0;
       };
       setTimeout(() => window.speechSynthesis.speak(utterance), 0);
     });
+  }
+
+  // Real neural TTS (2026-08-31, Lee's spec: JARVIS must sound like a
+  // real human executive assistant, not OS-default robotic speechSynthesis).
+  // null = not checked yet this session, true/false = known, so a
+  // configured-off backend only ever costs one request, not one per reply.
+  let elevenLabsAvailable = null;
+  async function speakWithElevenLabs(cleanText) {
+    try {
+      const r = await api("/ui/api/tts/speak", { method: "POST", body: JSON.stringify({ text: cleanText }) });
+      if (!r.configured) { elevenLabsAvailable = false; return false; }
+      elevenLabsAvailable = true;
+      if (!r.ok) { console.warn("[Jarvis orb] ElevenLabs TTS failed:", r.detail); return false; }
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      if (currentAudioEl) { currentAudioEl.pause(); }
+      const audio = new Audio(`data:${r.mime_type};base64,${r.audio_base64}`);
+      currentAudioEl = audio;
+      audio.onplay = () => { _speaking = true; window.setOrbReason("speaking", true); };
+      audio.onended = () => { _speaking = false; currentAudioEl = null; window.setOrbReason("speaking", false); };
+      audio.onerror = () => {
+        _speaking = false; currentAudioEl = null; window.setOrbReason("speaking", false);
+        console.warn("[Jarvis orb] ElevenLabs audio playback failed.");
+      };
+      await audio.play();
+      return true;
+    } catch (e) {
+      console.warn("[Jarvis orb] ElevenLabs TTS request failed:", e.message);
+      return false;
+    }
+  }
+
+  window.speakReply = async function speakReply(text) {
+    if (!voiceOn || !text) return;
+    const cleanText = cleanForSpeech(text);
+    if (!cleanText) return;
+    // Skip the network round-trip once we know ElevenLabs isn't
+    // configured — falls straight to the browser voice from then on.
+    if (elevenLabsAvailable !== false) {
+      const played = await speakWithElevenLabs(cleanText);
+      if (played) return;
+    }
+    if (window.speechSynthesis) speakWithBrowserVoice(cleanText);
   };
 })();
 </script>

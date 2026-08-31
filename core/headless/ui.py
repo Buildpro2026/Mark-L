@@ -257,6 +257,27 @@ def ui_update_settings(body: SettingsUpdateRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class SpeakRequest(BaseModel):
+    text: str
+
+
+@api.post("/tts/speak")
+def ui_tts_speak(body: SpeakRequest):
+    """Real neural TTS for the web UI (2026-08-31, Lee's spec: JARVIS must
+    sound human, not like OS-default browser speechSynthesis). Returns
+    base64 audio for the frontend to play through a real <audio> element;
+    never plays anything server-side (no speakers on this container).
+    Honest {"configured": false} when no ElevenLabs key is set, rather
+    than a fake 200 — the frontend falls back to speechSynthesis itself."""
+    from actions import elevenlabs_tts
+    if not elevenlabs_tts.is_configured():
+        return {"configured": False}
+    result = elevenlabs_tts.synthesize_speech(body.text)
+    if not result.get("ok"):
+        return {"configured": True, "ok": False, "detail": result.get("detail")}
+    return {"configured": True, "ok": True, "audio_base64": result["audio_base64"], "mime_type": result["mime_type"]}
+
+
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []   # [{"role": "user"|"model", "text": "..."}] — kept client-side, not persisted
