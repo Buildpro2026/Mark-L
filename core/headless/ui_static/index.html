@@ -271,7 +271,17 @@
     0%, 100% { box-shadow: inset 3px 0 0 -1px transparent; }
     50% { box-shadow: inset 3px 0 6px -2px color-mix(in srgb, var(--hud-warning) 55%, transparent); }
   }
-  .row-list { display: flex; flex-direction: column; }
+  .row-list { display: flex; flex-direction: column; min-width: 0; }
+  /* Flexbox's default min-width:auto floors each row at its own
+     min-content width, which used to never matter when .row-list only
+     ever rendered in wide (900px+) single-column pages — Home's new
+     narrower stage rails (see .home-rail below) are the first place
+     narrow enough to expose it as real text spilling out of its row
+     instead of wrapping. min-width:0 lets normal text-wrap take over
+     everywhere .row-list is used, which is always safe: it only ever
+     allows MORE shrinking than the default, never forces anything
+     narrower than the space actually available. */
+  .row-list > * { min-width: 0; overflow-wrap: anywhere; }
   .row {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
     padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px;
@@ -864,20 +874,70 @@
      in-flow and never overlap anything. */
   @media (min-width: 901px) {
     body[data-avatar-position="center"] #content { padding-bottom: 170px; }
+    /* Home single-view stage (2026-08-31, reference-driven): a true
+       non-scrolling command deck when the avatar docks to a side (the
+       default). #content itself stops scrolling; only the two rails
+       below scroll internally, so nothing is ever lost, it just moves
+       into its own scrollbar instead of the page's. Left alone for
+       avatar_position="center" — that mode already turns the presence
+       panel into its own floating fixed bar (see above), so Home there
+       keeps the simpler scrolling single-column layout from the base
+       rules rather than fighting for the same non-scrolling real estate
+       a fixed bottom bar also wants. */
+    body:has(#page-home.active):not([data-avatar-position="center"]) #content {
+      overflow: hidden; height: 100%; max-width: none;
+      padding: clamp(20px, 3.5vh, 40px) clamp(20px, 6vw, 72px) 0;
+      display: flex;
+    }
+    body:has(#page-home.active):not([data-avatar-position="center"]) #page-home {
+      min-height: 0; height: 100%; width: 100%; padding-top: 0;
+      display: flex; flex-direction: column;
+    }
+    body:has(#page-home.active):not([data-avatar-position="center"]) #home-greeting,
+    body:has(#page-home.active):not([data-avatar-position="center"]) .home-telemetry,
+    body:has(#page-home.active):not([data-avatar-position="center"]) .home-status-strip {
+      flex: none;
+    }
+    body:has(#page-home.active):not([data-avatar-position="center"]) .home-stage-rails {
+      flex: 1; min-height: 0; margin-top: 18px; max-width: none;
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;
+    }
+    body:has(#page-home.active):not([data-avatar-position="center"]) .home-rail {
+      min-height: 0; overflow-y: auto; padding-right: 6px;
+    }
+    /* The command dock reads as its own floating surface on the stage
+       instead of an in-flow strip glued under the frame — same controls,
+       same ids/behavior, just visually detached (no more top divider;
+       a real bordered/blurred pill instead). Excluded for "center",
+       which is already a floating bar in its own right. */
+    body:has(#page-home.active):not([data-avatar-position="center"]) .orb-command-dock {
+      border-top: 0; margin-top: 6px;
+      background: color-mix(in srgb, var(--panel-alt) 88%, transparent);
+      border: 1px solid var(--line-strong); border-radius: 16px; padding: 14px 16px;
+      box-shadow: 0 14px 30px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.05);
+      backdrop-filter: blur(10px);
+    }
   }
   .page-head { max-width: 780px; margin-left: auto; margin-right: auto; }
   .page-head h1 { font-family: var(--font-display); font-weight: 600; font-size: 13px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
   .page.active { animation: lens-arrive .34s ease both; }
   @keyframes lens-arrive { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
-  #page-home { min-height: calc(100vh - 180px); padding-top: min(28vh, 260px); }
+  #page-home { min-height: calc(100vh - 180px); padding-top: 40px; }
   #page-home .page-head { display: none; }
   #home-greeting { max-width: 540px; margin: 0 auto 20px; text-align: center; font-size: 16px; }
   .home-telemetry {
     display: flex; justify-content: center; align-items: center; gap: 18px; flex-wrap: wrap;
-    max-width: 640px; margin: 0 auto 26px; padding: 8px 16px;
+    max-width: 640px; margin: 0 auto 22px; padding: 8px 16px;
     border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
   }
   .home-telemetry .hud-label { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); }
+  /* Fallback/narrow-width Home content: a single stacked column — both
+     rails one after another, normal document flow, normal page scroll.
+     This is also the PERMANENT behavior below 901px and whenever the
+     avatar is center-docked (see the stage upgrade in the 901px query
+     below) — nothing here depends on JS, so it just works. */
+  .home-stage-rails { display: flex; flex-direction: column; gap: 14px; max-width: 980px; margin: 18px auto 0; }
+  .home-rail { display: flex; flex-direction: column; gap: 14px; }
   #page-home .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 980px; margin: 0 auto; }
   /* HUD module geometry — replaces the earlier soft 18px-radius "SaaS
      card" look with a technical instrument-panel shape: two corners
@@ -900,6 +960,7 @@
     max-width: 980px; margin: 14px auto 0;
   }
   .home-stat-card {
+    min-width: 0;
     position: relative; text-align: left; background: linear-gradient(165deg, color-mix(in srgb, var(--panel) 80%, transparent), color-mix(in srgb, var(--panel) 62%, transparent));
     border: 1px solid var(--line); border-radius: 3px;
     clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
@@ -1068,24 +1129,6 @@
         <span class="hud-label" id="home-tel-uptime">UPTIME —</span>
         <span class="hud-label" id="home-tel-agents">AGENTS —</span>
       </div>
-      <div class="grid2">
-        <section class="block">
-          <h2>Today's Priorities</h2>
-          <div class="row-list" id="home-priorities"><div class="empty">Loading…</div></div>
-        </section>
-        <section class="block">
-          <h2>Calendar</h2>
-          <div class="row-list" id="home-calendar"><div class="empty">Loading…</div></div>
-        </section>
-        <section class="block">
-          <h2>Active Agents <span class="radial-metric radial-metric-inline" id="home-agents-ring"></span></h2>
-          <div class="row-list" id="home-agents"><div class="empty">Loading…</div></div>
-        </section>
-        <section class="block">
-          <h2>Opportunities</h2>
-          <div class="row-list" id="home-opportunities"><div class="empty">Loading…</div></div>
-        </section>
-      </div>
       <div class="home-status-strip" id="home-status-strip">
         <button class="home-stat-card" data-report="communications" type="button">
           <div class="hsc-label">Communications</div>
@@ -1103,10 +1146,38 @@
           <div class="radial-metric" id="home-objective-ring"></div>
         </button>
       </div>
-      <section class="block" id="home-activity-block" style="margin-top: 22px;">
-        <h2>Live System Activity</h2>
-        <div class="row-list" id="home-activity"><div class="empty">Loading…</div></div>
-      </section>
+      <!-- Single-view stage composition (2026-08-31): the four working
+           panels + activity feed regroup into two rails flanking JARVIS's
+           presence panel (a flex sibling of #content — see #orb-widget)
+           instead of a flat 2x2 dashboard grid. Ids are unchanged, so
+           every loadHome*() call below keeps populating the exact same
+           elements; only their document position/grouping moved. -->
+      <div class="home-stage-rails">
+        <div class="home-rail home-rail-left">
+          <section class="block">
+            <h2>Today's Priorities</h2>
+            <div class="row-list" id="home-priorities"><div class="empty">Loading…</div></div>
+          </section>
+          <section class="block">
+            <h2>Calendar</h2>
+            <div class="row-list" id="home-calendar"><div class="empty">Loading…</div></div>
+          </section>
+        </div>
+        <div class="home-rail home-rail-right">
+          <section class="block">
+            <h2>Active Agents <span class="radial-metric radial-metric-inline" id="home-agents-ring"></span></h2>
+            <div class="row-list" id="home-agents"><div class="empty">Loading…</div></div>
+          </section>
+          <section class="block">
+            <h2>Opportunities</h2>
+            <div class="row-list" id="home-opportunities"><div class="empty">Loading…</div></div>
+          </section>
+          <section class="block" id="home-activity-block">
+            <h2>Live System Activity</h2>
+            <div class="row-list" id="home-activity"><div class="empty">Loading…</div></div>
+          </section>
+        </div>
+      </div>
     </div>
 
     <!-- Command -->
