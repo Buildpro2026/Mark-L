@@ -402,6 +402,51 @@ def _buildpro_candidate_intake_handler(task: "AgentTask") -> dict:
     }
 
 
+def _buildpro_client_intake_handler(task: "AgentTask") -> dict:
+    """Client-side counterpart to _buildpro_candidate_intake_handler
+    (2026-08-30, Lee's spec): scans for client_inquiry messages, and for
+    each one runs actions/buildpro_client_intake.py's chain — HubSpot
+    company created/updated, a personal "we're excited to help" email
+    drafted (never auto-sent, and never mentions representation/contracts
+    — that's Lee's own call after he's made contact), and a real
+    contact-by deadline flagged so the inquiry doesn't sit untouched.
+    SUGGEST-level for the same reason candidate intake is: the HubSpot
+    write and local client record are safe, reversible CRM organization,
+    not a consequential external action."""
+    from actions import google_auth
+    if not google_auth.get_credential_status().get("authorized"):
+        return {
+            "summary": "Gmail isn't authorized yet — nothing to process. Run the one-time Google sign-in to enable this agent.",
+            "configured": False,
+        }
+    from actions import gmail_integration
+    from actions import buildpro_client_intake
+
+    r = gmail_integration.list_messages(query="is:unread", max_results=15)
+    if not r["ok"]:
+        return {"summary": f"Gmail scan failed ({r.get('state')}): {r.get('detail')}", "configured": True, "error": r.get("detail")}
+
+    processed = []
+    for message in r["messages"]:
+        if gmail_integration.classify_message(message) != "client_inquiry":
+            continue
+        result = buildpro_client_intake.process_client_email(message, auto_send=False)
+        processed.append(result)
+
+    if not processed:
+        return {"summary": f"Scanned {len(r['messages'])} message(s); no new client inquiries to process.", "configured": True, "processed": []}
+
+    drafted = sum(1 for p in processed if p.get("welcome_email_drafted"))
+    return {
+        "summary": (
+            f"Processed {len(processed)} client inquiry email(s): {drafted} welcome draft(s) created. "
+            f"Contact-by deadlines flagged in Priorities. Emails are drafts, not sent — review before sending."
+        ),
+        "configured": True,
+        "processed": processed,
+    }
+
+
 def _buildpro_email_responder_handler(task: "AgentTask") -> dict:
     """J4: the real EXECUTE-capable half of the BuildPro Email Monitor
     workflow. buildpro_email_monitor_handler (SUGGEST, above) only ever
@@ -655,12 +700,27 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         description=(
             "Resume-intake chain: for each new candidate email, creates/updates the HubSpot "
             "contact, attaches their resume when one was sent, and drafts (never auto-sends) "
-            "a welcome-packet email with the representation agreement. SUGGEST-level — the "
-            "HubSpot writes run automatically, the welcome email always stays a draft for review."
+            "a welcome-packet email. Never mentions representation/contracts — that's Lee's own "
+            "call after he's personally made contact. SUGGEST-level — the HubSpot writes run "
+            "automatically, the welcome email always stays a draft for review."
         ),
         nucleus_id="buildpro", business="buildpro",
         permission_level=PermissionLevel.SUGGEST, schedule="60m",
         handler=_buildpro_candidate_intake_handler,
+    ),
+    "buildpro_client_intake": AgentDefinition(
+        id="buildpro_client_intake", name="BuildPro Client Intake",
+        description=(
+            "Client-inquiry counterpart to Candidate Intake: for each new client inquiry email, "
+            "creates/updates the HubSpot company record, drafts (never auto-sends) a personal "
+            "'excited to help' email, and flags a real contact-by deadline (end of business day, "
+            "or the next business day if it's already past close) based on the client's inferred "
+            "time zone. SUGGEST-level — the HubSpot write runs automatically, the email always "
+            "stays a draft for review."
+        ),
+        nucleus_id="buildpro", business="buildpro",
+        permission_level=PermissionLevel.SUGGEST, schedule="60m",
+        handler=_buildpro_client_intake_handler,
     ),
     "buildpro_email_responder": AgentDefinition(
         id="buildpro_email_responder", name="BuildPro Email Responder",

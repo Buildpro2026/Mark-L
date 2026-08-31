@@ -52,6 +52,13 @@ def _parse_sender(sender: str) -> tuple[str, str]:
 
 
 def _compose_welcome_email(first_name: str, sign_url: str) -> tuple[str, str]:
+    # sign_url is deliberately unused in the body below (2026-08-30, Lee's
+    # spec): representation is Lee's own call after he's made contact and
+    # decided whether to represent this candidate, not something the
+    # auto-drafted first-contact email should presuppose. The pending
+    # agreement record is still created by the caller either way — this
+    # just stops the link from appearing here. Send the agreement
+    # separately once Lee's made that decision.
     greeting_name = first_name or "there"
     subject = "Welcome to BuildPro Recruiters!"
     body = f"""Hi {greeting_name},
@@ -68,11 +75,7 @@ WHY WORK WITH A RECRUITER
 - We save you time by only bringing you opportunities that actually fit your background
 
 WHAT TO EXPECT FROM US
-From here, we may send you specific job descriptions that match your background, just to gauge your interest — you're never obligated to pursue anything we send, and every submission of your resume to a client happens only with your OK first.
-
-NEXT STEP: REPRESENTATION AGREEMENT
-Before we can represent you to clients, please review and sign our representation agreement (takes under a minute, no cost to you):
-{sign_url}
+From here, we may send you specific job descriptions that match your background, just to gauge your interest — you're never obligated to pursue anything we send, and every submission of your resume to a client happens only with your OK first. Someone from our team will be in touch personally soon.
 
 A FEW INTERVIEW TIPS FROM OUR TEAM
 - Research the company and the specific role before every interview

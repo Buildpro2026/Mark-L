@@ -188,7 +188,12 @@ def test_auto_send_welcome_true_actually_sends(monkeypatch):
     assert result["welcome_email_drafted"] is False
 
 
-def test_sign_url_uses_the_configured_public_base_url(monkeypatch):
+def test_sign_url_is_computed_but_kept_out_of_the_auto_drafted_email(monkeypatch):
+    # 2026-08-30, Lee's spec: representation is his own call after he's
+    # personally made contact, not something the very first auto-drafted
+    # email should presuppose — so the pending agreement is still created
+    # (sign_url is real and returned, ready for Lee to send manually once
+    # he's decided) but must not appear in the welcome draft's body.
     monkeypatch.setattr(intake.buildpro_data, "upsert_candidate", lambda *a, **k: (1, "created"))
     monkeypatch.setattr(intake.buildpro_data, "update_candidate", lambda *a, **k: True)
     monkeypatch.setattr(intake.hubspot_integration, "is_configured", lambda: False)
@@ -201,4 +206,4 @@ def test_sign_url_uses_the_configured_public_base_url(monkeypatch):
     result = intake.process_candidate_email(_message())
 
     assert result["sign_url"] == "https://example-test.invalid/agreement/tok-abc"
-    assert "https://example-test.invalid/agreement/tok-abc" in captured["body"]
+    assert "https://example-test.invalid/agreement/tok-abc" not in captured["body"]
