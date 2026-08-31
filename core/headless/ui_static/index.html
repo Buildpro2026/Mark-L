@@ -515,6 +515,16 @@
   }
   body[data-avatar-position="left"] #orb-widget { order: -1; border-right: 1px solid var(--line); border-left: 0; }
   body[data-avatar-position="right"] #orb-widget { order: 99; }
+  /* Home is the flagship "JARVIS is here" screen (2026-08-31, single-view
+     composition pass) — the presence panel grows noticeably wider there
+     specifically, still the same docked/configurable panel (Settings'
+     avatar_position still controls left/center/right), just visually
+     dominant on the one screen the directive calls out for it most.
+     :has() scopes this to when Home is the active page without any new
+     JS state to keep in sync with switchTab(). Left unscoped from the
+     900px tablet collapse below, which already overrides width directly
+     regardless of this variable. */
+  body:has(#page-home.active) #orb-widget { --avatar-panel-width: 380px; }
   body[data-avatar-position="center"] #orb-widget {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
     flex-direction: row; width: auto; max-width: min(640px, 92vw); gap: 18px;
@@ -846,6 +856,15 @@
   .cc-icon { font-size: 13px; }
 
   #content { flex: 1; overflow-y: auto; padding: clamp(24px, 5vh, 56px) clamp(20px, 6vw, 100px) 90px; max-width: 1320px; width: 100%; margin: 0 auto; }
+  /* Center avatar position floats as a fixed bottom bar (see
+     body[data-avatar-position="center"] #orb-widget above) — real,
+     content-covering overlap risk at the very bottom of a scrolled page
+     that the generic 90px padding above doesn't clear. Scoped to center
+     specifically rather than raised for everyone, since left/right dock
+     in-flow and never overlap anything. */
+  @media (min-width: 901px) {
+    body[data-avatar-position="center"] #content { padding-bottom: 170px; }
+  }
   .page-head { max-width: 780px; margin-left: auto; margin-right: auto; }
   .page-head h1 { font-family: var(--font-display); font-weight: 600; font-size: 13px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
   .page.active { animation: lens-arrive .34s ease both; }
