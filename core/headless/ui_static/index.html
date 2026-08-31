@@ -36,6 +36,16 @@
        repeating a literal px value, so resizing JARVIS's footprint is a
        one-line change, not a hunt through every breakpoint. */
     --avatar-panel-width: 280px;
+    /* JARVIS Core color system (2026-08-31, full high-tech treatment) — a
+       dedicated, richer palette for Home's command-deck environment,
+       separate from --accent (used everywhere else) so nothing here can
+       regress any of the other 12 pages. Structured the same way
+       business-identity accents already are below (values-only swap) so
+       a future theme (emerald/violet/amber/etc.) is a values block, not
+       a rewrite — only the default cyan theme is actually built now. */
+    --jv-bg-0: #03070d; --jv-bg-1: #06101a; --jv-bg-2: #081522; --jv-bg-3: #0b1724;
+    --jv-cyan: #00e5ff; --jv-cyan-2: #00c8ff; --jv-cyan-3: #00a8ff;
+    --jv-highlight: #7df9ff; --jv-white: #eaf7ff; --jv-muted: #6f8799; --jv-inactive: #263746;
   }
   /* Business identity - accent color only. Same environment, same
      layout, same everything else - per Part 5, business identity is a
@@ -670,8 +680,10 @@
      from --orb-state-color, the same source of truth every other state
      cue (frame glow, pulse ring, ground light) already uses, so JARVIS's
      "is thinking / is speaking" read stays consistent between pages. */
-  .orb-portrait-halo, .orb-portrait-ring { display: none; }
+  .orb-portrait-halo, .orb-portrait-ring, .orb-portrait-ticks, .orb-portrait-segments, .orb-hud-label, .orb-visualizer { display: none; }
   @keyframes orb-portrait-ring-spin { to { transform: rotate(360deg); } }
+  @keyframes orb-segments-spin { to { transform: rotate(-360deg); } }
+  @keyframes orb-vis-bar { 0%, 100% { height: 25%; } 50% { height: 100%; } }
   #orb-face-wrap {
     --avatar-aspect: 3 / 4; --avatar-radius: 10px;
     position: relative; width: 100%; aspect-ratio: var(--avatar-aspect); pointer-events: none;
@@ -978,6 +990,32 @@
       grid-column: 1; grid-row: 1; width: auto;
       background: transparent; border-right: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
     }
+    /* Nav as the operating system's own control layer, not a sidebar
+       widget — same items/handlers, slightly wider tracking and a
+       cyan-tinted active/hover glow instead of the generic accent wash
+       every other page uses. */
+    body:has(#page-home.active) .nav-item {
+      letter-spacing: .03em;
+    }
+    body:has(#page-home.active) .nav-item:hover {
+      background: rgba(0,220,255,.06); color: var(--jv-white);
+    }
+    body:has(#page-home.active) .nav-item.active {
+      background: linear-gradient(90deg, rgba(0,220,255,.14), rgba(0,220,255,.03));
+      color: var(--jv-cyan); border-color: rgba(0,220,255,.3);
+    }
+    body:has(#page-home.active) .nav-item.active .nav-marker {
+      background: var(--jv-cyan); box-shadow: 0 0 6px rgba(0,220,255,.8);
+    }
+    /* LAYER 1 — environment (2026-08-31, full high-tech treatment): the
+       stage column IS JARVIS's atmosphere, not a panel with a photo on
+       it. Five stacked background layers, back to front: a base
+       navy-to-black gradient, a vignette that darkens the column's own
+       edges (pulls the eye inward, same technique the reference uses at
+       page scale), a hairline technical grid (deliberately uniform/low-
+       opacity rather than density-mapped — a second masked grid layer
+       would double the cost for a difference nobody consciously clocks),
+       and a soft cyan glow centered on where the portrait actually sits. */
     body:has(#page-home.active) #orb-widget {
       grid-column: 2; grid-row: 1; order: 0; display: flex; position: static;
       width: 100%; max-width: none; flex-direction: column; align-items: center; justify-content: center;
@@ -985,10 +1023,21 @@
       border-left: 1px solid var(--line); border-right: 1px solid var(--line);
       border-radius: 0; box-shadow: none; backdrop-filter: none; overflow: hidden;
       padding: clamp(20px, 4vh, 48px) clamp(16px, 3vw, 40px);
+      background:
+        radial-gradient(ellipse 55% 50% at 50% 42%, color-mix(in srgb, var(--jv-cyan) 10%, transparent), transparent 70%),
+        radial-gradient(ellipse 100% 70% at 50% 100%, rgba(0,0,0,.55), transparent 60%),
+        linear-gradient(rgba(125,185,225,.045) 1px, transparent 1px) 0 0 / 46px 46px,
+        linear-gradient(90deg, rgba(125,185,225,.045) 1px, transparent 1px) 0 0 / 46px 46px,
+        linear-gradient(180deg, var(--jv-bg-1), var(--jv-bg-0) 62%);
     }
+    /* The rail as one unified glass console, not a stack of cards (spec
+       points 12/13): a single translucent surface with a hairline cyan-
+       tinted border — everything inside (.home-rail-section) is just
+       typography and dividers, no card chrome of its own. */
     body:has(#page-home.active) #content {
       grid-column: 3; grid-row: 1; overflow-y: auto; max-width: none; width: 100%;
-      margin: 0; padding: 24px 20px 32px; border-left: 1px solid var(--line);
+      margin: 0; padding: 24px 20px 32px;
+      background: rgba(5,15,25,.55); border-left: 1px solid rgba(0,220,255,.15);
     }
     body:has(#page-home.active) #page-home {
       min-height: 0; padding-top: 0; display: flex; flex-direction: column; gap: 0;
@@ -1025,11 +1074,14 @@
       box-shadow: inset 0 0 0 1px rgba(255,255,255,.03), 0 30px 80px rgba(0,0,0,.45);
     }
     /* Scanline overlay on the screen glass itself, matching the
-       reference's #panel-screen::before. */
+       reference's #panel-screen::before — slow, barely-perceptible drift
+       rather than a static texture, so the screen reads as a live feed. */
     body:has(#page-home.active) #orb-screen::before {
       content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .3; z-index: 0;
       background: repeating-linear-gradient(0deg, color-mix(in srgb, var(--accent) 12%, transparent) 0px, color-mix(in srgb, var(--accent) 12%, transparent) 1px, transparent 1px, transparent 3px);
+      animation: jv-scanline-drift 16s linear infinite;
     }
+    @keyframes jv-scanline-drift { from { background-position-y: 0; } to { background-position-y: 300px; } }
     /* The portrait itself: circular, spinning ring, blurred halo — the
        reference's actual presentation (2026-08-31, Lee: follow the
        reference's presentation, not an inferred rule against it).
@@ -1072,9 +1124,32 @@
       background: conic-gradient(from 0deg, transparent 0%, color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%) 12%, transparent 28%, transparent 100%);
       -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
       mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
-      animation: orb-portrait-ring-spin 6s linear infinite;
+      animation: orb-portrait-ring-spin 8s linear infinite;
       filter: drop-shadow(0 0 12px color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%));
       opacity: .95; transition: filter .5s ease;
+    }
+    /* Ring Layers 2/3 (2026-08-31, full high-tech treatment): a segmented
+       outer arc counter-rotating against the primary highlight above (a
+       different speed AND direction — the "don't rotate everything at
+       the same speed, that looks cheap" rule), plus a static ring of
+       small technical tick marks further out still. Both built with
+       repeating-conic-gradient rather than real DOM tick elements —
+       one paint layer each regardless of how many ticks/segments it
+       reads as, so this costs nothing extra per frame. */
+    body:has(#page-home.active) .orb-portrait-segments {
+      display: block; position: absolute; inset: -25px; border-radius: 50%; z-index: 1; pointer-events: none;
+      background: repeating-conic-gradient(from 15deg, color-mix(in srgb, var(--jv-cyan-2) 75%, transparent) 0deg 7deg, transparent 7deg 24deg);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+      animation: orb-segments-spin 13s linear infinite;
+      opacity: .5;
+    }
+    body:has(#page-home.active) .orb-portrait-ticks {
+      display: block; position: absolute; inset: -34px; border-radius: 50%; z-index: 1; pointer-events: none;
+      background: repeating-conic-gradient(color-mix(in srgb, var(--jv-cyan) 55%, transparent) 0deg 1deg, transparent 1deg 15deg);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 6px) calc(100% - 3px), transparent calc(100% - 3px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 6px) calc(100% - 3px), transparent calc(100% - 3px));
+      opacity: .4;
     }
     /* A thin, always-on cyan edge right at the portrait's own boundary —
        "cleaner edge, stronger definition" separate from the spinning
@@ -1088,6 +1163,25 @@
     }
     body:has(#page-home.active) #orb-state-label { margin-top: 20px; font-size: 14px; }
 
+    /* HUD data labels: small technical readouts in each corner of the
+       screen — quiet by default, meant to reward a closer look rather
+       than compete with the portrait for attention. */
+    body:has(#page-home.active) .orb-hud-label {
+      display: flex; flex-direction: column; gap: 2px; position: absolute; z-index: 3; pointer-events: none;
+      font-family: var(--mono); line-height: 1.3;
+    }
+    body:has(#page-home.active) .orb-hud-tag {
+      font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--jv-muted);
+    }
+    body:has(#page-home.active) .orb-hud-val {
+      font-size: 10.5px; letter-spacing: .04em; color: color-mix(in srgb, var(--jv-cyan) 75%, var(--jv-white) 25%);
+      text-shadow: 0 0 8px color-mix(in srgb, var(--jv-cyan) 40%, transparent);
+    }
+    body:has(#page-home.active) .orb-hud-tl { top: 20px; left: 20px; align-items: flex-start; }
+    body:has(#page-home.active) .orb-hud-tr { top: 20px; right: 20px; align-items: flex-end; text-align: right; }
+    body:has(#page-home.active) .orb-hud-bl { bottom: 20px; left: 20px; align-items: flex-start; }
+    body:has(#page-home.active) .orb-hud-br { bottom: 20px; right: 20px; align-items: flex-end; text-align: right; }
+
     /* The command bar: a real floating surface below the screen —
        reference-accurate shape (a softly rounded rectangle, not a full
        pill) with a command-line prompt accent, input first (reordered,
@@ -1097,8 +1191,25 @@
       position: relative; flex-direction: row; align-items: center; gap: 10px;
       width: min(560px, 100%); margin-top: 26px; border-top: 0;
       padding: 8px 10px 8px 30px; border-radius: 8px;
-      background: var(--panel); backdrop-filter: blur(14px);
-      border: 1px solid var(--line-strong); box-shadow: 0 20px 50px rgba(0,0,0,.5);
+      background: rgba(5,15,25,.55); backdrop-filter: blur(14px);
+      border: 1px solid var(--line-strong);
+      box-shadow: 0 20px 50px rgba(0,0,0,.5), 0 0 0 1px color-mix(in srgb, var(--orb-state-color) 35%, transparent);
+      transition: box-shadow .4s ease, border-color .2s ease;
+    }
+    /* State-driven edge illumination — quiet at rest (the state-color mix
+       above is already faint at idle), a real cyan glow the instant the
+       input actually has focus, matching "soft cyan edge on command
+       focus." Listening/thinking/speaking read from the SAME
+       --orb-state-color as the ring/frame, so the console visibly agrees
+       with JARVIS's own state rather than being a separate light show. */
+    body:has(#page-home.active) .orb-command-dock:focus-within {
+      border-color: color-mix(in srgb, var(--jv-cyan) 55%, transparent);
+      box-shadow: 0 20px 50px rgba(0,0,0,.5), 0 0 0 1px color-mix(in srgb, var(--jv-cyan) 45%, transparent), 0 0 22px color-mix(in srgb, var(--jv-cyan) 30%, transparent);
+    }
+    body:has(#page-home.active) #orb-widget.listening .orb-command-dock,
+    body:has(#page-home.active) #orb-widget.orb-state-thinking .orb-command-dock,
+    body:has(#page-home.active) #orb-widget.orb-state-speaking .orb-command-dock {
+      box-shadow: 0 20px 50px rgba(0,0,0,.5), 0 0 0 1px color-mix(in srgb, var(--orb-state-color) 65%, transparent), 0 0 20px color-mix(in srgb, var(--orb-state-color) 35%, transparent);
     }
     body:has(#page-home.active) .orb-command-dock::before {
       content: "›"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
@@ -1113,6 +1224,22 @@
        continuous-mode, voice-reply and TTS behavior is untouched. */
     body:has(#page-home.active) .orb-icon-btn { border-radius: 6px; }
     body:has(#page-home.active) #orb-mic-btn.listening { border-radius: 6px; }
+    body:has(#page-home.active) .orb-visualizer {
+      display: flex; align-items: center; gap: 2px; height: 16px; flex: none; opacity: .22; transition: opacity .3s ease;
+    }
+    body:has(#page-home.active) .orb-visualizer span {
+      width: 2.5px; border-radius: 2px; background: var(--jv-cyan); height: 25%;
+      animation: orb-vis-bar 1.1s ease-in-out infinite; animation-play-state: paused;
+    }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(1) { animation-delay: 0s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(2) { animation-delay: .11s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(3) { animation-delay: .22s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(4) { animation-delay: .33s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(5) { animation-delay: .44s; }
+    body:has(#page-home.active) #orb-widget.listening .orb-visualizer,
+    body:has(#page-home.active) #orb-widget.orb-state-speaking .orb-visualizer { opacity: .95; }
+    body:has(#page-home.active) #orb-widget.listening .orb-visualizer span,
+    body:has(#page-home.active) #orb-widget.orb-state-speaking .orb-visualizer span { animation-play-state: running; }
 
     /* The rail: subordinate to the stage — compact rows with a hairline
        divider, no card chrome, no clipped-corner HUD styling. */
@@ -1187,8 +1314,13 @@
       order: -1; flex-direction: column; height: auto; width: 100%;
       padding: 22px 16px; gap: 0; border-left: 0; border-right: 0; border-bottom: 1px solid var(--line);
       align-items: center; justify-content: center;
+      background:
+        radial-gradient(ellipse 70% 60% at 50% 40%, color-mix(in srgb, var(--jv-cyan) 9%, transparent), transparent 70%),
+        linear-gradient(180deg, var(--jv-bg-1), var(--jv-bg-0) 70%);
     }
-    body:has(#page-home.active) #content { order: 0; }
+    body:has(#page-home.active) #content {
+      order: 0; background: rgba(5,15,25,.55); border-top: 1px solid rgba(0,220,255,.15);
+    }
     body:has(#page-home.active) .orb-screen-corner {
       width: 22px; height: 22px; border: 1px solid var(--line-strong); opacity: .85;
     }
@@ -1227,18 +1359,54 @@
       background: conic-gradient(from 0deg, transparent 0%, color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%) 12%, transparent 28%, transparent 100%);
       -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
       mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
-      animation: orb-portrait-ring-spin 6s linear infinite;
+      animation: orb-portrait-ring-spin 8s linear infinite;
       filter: drop-shadow(0 0 10px color-mix(in srgb, var(--orb-state-color) 55%, var(--accent) 45%));
       opacity: .95;
+    }
+    body:has(#page-home.active) .orb-portrait-segments {
+      display: block; position: absolute; inset: -19px; border-radius: 50%; z-index: 1; pointer-events: none;
+      background: repeating-conic-gradient(from 15deg, color-mix(in srgb, var(--jv-cyan-2) 75%, transparent) 0deg 7deg, transparent 7deg 24deg);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+      animation: orb-segments-spin 13s linear infinite;
+      opacity: .5;
     }
     body:has(#page-home.active) #orb-face-frame {
       box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 14px 34px rgba(0,0,0,.5), 0 0 0 1.5px color-mix(in srgb, var(--accent) 50%, transparent);
     }
     body:has(#page-home.active) #orb-state-label { display: flex; margin-top: 14px; }
+    /* HUD corner labels: real screen space to spare from ~600px up; below
+       that they're explicitly hidden further down rather than shrunk
+       into illegibility — matches "simplified intelligence information"
+       at 600px and "JARVIS + command interface remain the primary
+       experience" at 390px. */
+    body:has(#page-home.active) .orb-hud-label {
+      display: flex; flex-direction: column; gap: 1px; position: absolute; z-index: 3; pointer-events: none;
+      font-family: var(--mono); line-height: 1.25;
+    }
+    body:has(#page-home.active) .orb-hud-tag { font-size: 7.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--jv-muted); }
+    body:has(#page-home.active) .orb-hud-val {
+      font-size: 9.5px; color: color-mix(in srgb, var(--jv-cyan) 75%, var(--jv-white) 25%);
+      text-shadow: 0 0 8px color-mix(in srgb, var(--jv-cyan) 40%, transparent);
+    }
+    body:has(#page-home.active) .orb-hud-tl { top: 12px; left: 12px; align-items: flex-start; }
+    body:has(#page-home.active) .orb-hud-tr { top: 12px; right: 12px; align-items: flex-end; text-align: right; }
+    body:has(#page-home.active) .orb-hud-bl { bottom: 12px; left: 12px; align-items: flex-start; }
+    body:has(#page-home.active) .orb-hud-br { bottom: 12px; right: 12px; align-items: flex-end; text-align: right; }
     body:has(#page-home.active) .orb-command-dock {
-      position: relative; display: flex; flex-direction: row; width: min(440px, 92%); margin-top: 16px; border-top: 0;
+      position: relative; display: flex; flex-direction: row; align-items: center; width: min(440px, 92%); margin-top: 16px; border-top: 0;
       border-radius: 8px; padding: 6px 8px 6px 24px; border: 1px solid var(--line-strong);
-      background: var(--panel); backdrop-filter: blur(10px);
+      background: rgba(5,15,25,.55); backdrop-filter: blur(10px);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--orb-state-color) 35%, transparent);
+      transition: box-shadow .4s ease;
+    }
+    body:has(#page-home.active) .orb-command-dock:focus-within {
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--jv-cyan) 45%, transparent), 0 0 16px color-mix(in srgb, var(--jv-cyan) 25%, transparent);
+    }
+    body:has(#page-home.active) #orb-widget.listening .orb-command-dock,
+    body:has(#page-home.active) #orb-widget.orb-state-thinking .orb-command-dock,
+    body:has(#page-home.active) #orb-widget.orb-state-speaking .orb-command-dock {
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--orb-state-color) 65%, transparent), 0 0 14px color-mix(in srgb, var(--orb-state-color) 35%, transparent);
     }
     body:has(#page-home.active) .orb-command-dock::before {
       content: "›"; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
@@ -1250,11 +1418,34 @@
     body:has(#page-home.active) #orb-controls { order: 2; }
     body:has(#page-home.active) .orb-control .orb-caption { display: none; }
     body:has(#page-home.active) .orb-icon-btn { border-radius: 6px; }
+    body:has(#page-home.active) .orb-visualizer {
+      display: flex; align-items: center; gap: 2px; height: 13px; flex: none; opacity: .2;
+    }
+    body:has(#page-home.active) .orb-visualizer span {
+      width: 2px; border-radius: 2px; background: var(--jv-cyan); height: 25%;
+      animation: orb-vis-bar 1.1s ease-in-out infinite; animation-play-state: paused;
+    }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(1) { animation-delay: 0s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(2) { animation-delay: .11s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(3) { animation-delay: .22s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(4) { animation-delay: .33s; }
+    body:has(#page-home.active) .orb-visualizer span:nth-child(5) { animation-delay: .44s; }
+    body:has(#page-home.active) #orb-widget.listening .orb-visualizer,
+    body:has(#page-home.active) #orb-widget.orb-state-speaking .orb-visualizer { opacity: .9; }
+    body:has(#page-home.active) #orb-widget.listening .orb-visualizer span,
+    body:has(#page-home.active) #orb-widget.orb-state-speaking .orb-visualizer span { animation-play-state: running; }
   }
   @media (max-width: 640px) {
     .ch-stat-agents, .ch-stat-objective, .ch-clock, #approval-badge-text, #priority-badge-text, .ch-sys-status { display: none; }
     #content { padding: 20px 16px 80px; }
     #page-home { padding-top: 0; }
+    /* Real phones: JARVIS + command console stay the whole story, per the
+       spec's own "390px: JARVIS + command interface remain the primary
+       experience" — the corner HUD labels and outer tick ring are quiet
+       detail that only reads as detail with real space around it; below
+       this width they'd just be noise crowding the portrait. */
+    body:has(#page-home.active) .orb-hud-label,
+    body:has(#page-home.active) .orb-portrait-ticks { display: none; }
   }
 </style>
 </head>
@@ -1643,6 +1834,18 @@
       <div class="orb-screen-corner bl" aria-hidden="true"></div>
       <div class="orb-screen-corner br" aria-hidden="true"></div>
       <div id="orb-screen">
+        <!-- HUD data labels (2026-08-31, full high-tech treatment): every
+             value here mirrors REAL data already fetched for Home's own
+             telemetry strip/voice toggle (see mirrorOrbHud() near the end
+             of this file) — never fabricated metrics. Only "SYSTEM" and
+             "AGENTS" carry live values today; the tag text itself
+             ("SYSTEM", "VOICE LINK", etc.) is a static interface label,
+             not a claim of a real reading, same distinction the spec
+             draws. Hidden (display:none) on every page but Home. -->
+        <div class="orb-hud-label orb-hud-tl" aria-hidden="true"><span class="orb-hud-tag">System</span><span class="orb-hud-val" id="orb-hud-system">—</span></div>
+        <div class="orb-hud-label orb-hud-tr" aria-hidden="true"><span class="orb-hud-tag">Voice Link</span><span class="orb-hud-val" id="orb-hud-voice">—</span></div>
+        <div class="orb-hud-label orb-hud-bl" aria-hidden="true"><span class="orb-hud-tag">Agents</span><span class="orb-hud-val" id="orb-hud-agents">—</span></div>
+        <div class="orb-hud-label orb-hud-br" aria-hidden="true"><span class="orb-hud-tag">Uptime</span><span class="orb-hud-val" id="orb-hud-uptime">—</span></div>
         <!-- Ambient particle field (2026-08-31, sharpness/fidelity pass):
              #orb-canvas already existed here — hidden everywhere since an
              earlier phase retired the canvas-drawn sphere it used to hold
@@ -1661,6 +1864,8 @@
              1/1 and 50% there); every other page keeps the tall
              rectangular panel this shape system has always produced. -->
         <div class="orb-portrait-halo" aria-hidden="true"></div>
+        <div class="orb-portrait-ticks" aria-hidden="true"></div>
+        <div class="orb-portrait-segments" aria-hidden="true"></div>
         <div class="orb-portrait-ring" aria-hidden="true"></div>
         <div id="orb-face-frame">
           <!-- JARVIS's rendered likeness: a real, locally-generated video
@@ -1693,6 +1898,17 @@
            and label. -->
       <div class="orb-command-dock">
         <div class="orb-command-dock-label hud-label">Tell JARVIS what you need</div>
+        <!-- Audio visualizer (2026-08-31, full high-tech treatment): an
+             honest stand-in for real audio-reactivity, same rule the
+             existing "speaking" glow on the frame already follows —
+             there's no live waveform analysis, so this reacts to
+             JARVIS's own state (listening/speaking) rather than
+             pretending to read actual audio levels. Nearly invisible at
+             rest, active only during listening/speaking — see the CSS
+             for #orb-widget.listening/.orb-state-speaking .orb-visualizer. -->
+        <div class="orb-visualizer" id="orb-visualizer" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
         <div id="orb-controls">
           <div class="orb-control">
             <button id="orb-mic-btn" class="orb-icon-btn" type="button" title="Click, then speak">
@@ -3566,6 +3782,43 @@ checkSession();
     }
     if (window.speechSynthesis) speakWithBrowserVoice(cleanText);
   };
+
+  // ── Home stage HUD labels (2026-08-31, full high-tech treatment) ──────
+  // Mirrors real values Home already fetches/tracks into the small
+  // corner readouts around JARVIS's screen — never a second data source,
+  // never a fabricated number. voiceOn is the same variable the voice-
+  // reply toggle above already maintains; the other three are copied
+  // straight from Home's own telemetry strip (home-tel-network/-agents/
+  // -uptime), which loadHomeTelemetry()-equivalent code elsewhere in this
+  // file already keeps current. A quiet 2s poll rather than threading a
+  // callback through every place those get set, so this can't drift out
+  // of sync with a future change there. Harmless on every non-Home page:
+  // the HUD elements are display:none there and orb-hud-system/etc are
+  // never looked up.
+  function mirrorOrbHud() {
+    const netSrc = document.getElementById("home-tel-network");
+    const sysDst = document.getElementById("orb-hud-system");
+    if (netSrc && sysDst) sysDst.textContent = netSrc.textContent.replace(/^NETWORK\s*/i, "").trim() || "—";
+
+    const agentsSrc = document.getElementById("home-tel-agents");
+    const agentsDst = document.getElementById("orb-hud-agents");
+    if (agentsSrc && agentsDst) agentsDst.textContent = agentsSrc.textContent.replace(/^AGENTS\s*/i, "").trim() || "—";
+
+    const uptimeSrc = document.getElementById("home-tel-uptime");
+    const uptimeDst = document.getElementById("orb-hud-uptime");
+    if (uptimeSrc && uptimeDst) uptimeDst.textContent = uptimeSrc.textContent.replace(/^UPTIME\s*/i, "").trim() || "—";
+
+    const voiceDst = document.getElementById("orb-hud-voice");
+    if (voiceDst) voiceDst.textContent = voiceOn ? "ACTIVE" : "STANDBY";
+  }
+  mirrorOrbHud();
+  setInterval(mirrorOrbHud, 2000);
+
+  // ── Home stage audio visualizer state sync ─────────────────────────────
+  // #orb-visualizer's bars are driven entirely by CSS reading #orb-widget's
+  // existing state classes (.listening / .orb-state-speaking) — see the
+  // Home stage CSS. Nothing to wire here; noted so the next person doesn't
+  // go looking for a JS-side amplitude calculation that doesn't exist.
 })();
 </script>
 </body>
