@@ -644,19 +644,34 @@
      circle, precisely so a future full-body clip is a config change, not
      a layout rewrite) and `assets` map are the only things that need to
      change when that clip replaces today's headshot-crop placeholder.
-     No ring/halo circling it and nothing calls this an "orb" anymore —
-     Lee's direction 2026-08-29 was explicit that the avatar itself must
-     never read as framed inside one. Corner brackets (.hud-corner below)
-     mark it as an instrument readout instead. Deliberately no Three.js/
-     GLTF here — the earlier rigged 3D face was reported "creepy" (see
+     No ring/halo circling it and nothing calls this an "orb" on every
+     OTHER page — corner brackets (.hud-corner below) mark it as an
+     instrument readout there instead. On Home specifically (2026-08-31,
+     Lee's explicit direction: follow the supplied Aegis Command Deck
+     reference's actual presentation rather than an inferred rule against
+     it) --avatar-aspect/--avatar-radius switch to 1/1 and 50% and the new
+     .orb-portrait-ring/.orb-portrait-halo below take over — see the Home
+     stage rules further down. Deliberately no Three.js/GLTF here — the
+     earlier rigged 3D face was reported "creepy" (see
      test_ui_command_center.py) and explicitly replaced with the plain
      (now-hidden) canvas this used to sit on top of. */
   /* The screen housing (2026-08-31 stage rebuild): a passthrough wrapper
      everywhere except Home, where it becomes the big instrument-panel
      "monitor" JARVIS's own frame sits inside — see the Home stage rules
-     further down for the actual size/corner-bracket treatment. */
+     further down for the actual size treatment. Corner brackets
+     (.orb-screen-corner) are DOM siblings of #orb-screen, not children —
+     on Home they frame the whole stage column, matching the reference's
+     own .hud-frame/#panel-screen split, not just the screen box. */
   #orb-screen { position: relative; width: 100%; }
   .orb-screen-corner { position: absolute; width: 0; height: 0; pointer-events: none; opacity: 0; }
+  /* The reference's spinning conic-gradient ring + blurred halo around its
+     circular portrait — hidden everywhere except Home (see below), where
+     they take over from the plain rectangular corner brackets. Colored
+     from --orb-state-color, the same source of truth every other state
+     cue (frame glow, pulse ring, ground light) already uses, so JARVIS's
+     "is thinking / is speaking" read stays consistent between pages. */
+  .orb-portrait-halo, .orb-portrait-ring { display: none; }
+  @keyframes orb-portrait-ring-spin { to { transform: rotate(360deg); } }
   #orb-face-wrap {
     --avatar-aspect: 3 / 4; --avatar-radius: 10px;
     position: relative; width: 100%; aspect-ratio: var(--avatar-aspect); pointer-events: none;
@@ -963,40 +978,92 @@
     }
     body:has(#page-home.active) .home-rail-section { max-width: none; }
 
-    /* The screen: a big instrument-panel housing around JARVIS's existing
-       rectangular frame — the dominant element on Home, not a bigger
-       version of the small docked panel. Height-driven (not a hardcoded
-       width) since #orb-face-wrap keeps its real 3:4 aspect ratio, so it
-       scales cleanly at 1024/1280/1440 off the viewport instead of a
-       single guessed pixel value. */
+    /* The stage frame: an outer bracket around the WHOLE column (screen +
+       state readout), matching the reference's #stage/.hud-frame split —
+       not tight corners on the screen box itself. */
+    body:has(#page-home.active) .orb-screen-corner {
+      width: 34px; height: 34px; border: 1px solid var(--line-strong); opacity: .85;
+    }
+    body:has(#page-home.active) .orb-screen-corner.tl { top: 26px; left: 26px; border-right: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.tr { top: 26px; right: 26px; border-left: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.bl { bottom: 26px; left: 26px; border-right: 0; border-top: 0; }
+    body:has(#page-home.active) .orb-screen-corner.br { bottom: 26px; right: 26px; border-left: 0; border-top: 0; }
+
+    /* The screen: a big instrument-panel "monitor" with its OWN
+       independent proportions (a 16:10 landscape panel, not a box that
+       just hugs the avatar) — sized primarily off available height so it
+       can never overflow the stage column vertically, width capped to
+       the column so a narrower column (1024px) just reads slightly less
+       landscape instead of clipping. This is what makes JARVIS read as a
+       dominant STAGE, matching the reference's #panel-screen; the
+       portrait inside it is deliberately NOT the whole screen (see
+       #orb-face-wrap below — ~36% of the screen's width, same
+       proportion as the reference's #portrait-wrap). */
     body:has(#page-home.active) #orb-screen {
-      width: auto; max-width: 100%; padding: 32px;
+      --stage-h: min(56vh, 540px);
+      height: var(--stage-h); width: min(calc(var(--stage-h) * 1.6), 100%);
+      max-width: 100%; padding: 0; overflow: hidden;
       border: 1px solid var(--line); border-radius: 20px;
       background: linear-gradient(160deg, color-mix(in srgb, var(--panel) 55%, transparent), color-mix(in srgb, var(--panel-alt) 30%, transparent));
       box-shadow: inset 0 0 0 1px rgba(255,255,255,.03), 0 30px 80px rgba(0,0,0,.45);
     }
-    body:has(#page-home.active) #orb-face-wrap { width: auto; height: clamp(360px, 62vh, 640px); }
-    body:has(#page-home.active) .orb-screen-corner { width: 30px; height: 30px; border: 1px solid var(--line-strong); opacity: .8; }
-    body:has(#page-home.active) .orb-screen-corner.tl { top: 8px; left: 8px; border-right: 0; border-bottom: 0; }
-    body:has(#page-home.active) .orb-screen-corner.tr { top: 8px; right: 8px; border-left: 0; border-bottom: 0; }
-    body:has(#page-home.active) .orb-screen-corner.bl { bottom: 8px; left: 8px; border-right: 0; border-top: 0; }
-    body:has(#page-home.active) .orb-screen-corner.br { bottom: 8px; right: 8px; border-left: 0; border-top: 0; }
+    /* Scanline overlay on the screen glass itself, matching the
+       reference's #panel-screen::before. */
+    body:has(#page-home.active) #orb-screen::before {
+      content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .3; z-index: 0;
+      background: repeating-linear-gradient(0deg, color-mix(in srgb, var(--accent) 12%, transparent) 0px, color-mix(in srgb, var(--accent) 12%, transparent) 1px, transparent 1px, transparent 3px);
+    }
+    /* The portrait itself: circular, spinning ring, blurred halo — the
+       reference's actual presentation (2026-08-31, Lee: follow the
+       reference's presentation, not an inferred rule against it).
+       Absolutely positioned within the screen at the reference's own
+       proportions (~36% width, centered slightly above screen-center)
+       rather than filling the screen — the SCREEN is what reads as
+       dominant, the portrait is a focal accent within it, same balance
+       as the reference. */
+    body:has(#page-home.active) #orb-face-wrap {
+      --avatar-aspect: 1 / 1 !important; --avatar-radius: 50% !important;
+      position: absolute; left: 50%; top: 42%; width: 36%; height: auto;
+      transform: translate(-50%, -50%); z-index: 2;
+    }
+    body:has(#page-home.active) .hud-corner,
+    body:has(#page-home.active) #orb-face-wrap::before,
+    body:has(#page-home.active) .orb-ground-light { display: none; }
+    body:has(#page-home.active) .orb-portrait-halo {
+      display: block; position: absolute; inset: -38%; border-radius: 50%; z-index: -2; pointer-events: none;
+      background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 32%, transparent), transparent 70%);
+      filter: blur(8px); transition: background .5s ease;
+    }
+    body:has(#page-home.active) .orb-portrait-ring {
+      display: block; position: absolute; inset: -16px; border-radius: 50%; z-index: 1; pointer-events: none;
+      background: conic-gradient(from 0deg, transparent 0%, var(--orb-state-color) 10%, transparent 26%, transparent 100%);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+      animation: orb-portrait-ring-spin 7s linear infinite;
+      filter: drop-shadow(0 0 10px var(--orb-state-color));
+      opacity: .85; transition: filter .5s ease;
+    }
     body:has(#page-home.active) #orb-state-label { margin-top: 20px; font-size: 14px; }
 
-    /* The command bar: a real floating pill below the screen — input
-       first (reordered, no DOM change), icon controls after, so typing
-       or speaking to JARVIS reads as one action, not two stacked blocks
-       under a photo. */
+    /* The command bar: a real floating surface below the screen —
+       reference-accurate shape (a softly rounded rectangle, not a full
+       pill) with a command-line prompt accent, input first (reordered,
+       no DOM change), icon controls after, so typing or speaking to
+       JARVIS reads as one action, not two stacked blocks under a photo. */
     body:has(#page-home.active) .orb-command-dock {
-      flex-direction: row; align-items: center; gap: 10px;
-      width: min(560px, 100%); margin-top: 28px; border-top: 0;
-      padding: 8px 10px 8px 22px; border-radius: 999px;
+      position: relative; flex-direction: row; align-items: center; gap: 10px;
+      width: min(560px, 100%); margin-top: 26px; border-top: 0;
+      padding: 8px 10px 8px 30px; border-radius: 8px;
       background: var(--panel); backdrop-filter: blur(14px);
       border: 1px solid var(--line-strong); box-shadow: 0 20px 50px rgba(0,0,0,.5);
     }
+    body:has(#page-home.active) .orb-command-dock::before {
+      content: "›"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+      color: var(--accent); font-family: var(--mono); font-weight: 700; font-size: 16px;
+    }
     body:has(#page-home.active) .orb-command-dock-label { display: none; }
     body:has(#page-home.active) #orb-input-row { order: 1; flex: 1; width: auto; }
-    body:has(#page-home.active) #orb-input-row input { text-align: left; }
+    body:has(#page-home.active) #orb-input-row input { text-align: left; border-radius: 4px; }
     body:has(#page-home.active) #orb-controls { order: 2; gap: 8px; align-items: center; }
 
     /* The rail: subordinate to the stage — compact rows with a hairline
@@ -1074,18 +1141,54 @@
       align-items: center; justify-content: center;
     }
     body:has(#page-home.active) #content { order: 0; }
-    body:has(#page-home.active) #orb-face-wrap { width: auto; height: clamp(220px, 40vh, 380px); flex: none; }
-    body:has(#page-home.active) #orb-screen { width: auto; max-width: 100%; padding: 18px; border-radius: 14px; border: 1px solid var(--line); }
-    body:has(#page-home.active) .orb-screen-corner { width: 20px; height: 20px; border: 1px solid var(--line-strong); opacity: .8; }
-    body:has(#page-home.active) .orb-screen-corner.tl { top: 6px; left: 6px; border-right: 0; border-bottom: 0; }
-    body:has(#page-home.active) .orb-screen-corner.tr { top: 6px; right: 6px; border-left: 0; border-bottom: 0; }
-    body:has(#page-home.active) .orb-screen-corner.bl { bottom: 6px; left: 6px; border-right: 0; border-top: 0; }
-    body:has(#page-home.active) .orb-screen-corner.br { bottom: 6px; right: 6px; border-left: 0; border-top: 0; }
+    body:has(#page-home.active) .orb-screen-corner {
+      width: 22px; height: 22px; border: 1px solid var(--line-strong); opacity: .85;
+    }
+    body:has(#page-home.active) .orb-screen-corner.tl { top: 14px; left: 14px; border-right: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.tr { top: 14px; right: 14px; border-left: 0; border-bottom: 0; }
+    body:has(#page-home.active) .orb-screen-corner.bl { bottom: 14px; left: 14px; border-right: 0; border-top: 0; }
+    body:has(#page-home.active) .orb-screen-corner.br { bottom: 14px; right: 14px; border-left: 0; border-top: 0; }
+    body:has(#page-home.active) #orb-screen {
+      height: clamp(200px, 38vh, 340px); width: min(calc(clamp(200px, 38vh, 340px) * 1.5), 100%);
+      max-width: 100%; padding: 0; overflow: hidden;
+      border: 1px solid var(--line); border-radius: 16px;
+      background: linear-gradient(160deg, color-mix(in srgb, var(--panel) 55%, transparent), color-mix(in srgb, var(--panel-alt) 30%, transparent));
+    }
+    body:has(#page-home.active) #orb-screen::before {
+      content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .3; z-index: 0;
+      background: repeating-linear-gradient(0deg, color-mix(in srgb, var(--accent) 12%, transparent) 0px, color-mix(in srgb, var(--accent) 12%, transparent) 1px, transparent 1px, transparent 3px);
+    }
+    body:has(#page-home.active) #orb-face-wrap {
+      --avatar-aspect: 1 / 1 !important; --avatar-radius: 50% !important;
+      position: absolute; left: 50%; top: 42%; width: 38%; height: auto; flex: none;
+      transform: translate(-50%, -50%); z-index: 2;
+    }
+    body:has(#page-home.active) .hud-corner,
+    body:has(#page-home.active) #orb-face-wrap::before,
+    body:has(#page-home.active) .orb-ground-light { display: none; }
+    body:has(#page-home.active) .orb-portrait-halo {
+      display: block; position: absolute; inset: -38%; border-radius: 50%; z-index: -2; pointer-events: none;
+      background: radial-gradient(circle, color-mix(in srgb, var(--orb-state-color) 32%, transparent), transparent 70%);
+      filter: blur(8px);
+    }
+    body:has(#page-home.active) .orb-portrait-ring {
+      display: block; position: absolute; inset: -12px; border-radius: 50%; z-index: 1; pointer-events: none;
+      background: conic-gradient(from 0deg, transparent 0%, var(--orb-state-color) 10%, transparent 26%, transparent 100%);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+      animation: orb-portrait-ring-spin 7s linear infinite;
+      filter: drop-shadow(0 0 8px var(--orb-state-color));
+      opacity: .85;
+    }
     body:has(#page-home.active) #orb-state-label { display: flex; margin-top: 14px; }
     body:has(#page-home.active) .orb-command-dock {
-      display: flex; flex-direction: row; width: min(440px, 92%); margin-top: 16px; border-top: 0;
-      border-radius: 999px; padding: 6px 8px 6px 16px; border: 1px solid var(--line-strong);
+      position: relative; display: flex; flex-direction: row; width: min(440px, 92%); margin-top: 16px; border-top: 0;
+      border-radius: 8px; padding: 6px 8px 6px 24px; border: 1px solid var(--line-strong);
       background: var(--panel); backdrop-filter: blur(10px);
+    }
+    body:has(#page-home.active) .orb-command-dock::before {
+      content: "›"; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+      color: var(--accent); font-family: var(--mono); font-weight: 700; font-size: 14px;
     }
     body:has(#page-home.active) .orb-command-dock-label { display: none; }
     body:has(#page-home.active) #orb-input-row { display: block; order: 1; flex: 1; width: auto; }
@@ -1475,19 +1578,28 @@
          end of this file (window.setOrbState / window.speakReply). ── -->
     <aside id="orb-widget">
       <canvas id="orb-canvas"></canvas>
-      <!-- The "screen": a big instrument-panel housing around the avatar
-           itself (2026-08-31 stage rebuild). On Home this is what makes
-           JARVIS read as the dominant stage rather than a dashboard
-           widget — #orb-face-wrap (unchanged inside) just grows to fill
-           much more of it there; on every other page this wrapper is a
-           harmless no-op passthrough at 100% width, same as before. -->
+      <!-- The stage (2026-08-31 rebuild, reference-accurate pass): on Home
+           this reads as JARVIS's own instrument-panel monitor — the outer
+           bracket frame belongs to the STAGE (#orb-widget), not the
+           screen, matching the reference's #stage/.hud-frame split. On
+           every other page these are harmless no-ops (display:none by
+           default), same as before. -->
+      <div class="orb-screen-corner tl" aria-hidden="true"></div>
+      <div class="orb-screen-corner tr" aria-hidden="true"></div>
+      <div class="orb-screen-corner bl" aria-hidden="true"></div>
+      <div class="orb-screen-corner br" aria-hidden="true"></div>
       <div id="orb-screen">
-        <div class="orb-screen-corner tl" aria-hidden="true"></div>
-        <div class="orb-screen-corner tr" aria-hidden="true"></div>
-        <div class="orb-screen-corner bl" aria-hidden="true"></div>
-        <div class="orb-screen-corner br" aria-hidden="true"></div>
         <div id="orb-face-wrap">
         <div class="orb-ground-light" aria-hidden="true"></div>
+        <!-- Reference-accurate presence treatment (2026-08-31): Lee's
+             instruction is explicit — follow the supplied Aegis Command
+             Deck reference's actual circular-portrait/spinning-ring
+             presentation on Home rather than an inferred rule against it.
+             Home-only via CSS (--avatar-aspect/--avatar-radius become
+             1/1 and 50% there); every other page keeps the tall
+             rectangular panel this shape system has always produced. -->
+        <div class="orb-portrait-halo" aria-hidden="true"></div>
+        <div class="orb-portrait-ring" aria-hidden="true"></div>
         <div id="orb-face-frame">
           <!-- JARVIS's rendered likeness: a real, locally-generated video
                (SadTalker for idle/listening/thinking/tool/error/success/
@@ -1499,14 +1611,10 @@
           <div class="orb-scan" aria-hidden="true"></div>
           <div class="orb-exec-bar" aria-hidden="true"></div>
         </div>
-        <!-- Cinematic state read on the frame's own edge, not a circular
-             ring around the avatar — a rounded-rectangle outline matching
-             --avatar-radius that pulses outward per state, colored from
-             the same --orb-state-color every other state cue already
-             uses. Lee's rule against a circular frame (see the comment
-             above #orb-face-wrap) is about the avatar's permanent
-             presentation, not a brief technical pulse on its rectangular
-             edge — this never becomes a ring shape. -->
+        <!-- Cinematic state pulse on the frame's own edge — a rounded-
+             rectangle outline on every non-Home page; on Home
+             --avatar-radius is 50% so this same element pulses around
+             the circle instead, still colored from --orb-state-color. -->
         <div class="orb-pulse-ring" aria-hidden="true"></div>
         <div class="hud-corner hud-corner-tl"></div>
         <div class="hud-corner hud-corner-tr"></div>
