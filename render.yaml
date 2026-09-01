@@ -27,6 +27,16 @@ services:
     envVars:
       - key: JARVIS_API_TOKEN
         sync: false   # set as a real secret in the Render dashboard, never committed
+      # Ollama Cloud is the sole LLM provider (see ui.py's
+      # _configured_providers). The key is a real secret set in the Render
+      # dashboard; URL and model are plain config so a model swap is an
+      # env edit, not a deploy of new code.
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: OLLAMA_URL
+        value: "https://ollama.com/api/chat"
+      - key: OLLAMA_MODEL
+        value: "gpt-oss:120b-cloud"
       - key: GROQ_API_KEY
         sync: false   # set as a real secret in the Render dashboard, never committed —
                        # the zero-cost primary provider; see core/headless/ui.py's

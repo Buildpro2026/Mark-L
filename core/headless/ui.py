@@ -356,28 +356,26 @@ def _status_label_for_tool(name: str, args: dict) -> str:
 
 
 def _configured_providers() -> list[str]:
-    """Ordered by preference — cheapest/most generous first. Groq's free
-    tier (no credit card, roughly 1,000-14,400 requests/day depending on
-    model) is far more generous than Gemini's free tier (20 requests/day,
-    which 429s immediately once exhausted — see the P0 zero-cost-provider
-    audit), so it's tried first when configured.
+    """The provider chain. Ollama Cloud, and nothing else.
 
-    Gemini is deliberately excluded from this list for now (Lee's
-    explicit instruction: Groq-only, so JARVIS never calls Gemini and
-    never consumes Gemini credits while that account is being managed
-    separately) — GEMINI_API_KEY is still read into config.GEMINI_API_KEY
-    and core/headless/gemini_client.py / _run_chat_turn_gemini are still
-    fully intact, so re-enabling it later is a one-line change here, not
-    a rebuild. This is the entire provider-priority mechanism: which of
-    GROQ_API_KEY / ANTHROPIC_TOKEN are set, and in what order they're
-    listed here — no other code changes to add, remove, or reorder a
-    provider."""
-    order = []
-    if config.GROQ_API_KEY:
-        order.append("groq")
-    if config.ANTHROPIC_TOKEN:
-        order.append("anthropic")
-    return order
+    JARVIS is one assistant, so he gets one brain. Multiple providers meant
+    the same question could be answered by a different model with different
+    tool-calling behavior depending on which one had quota left that minute
+    — inconsistency dressed up as resilience.
+
+    Groq is gone as primary for a specific, measured reason: its SDK retried
+    a 429 twice, sleeping 17s then ~44s before surfacing the failure, so a
+    rate-limited turn cost about a minute of silence. On a phone call that
+    is indistinguishable from a dropped line. Ollama Cloud is called
+    directly with no retry layer at all (core/headless/ollama_client.py) and
+    a hard 20s timeout, so a bad turn fails in seconds, visibly.
+
+    Gemini and Anthropic remain unlisted deliberately. Their _run_chat_turn_*
+    functions are still present and still work; adding a name back to this
+    list is all it would take to re-enable one, which is exactly how much
+    ceremony that decision should require.
+    """
+    return ["ollama"] if config.OLLAMA_API_KEY else []
 
 
 async def run_chat_turn(
@@ -425,8 +423,8 @@ async def run_chat_turn(
         raise HTTPException(
             status_code=503,
             detail=(
-                "No AI provider is configured on this server "
-                "(set GROQ_API_KEY, GEMINI_API_KEY, or ANTHROPIC_TOKEN)."
+                "JARVIS has no LLM provider configured — set OLLAMA_API_KEY "
+                "on this server."
             ),
         )
 
@@ -451,6 +449,7 @@ async def _run_provider_chain(
     for the "next provider, or give up" decision instead of three copies
     of it."""
     runner = {
+        "ollama": _run_chat_turn_ollama,
         "groq": _run_chat_turn_groq,
         "gemini": _run_chat_turn_gemini,
         "anthropic": _run_chat_turn_anthropic,
@@ -465,6 +464,119 @@ async def _emit_tool_event(on_tool_event: Callable[[dict], Awaitable[None]] | No
         await on_tool_event(event)
     except Exception:
         pass  # a broken event sink must never break the actual turn
+
+
+async def _run_chat_turn_ollama(
+    message: str, history: list[dict],
+    on_status: Callable[[str], Awaitable[None]] | None,
+    executor: "ToolExecutor",  # noqa: F821
+    tool_calls_made: list[dict],
+    remaining_providers: list[str],
+    on_tool_event: Callable[[dict], Awaitable[None]] | None = None,
+) -> tuple[str, list[dict]]:
+    """One JARVIS turn on Ollama Cloud — the production path.
+
+    Structurally parallel to _run_chat_turn_groq (OpenAI-shaped tool_calls
+    and role="tool" results), with three deliberate differences:
+
+      * No retry layer anywhere. ollama_client.chat() makes exactly one
+        HTTP request with a hard timeout, which is the entire point of the
+        migration off Groq's silently-retrying SDK.
+      * Tool arguments arrive as objects, not JSON strings, so parsing goes
+        through ollama_client.parse_tool_call() which accepts both.
+      * 20 turns of history rather than Groq's 10 — that cap existed only
+        to survive Groq's 8k tokens/minute free tier, and carrying it here
+        would keep a limitation that no longer applies.
+
+    remaining_providers is honored so the chain stays generic, but in
+    production it is always empty (Ollama is the only listed provider), so
+    a failure surfaces immediately as a 502 instead of quietly becoming a
+    different model's answer.
+    """
+    from core.headless.tool_executor import UnknownToolError
+    from core.headless import ollama_client
+
+    tools = ollama_client.gemini_tools_to_ollama(_chat_tool_declarations())
+
+    messages: list[dict] = [{"role": "system", "content": _chat_system_prompt()}]
+    for turn in history[-20:]:
+        role = "assistant" if turn.get("role") == "model" else "user"
+        text = str(turn.get("text") or "")
+        if text:
+            messages.append({"role": role, "content": text})
+    messages.append({"role": "user", "content": message})
+    if tool_calls_made:
+        already_done = "\n".join(f"- {c['name']}({c['args']}) -> {c['result']}" for c in tool_calls_made)
+        messages.append({
+            "role": "user",
+            "content": (
+                "[System note: before switching to you, the following tool call(s) "
+                "already ran successfully and must NOT be repeated — use these real "
+                f"results to answer:]\n{already_done}"
+            ),
+        })
+
+    loop = asyncio.get_event_loop()
+
+    for _ in range(_MAX_TOOL_CALL_ROUNDS):
+        try:
+            reply = await loop.run_in_executor(
+                None, lambda: ollama_client.chat(messages, tools=tools)
+            )
+        except Exception as e:
+            if remaining_providers:
+                return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
+            # str(e) here is an OllamaError message, which ollama_client
+            # guarantees carries no key material — see its _safe_error().
+            raise HTTPException(status_code=502, detail=f"JARVIS could not reach Ollama Cloud. {e}")
+
+        tool_calls = reply.get("tool_calls") or []
+        if not tool_calls:
+            return (reply.get("content") or "").strip(), tool_calls_made
+
+        # Echo the assistant turn back verbatim so the model sees its own
+        # tool calls alongside their results on the next round.
+        messages.append({
+            "role": "assistant",
+            "content": reply.get("content") or "",
+            "tool_calls": tool_calls,
+        })
+
+        for tc in tool_calls:
+            name, args = ollama_client.parse_tool_call(tc)
+            if not name:
+                continue
+            if on_status is not None:
+                try:
+                    await on_status(_status_label_for_tool(name, args))
+                except Exception:
+                    pass
+            await _emit_tool_event(on_tool_event, {"type": "tool_start", "name": name})
+            try:
+                result = await executor.execute(name, args)
+                tool_ok = True
+            except UnknownToolError as e:
+                result = f"Error: {e}"
+                tool_ok = False
+            except Exception as e:
+                result = f"Error: {name} failed — {e}"
+                tool_ok = False
+            await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": name, "ok": tool_ok})
+            tool_calls_made.append({"name": name, "args": args, "result": result})
+            # Ollama matches a result to its call by tool_name, not by an
+            # id (it doesn't issue call ids), so the name must be carried.
+            messages.append({"role": "tool", "tool_name": name, "content": str(result)})
+
+        if on_status is not None and tool_calls:
+            try:
+                await on_status("Analyzing results...")
+            except Exception:
+                pass
+
+    return (
+        "I ran several tool calls but didn't reach a final answer — try rephrasing or breaking the request into smaller steps.",
+        tool_calls_made,
+    )
 
 
 async def _run_chat_turn_gemini(

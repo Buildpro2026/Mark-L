@@ -24,56 +24,18 @@ from core.headless import config
 
 # ── reuse the exact fake-Groq-client shape tests/test_llm_fallback.py and
 # tests/test_chat_status_progress.py already use, so these tests exercise
-# the real run_chat_turn -> _run_chat_turn_groq loop, not a mock of it. ──
+# the real run_chat_turn -> _run_chat_turn_ollama loop, not a mock of it. ──
 
-class _FakeFunctionCall:
-    def __init__(self, name, args):
-        self.name = name
-        self.args = args
-
-
-class _FakeToolCall:
-    def __init__(self, id, name, args):
-        self.id = id
-        self.function = type("_F", (), {"name": name, "arguments": _json.dumps(args)})()
-
-
-class _FakeMessage:
-    def __init__(self, content=None, tool_calls=None):
-        self.content = content
-        self.tool_calls = tool_calls or []
-
-
-class _FakeChoice:
-    def __init__(self, message):
-        self.message = message
-
-
-class _FakeResponse:
-    def __init__(self, text=None, function_calls=None):
-        tool_calls = [
-            _FakeToolCall(f"call_{i}", fc.name, fc.args)
-            for i, fc in enumerate(function_calls or [])
-        ]
-        self.choices = [_FakeChoice(_FakeMessage(content=text, tool_calls=tool_calls))]
-
-
-class _FakeCompletions:
-    def __init__(self, responses):
-        self._responses = list(responses)
-
-    def create(self, model, messages, tools):
-        return self._responses.pop(0)
-
-
-class _FakeClient:
-    def __init__(self, responses):
-        self.chat = type("_Chat", (), {"completions": _FakeCompletions(responses)})()
+# Provider fakes live in tests/ollama_fake.py — see that module for why the
+# fake moved from the Groq SDK's object shape down to the HTTP layer.
+from tests.ollama_fake import FakeFunctionCall as _FakeFunctionCall
+from tests.ollama_fake import FakeResponse as _FakeResponse
+from tests.ollama_fake import install as _install_ollama
 
 
 @pytest.fixture(autouse=True)
-def _groq_only(monkeypatch):
-    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-key-not-real")
+def _ollama_only(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "OLLAMA_API_KEY", "fake-key-not-real")
 
 
 # ── on_tool_event, exercised through the real run_chat_turn ─────────────
@@ -81,7 +43,7 @@ def _groq_only(monkeypatch):
 def test_on_tool_event_fires_start_then_end_for_a_single_tool(monkeypatch):
     fc = _FakeFunctionCall("gmail", {"action": "list"})
     responses = [_FakeResponse(function_calls=[fc]), _FakeResponse(text="Done.")]
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient(responses))
+    _install_ollama(monkeypatch, responses)
     from core.headless.tool_executor import ToolExecutor
     monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
 
@@ -99,7 +61,7 @@ def test_on_tool_event_fires_start_then_end_for_a_single_tool(monkeypatch):
     ]
 
 
-def test_on_tool_event_fires_for_multiple_tools_in_order():
+def test_on_tool_event_fires_for_multiple_tools_in_order(monkeypatch):
     fc1 = _FakeFunctionCall("buildpro_matching", {})
     fc2 = _FakeFunctionCall("hubspot", {"action": "list_contacts"})
     responses = [
@@ -107,7 +69,8 @@ def test_on_tool_event_fires_for_multiple_tools_in_order():
         _FakeResponse(text="Found matches and synced HubSpot."),
     ]
     import unittest.mock as mock
-    with mock.patch("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient(responses)):
+    _install_ollama(monkeypatch, responses)
+    if True:
         from core.headless.tool_executor import ToolExecutor
         with mock.patch.object(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok")):
             events = []
@@ -126,7 +89,7 @@ def test_on_tool_event_fires_for_multiple_tools_in_order():
 def test_on_tool_event_reports_a_failed_tool_honestly(monkeypatch):
     fc = _FakeFunctionCall("gmail", {"action": "send"})
     responses = [_FakeResponse(function_calls=[fc]), _FakeResponse(text="That didn't work.")]
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient(responses))
+    _install_ollama(monkeypatch, responses)
     from core.headless.tool_executor import ToolExecutor
 
     def _boom(self, name, args):
@@ -146,7 +109,7 @@ def test_on_tool_event_reports_a_failed_tool_honestly(monkeypatch):
 
 
 def test_ordinary_chat_with_no_tools_never_fires_tool_events(monkeypatch):
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient([_FakeResponse(text="Hi there.")]))
+    _install_ollama(monkeypatch, [_FakeResponse(text="Hi there.")])
 
     events = []
 
@@ -162,7 +125,7 @@ def test_ordinary_chat_with_no_tools_never_fires_tool_events(monkeypatch):
 def test_a_broken_tool_event_sink_never_breaks_the_real_turn(monkeypatch):
     fc = _FakeFunctionCall("system_status", {})
     responses = [_FakeResponse(function_calls=[fc]), _FakeResponse(text="All good.")]
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient(responses))
+    _install_ollama(monkeypatch, responses)
     from core.headless.tool_executor import ToolExecutor
     monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
 
@@ -174,7 +137,7 @@ def test_a_broken_tool_event_sink_never_breaks_the_real_turn(monkeypatch):
 
 
 def test_run_chat_turn_still_works_with_neither_callback_at_all(monkeypatch):
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient([_FakeResponse(text="fine")]))
+    _install_ollama(monkeypatch, [_FakeResponse(text="fine")])
     reply, calls = asyncio.run(headless_ui.run_chat_turn("hi", []))
     assert reply == "fine"
 
@@ -204,7 +167,7 @@ def _logged_in_client(monkeypatch):
 def test_ui_api_chat_route_streams_sse_frames_and_ends_with_done(monkeypatch):
     fc = _FakeFunctionCall("web_search", {"query": "x"})
     responses = [_FakeResponse(function_calls=[fc]), _FakeResponse(text="Here you go.")]
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient(responses))
+    _install_ollama(monkeypatch, responses)
     from core.headless.tool_executor import ToolExecutor
     monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
 
@@ -223,7 +186,7 @@ def test_ui_api_chat_route_streams_sse_frames_and_ends_with_done(monkeypatch):
 
 
 def test_ui_api_chat_route_with_no_tools_streams_just_the_done_frame(monkeypatch):
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _FakeClient([_FakeResponse(text="Just an answer.")]))
+    _install_ollama(monkeypatch, [_FakeResponse(text="Just an answer.")])
 
     client = _logged_in_client(monkeypatch)
     r = client.post("/ui/api/chat", json={"message": "what's 2+2?", "history": []})
@@ -233,22 +196,18 @@ def test_ui_api_chat_route_with_no_tools_streams_just_the_done_frame(monkeypatch
 
 
 def test_ui_api_chat_route_reports_provider_failure_as_an_error_frame(monkeypatch):
-    class _AlwaysFails:
-        class _Chat:
-            class _Completions:
-                def create(self, model, messages, tools):
-                    raise RuntimeError("groq is down")
-            completions = _Completions()
-        chat = _Chat()
-
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: _AlwaysFails())
+    import requests
+    from tests.ollama_fake import install_failing
+    attempts = install_failing(monkeypatch, requests.exceptions.Timeout())
 
     client = _logged_in_client(monkeypatch)
     r = client.post("/ui/api/chat", json={"message": "hello", "history": []})
 
     events = _sse_events(r.text)
     assert events[-1]["type"] == "error"
-    assert "groq is down" in events[-1]["detail"]
+    assert "Ollama" in events[-1]["detail"]
+    # Fail fast: one attempt, no retry storm behind the error frame.
+    assert len(attempts) == 1
 
 
 def test_ui_api_chat_route_requires_a_session(monkeypatch):

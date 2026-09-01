@@ -33,57 +33,16 @@ def test_unknown_tool_gets_an_honest_generic_label():
 import json as _json
 
 
-class _FakeFunctionCall:
-    """Provider-agnostic tool-call spec used to build a Groq-shaped fake
-    response below — name kept for readability at call sites, not tied
-    to any one provider's actual response shape."""
-    def __init__(self, name, args):
-        self.name = name
-        self.args = args
-
-
-class _FakeToolCall:
-    def __init__(self, id, name, args):
-        self.id = id
-        self.function = type("_F", (), {"name": name, "arguments": _json.dumps(args)})()
-
-
-class _FakeMessage:
-    def __init__(self, content=None, tool_calls=None):
-        self.content = content
-        self.tool_calls = tool_calls or []
-
-
-class _FakeChoice:
-    def __init__(self, message):
-        self.message = message
-
-
-class _FakeResponse:
-    def __init__(self, text=None, function_calls=None):
-        tool_calls = [
-            _FakeToolCall(f"call_{i}", fc.name, fc.args)
-            for i, fc in enumerate(function_calls or [])
-        ]
-        self.choices = [_FakeChoice(_FakeMessage(content=text, tool_calls=tool_calls))]
-
-
-class _FakeCompletions:
-    def __init__(self, responses):
-        self._responses = list(responses)
-
-    def create(self, model, messages, tools):
-        return self._responses.pop(0)
-
-
-class _FakeClient:
-    def __init__(self, responses):
-        self.chat = type("_Chat", (), {"completions": _FakeCompletions(responses)})()
+# Provider fakes live in tests/ollama_fake.py — see that module for why the
+# fake moved from the Groq SDK's object shape down to the HTTP layer.
+from tests.ollama_fake import FakeFunctionCall as _FakeFunctionCall
+from tests.ollama_fake import FakeResponse as _FakeResponse
+from tests.ollama_fake import install as _install_ollama
 
 
 @pytest.fixture(autouse=True)
-def _no_real_groq_calls(monkeypatch):
-    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-key-not-real")
+def _no_real_provider_calls(monkeypatch):
+    monkeypatch.setattr(headless_ui.config, "OLLAMA_API_KEY", "fake-key-not-real")
 
 
 def test_run_chat_turn_emits_status_before_tool_call_and_after(monkeypatch):
@@ -92,8 +51,7 @@ def test_run_chat_turn_emits_status_before_tool_call_and_after(monkeypatch):
         _FakeResponse(function_calls=[fc]),
         _FakeResponse(text="All good."),
     ]
-    fake_client = _FakeClient(responses)
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
+    _install_ollama(monkeypatch, responses)
 
     from core.headless.tool_executor import ToolExecutor
     monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
@@ -111,8 +69,7 @@ def test_run_chat_turn_emits_status_before_tool_call_and_after(monkeypatch):
 
 
 def test_run_chat_turn_never_calls_on_status_when_no_tool_is_needed(monkeypatch):
-    fake_client = _FakeClient([_FakeResponse(text="Just an answer, no tools needed.")])
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
+    _install_ollama(monkeypatch, [_FakeResponse(text="Just an answer, no tools needed.")])
 
     seen = []
 
@@ -125,16 +82,14 @@ def test_run_chat_turn_never_calls_on_status_when_no_tool_is_needed(monkeypatch)
 
 
 def test_run_chat_turn_works_fine_with_no_status_callback_at_all(monkeypatch):
-    fake_client = _FakeClient([_FakeResponse(text="No callback needed.")])
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
+    _install_ollama(monkeypatch, [_FakeResponse(text="No callback needed.")])
 
     reply, calls = asyncio.run(headless_ui.run_chat_turn("hello", []))
     assert reply == "No callback needed."
 
 
 def test_a_broken_status_sink_never_breaks_the_real_turn(monkeypatch):
-    fake_client = _FakeClient([_FakeResponse(text="Still works.")])
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
+    _install_ollama(monkeypatch, [_FakeResponse(text="Still works.")])
 
     async def _broken_on_status(label):
         raise RuntimeError("status sink exploded")
@@ -163,12 +118,11 @@ def test_dashboard_bridge_broadcasts_progress_as_a_distinct_type(monkeypatch):
         _FakeResponse(function_calls=[fc]),
         _FakeResponse(text="Here's what I found."),
     ]
-    fake_client = _FakeClient(responses)
-    monkeypatch.setattr("core.headless.groq_client.get_client", lambda *a, **k: fake_client)
+    _install_ollama(monkeypatch, responses)
 
     from core.headless.tool_executor import ToolExecutor
     monkeypatch.setattr(ToolExecutor, "execute", lambda self, name, args: asyncio.sleep(0, result="ok"))
-    monkeypatch.setattr(headless_ui.config, "GROQ_API_KEY", "fake-key-not-real")
+    monkeypatch.setattr(headless_ui.config, "OLLAMA_API_KEY", "fake-key-not-real")
 
     server = _FakeDashboardServer(["search for something"])
 

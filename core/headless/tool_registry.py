@@ -28,6 +28,29 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "current_time",
+        "description": (
+            "The current date and time, read from the system clock. Use this for "
+            "ANY question about what time or day it is, today's date, the date of "
+            "an upcoming or past day, or the time in another city. This is "
+            "instant and always correct — NEVER use web_search for the time or "
+            "the date, and never guess or state a time you did not get from here."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "timezone": {
+                    "type": "STRING",
+                    "description": (
+                        "Optional IANA timezone (e.g. 'America/New_York') or a city "
+                        "name like 'Dallas', 'London', 'Tokyo'. Omit for the user's "
+                        "own local time."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "web_search",
         "description": (
             "Searches the web. Use for ANY question about current facts, events, prices, "

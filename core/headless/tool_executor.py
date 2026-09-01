@@ -45,6 +45,7 @@ from actions import background_monitor
 from actions import strategic_objective
 from actions import twilio_integration as twilio
 from actions import cartesia_calls
+from actions import clock
 from actions import gmail_integration
 from actions import calendar_integration
 from actions import airtable_integration
@@ -155,6 +156,11 @@ class ToolExecutor:
         elif name == "dev_agent":
             r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=ctx.ui, speak=ctx.speak))
             result = r or "Done."
+
+        elif name == "current_time":
+            result = await loop.run_in_executor(
+                None, lambda: clock.current_time(args.get("timezone") or "")
+            )
 
         elif name == "web_search":
             r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=ctx.ui))

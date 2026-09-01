@@ -50,6 +50,20 @@ PUBLIC_BASE_URL = _env("JARVIS_PUBLIC_URL", "https://jarvis-headless-core.onrend
 _OBSIDIAN_DEFAULT = BASE_DIR / "knowledge" / "JARVIS Brain"
 OBSIDIAN_VAULT_PATH = _env("JARVIS_OBSIDIAN_VAULT_PATH", str(_OBSIDIAN_DEFAULT))
 
+# ── LLM provider ────────────────────────────────────────────────────────
+# Ollama Cloud is THE provider. One brain behind every surface — browser
+# chat, the 3D console, and the Cartesia phone agent all reach it through
+# run_chat_turn(). The model is env-driven so swapping it never touches
+# application logic.
+OLLAMA_API_KEY = _env("OLLAMA_API_KEY")
+OLLAMA_URL = _env("OLLAMA_URL", "https://ollama.com/api/chat")
+OLLAMA_MODEL = _env("OLLAMA_MODEL", "gpt-oss:120b-cloud")
+
+# Kept as read-but-unused config so an existing Render variable can stay
+# where it is without silently re-entering the provider chain: neither is
+# listed in ui.py's _configured_providers() any more. Groq specifically was
+# removed as primary because its SDK retried a 429 twice (17s then 44s)
+# before failing — a minute of dead air mid-conversation.
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
 GROQ_API_KEY = _env("GROQ_API_KEY")
 # Anthropic is intentionally disabled. This is kept as None so older fallback
@@ -90,6 +104,11 @@ def summarize() -> dict:
         "obsidian_vault_exists": bool(OBSIDIAN_VAULT_PATH and Path(OBSIDIAN_VAULT_PATH).is_dir()),
         "headless_host": HEADLESS_HOST,
         "headless_port": HEADLESS_PORT,
+        "llm_provider": "ollama",
+        "ollama_api_key_env_set": bool(OLLAMA_API_KEY),
+        "ollama_model": OLLAMA_MODEL,
+        "ollama_url": OLLAMA_URL,
+        # Present but deliberately not in the provider chain.
         "gemini_api_key_env_set": bool(GEMINI_API_KEY),
         "groq_api_key_env_set": bool(GROQ_API_KEY),
         "anthropic_token_env_set": False,
