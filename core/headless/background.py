@@ -52,6 +52,10 @@ logger = logging.getLogger("jarvis.headless.background")
 AGENT_SCHEDULER_POLL_SECS = 300
 BACKGROUND_MONITOR_POLL_SECS = 1800
 PROACTIVE_POLL_SECS = 60
+# How often to check whether a decision is sitting on Lee. Five minutes is
+# responsive enough that an approval doesn't rot, and the notifier itself
+# deduplicates by task id, so this poll rate never turns into repeat texts.
+APPROVAL_NOTIFY_POLL_SECS = 300
 OBJECTIVE_LOOP_POLL_SECS = 21_600  # 6 hours — matches get_stale_autonomous_agents()'s default staleness
 
 
@@ -76,6 +80,7 @@ class BackgroundWorker:
             asyncio.create_task(self._run_background_monitor(), name="background_monitor"),
             asyncio.create_task(self._run_proactive_observer(), name="proactive_observer"),
             asyncio.create_task(self._run_objective_loop(), name="objective_loop"),
+            asyncio.create_task(self._run_approval_notifier(), name="approval_notifier"),
         ]
 
     async def stop(self) -> None:
@@ -195,6 +200,34 @@ class BackgroundWorker:
         self.proactive.mark_triggered()
         logger.info("proactive check-in due (headless — recorded, not spoken)")
         return True
+
+    async def run_approval_notify_once(self) -> list:
+        """One approval-notification pass, exposed separately so it can be
+        driven directly by a test or an operator without waiting on the
+        real interval — same pattern as the other loops here."""
+        from actions import approval_notifier
+        return await asyncio.to_thread(approval_notifier.notify_pending)
+
+    async def _run_approval_notifier(self) -> None:
+        # Wall-clock guard rather than trusting sleep() alone to pace this.
+        # A pass reads the priorities engine and can send a text, so a loop
+        # that spins — because sleeps were shortened, the clock jumped, or
+        # the event loop got starved and woke everything at once — must not
+        # turn into a burst of passes. This makes the interval a floor on
+        # real elapsed time, not just a request to the scheduler.
+        last_pass = 0.0
+        await asyncio.sleep(45)   # let the first agent-scheduler pass land first
+        while not self._stopping:
+            now = time.monotonic()
+            if now - last_pass >= APPROVAL_NOTIFY_POLL_SECS:
+                last_pass = now
+                try:
+                    done = await self.run_approval_notify_once()
+                    if done:
+                        logger.info("approval notifications sent: %s", done)
+                except Exception as e:
+                    logger.warning("approval notifier pass failed: %s", e)
+            await asyncio.sleep(APPROVAL_NOTIFY_POLL_SECS)
 
     async def _run_proactive_observer(self) -> None:
         while not self._stopping:

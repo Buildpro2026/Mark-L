@@ -60,8 +60,12 @@ def test_tool_and_error_are_real_orb_states_with_their_own_color_and_pace(monkey
 
 def test_listening_is_driven_by_real_speech_recognition_events(monkeypatch):
     html = _html(monkeypatch)
-    assert 'window.setOrbReason("listening", true)' in html
-    assert 'window.setOrbReason("listening", false)' in html
+    # Listening is now a function of the voice state machine, which only
+    # ever changes state from a real SpeechRecognition event (onstart /
+    # onresult / onend) — never a timer, never an optimistic guess.
+    assert 'window.setOrbReason("listening", next === VoiceState.LISTENING);' in html
+    assert "recognition.onresult = (event) => {" in html
+    assert "if (voiceState !== VoiceState.LISTENING) setVoiceState(VoiceState.LISTENING);" in html
 
 
 def test_thinking_is_driven_by_the_real_chat_turn_lifecycle(monkeypatch):
@@ -86,8 +90,11 @@ def test_tool_state_is_driven_by_the_real_tool_start_tool_end_sse_frames(monkeyp
 
 def test_speaking_is_driven_by_real_speech_synthesis_events(monkeypatch):
     html = _html(monkeypatch)
-    assert 'utterance.onstart = () => { _speaking = true; window.setOrbReason("speaking", true); };' in html
+    # Both real output paths — neural audio and the browser voice — drive
+    # the speaking state from their own playback events.
+    assert 'utterance.onstart = () => { _speaking = true; window.setOrbReason("speaking", true); onSpeakingStarted(); };' in html
     assert 'currentUtterance = null; window.setOrbReason("speaking", false)' in html
+    assert 'audio.onplay = () => { _speaking = true; window.setOrbReason("speaking", true); onSpeakingStarted(); };' in html
 
 
 def test_error_is_driven_by_a_real_failure_not_a_fake_timer(monkeypatch):

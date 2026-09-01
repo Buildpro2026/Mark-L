@@ -3587,16 +3587,69 @@ checkSession();
   const micBtn = document.getElementById("orb-mic-btn");
   const continuousBtn = document.getElementById("orb-continuous-toggle");
   const wakeBtn = document.getElementById("orb-wake-toggle");
-  const WAKE_PATTERN = /\bhey\s+jarvis\b|\bjarvis\b/i;
-  let recognition = null, listening = false;
+  const WAKE_PATTERN = /\b(?:hey\s+|ok\s+|okay\s+)?jarvis\b/i;
+
+  // Tunables. Exposed on window so they can be adjusted live from the
+  // console without a redeploy, and persisted per-browser.
+  //
+  // ENDPOINT_SILENCE_MS is the single most important number here: it is
+  // how long JARVIS waits, after the last sound, before deciding a
+  // directive is finished. Chrome's own end-of-speech heuristic fires far
+  // sooner than that and is what used to chop a long instruction in half.
+  // We never let Chrome make that call any more — see onresult.
+  const voiceCfg = {
+    endpointSilenceMs: Number(localStorage.getItem("jarvis_endpoint_ms")) || 1800,
+    // A directive that trails off on "and", "then", "also"... is obviously
+    // not finished. Continuation words buy a longer window rather than a
+    // guess, which is the difference between real endpointing and a bigger
+    // fixed timeout.
+    continuationGraceMs: Number(localStorage.getItem("jarvis_grace_ms")) || 2600,
+    // How long the conversation stays open after the last exchange before
+    // the wake word is needed again.
+    conversationTimeoutMs: Number(localStorage.getItem("jarvis_convo_ms")) || 45000,
+    // Words needed to treat speech-over-JARVIS as a real interruption
+    // rather than the mic hearing JARVIS's own voice through the speakers.
+    bargeInMinWords: 2,
+  };
+  window.jarvisVoiceConfig = voiceCfg;
+
+  const CONTINUATION_WORDS = /\b(and|also|then|plus|but|so|or|with|after|before|because|while|including|as well as|the|a|to|for|of|from|in|on|at|by|about|into|over|under|,)\s*$/i;
+
+  // ── conversation state machine ────────────────────────────────────────
+  // IDLE                 nothing running, or armed-but-silent wake mode
+  // LISTENING            capturing a directive right now
+  // THINKING             request in flight to JARVIS
+  // SPEAKING             JARVIS is talking (mic stays hot for barge-in)
+  // CONVERSATION_ACTIVE  between turns, mic open, no wake word needed
+  const VoiceState = {
+    IDLE: "IDLE", LISTENING: "LISTENING", THINKING: "THINKING",
+    SPEAKING: "SPEAKING", CONVERSATION_ACTIVE: "CONVERSATION_ACTIVE",
+  };
+  let voiceState = VoiceState.IDLE;
+  let recognition = null, recognizerRunning = false;
+  let micMode = "off";              // "off" | "wake" | "command"
+  let utteranceBuffer = "";         // accumulated FINAL segments this turn
+  let interimText = "";             // latest interim, for endpoint timing only
+  let endpointTimer = null;
+  let conversationTimer = null;
+  let conversationActive = false;
+  let submitting = false;
+  let wantsRecognizer = false;      // should the mic be running at all?
   let continuousMode = localStorage.getItem("jarvis_orb_continuous") === "1";
   let wakeActive = localStorage.getItem("jarvis_wake_active") === "1";
-  let micMode = "command"; // "command" | "wake"
   continuousBtn.classList.toggle("active", continuousMode);
 
+  function setVoiceState(next) {
+    voiceState = next;
+    window.jarvisVoiceState = next;
+    const hot = next === VoiceState.LISTENING || next === VoiceState.CONVERSATION_ACTIVE;
+    micBtn.classList.toggle("listening", hot);
+    window.setOrbReason("listening", next === VoiceState.LISTENING);
+    if (wakeBtn) wakeBtn.classList.toggle("armed", wakeActive && micMode === "wake");
+  }
+  setVoiceState(VoiceState.IDLE);
+
   if (!SpeechRecognitionImpl) {
-    // Silently disables itself rather than erroring — matches the
-    // original orb's own philosophy for unsupported browsers.
     micBtn.disabled = true;
     micBtn.title = "Voice input isn't supported in this browser";
     continuousBtn.disabled = true;
@@ -3605,84 +3658,243 @@ checkSession();
     recognition = new SpeechRecognitionImpl();
     recognition.lang = "en-US";
     recognition.maxAlternatives = 1;
+    // Both true, always, in every mode. continuous:true stops the browser
+    // from ending the session on its own short silence (the cut-off bug);
+    // interimResults:true is what lets us hear that someone has started
+    // talking over JARVIS before they've finished a word (barge-in).
+    recognition.continuous = true;
+    recognition.interimResults = true;
 
-    function startListening(mode) {
+    function startRecognizer(mode) {
       micMode = mode;
-      // Wake mode needs interim results (to catch "Jarvis" as soon as
-      // it's said) and continuous:true (to keep running instead of
-      // stopping after one utterance); command mode wants neither — one
-      // clean final transcript per turn.
-      recognition.continuous = mode === "wake";
-      recognition.interimResults = mode === "wake";
-      try { recognition.start(); } catch (e) { /* already listening */ }
+      wantsRecognizer = true;
+      if (recognizerRunning) return;
+      try { recognition.start(); } catch (e) { /* already starting */ }
+    }
+
+    function stopRecognizer() {
+      wantsRecognizer = false;
+      micMode = "off";
+      clearEndpoint();
+      try { recognition.stop(); } catch (e) { /* not running */ }
+    }
+
+    function clearEndpoint() {
+      if (endpointTimer) { clearTimeout(endpointTimer); endpointTimer = null; }
+    }
+
+    function resetTurn() {
+      utteranceBuffer = "";
+      interimText = "";
+      clearEndpoint();
+    }
+
+    // ── conversation session ────────────────────────────────────────────
+    function openConversation() {
+      conversationActive = true;
+      if (conversationTimer) clearTimeout(conversationTimer);
+      conversationTimer = setTimeout(closeConversation, voiceCfg.conversationTimeoutMs);
+    }
+
+    function closeConversation() {
+      conversationActive = false;
+      if (conversationTimer) { clearTimeout(conversationTimer); conversationTimer = null; }
+      resetTurn();
+      // Back to whichever standing mode was chosen: armed for the wake
+      // word, or fully idle.
+      if (wakeActive) { startRecognizer("wake"); setVoiceState(VoiceState.IDLE); }
+      else if (continuousMode) { startRecognizer("command"); setVoiceState(VoiceState.CONVERSATION_ACTIVE); }
+      else { stopRecognizer(); setVoiceState(VoiceState.IDLE); }
+    }
+    window.jarvisEndConversation = closeConversation;
+
+    // ── endpointing ─────────────────────────────────────────────────────
+    // Restarted on every scrap of speech, interim included. The turn is
+    // only submitted once the room has actually been quiet — so "review
+    // the pipeline, ... find the top candidates, ... and text me the
+    // five best" arrives as one directive no matter how long the pauses
+    // between clauses are.
+    function armEndpoint() {
+      clearEndpoint();
+      const pending = (utteranceBuffer + " " + interimText).trim();
+      if (!pending) return;
+      const wait = CONTINUATION_WORDS.test(pending)
+        ? voiceCfg.continuationGraceMs
+        : voiceCfg.endpointSilenceMs;
+      endpointTimer = setTimeout(submitTurn, wait);
+    }
+
+    async function submitTurn() {
+      clearEndpoint();
+      const text = (utteranceBuffer + " " + interimText).trim();
+      resetTurn();
+      if (!text || submitting) return;
+      if (micMode === "wake") return;
+
+      submitting = true;
+      setVoiceState(VoiceState.THINKING);
+      openConversation();
+      try {
+        if (window.sendMessage) await window.sendMessage(text);
+      } finally {
+        submitting = false;
+        // If JARVIS answered with speech, onSpeakingEnded reopens the
+        // mic; if he didn't speak at all, reopen it here so the
+        // conversation doesn't dead-end in silence.
+        if (voiceState === VoiceState.THINKING) resumeAfterTurn();
+      }
+    }
+
+    // ── barge-in ────────────────────────────────────────────────────────
+    // The mic never closes while JARVIS speaks. The only question is
+    // whether what it heard is a person or JARVIS's own voice coming back
+    // through the speakers, so a candidate interruption has to clear two
+    // bars: enough words to be a real instruction, and words that aren't
+    // simply an echo of the sentence currently being spoken.
+    function isEcho(text) {
+      const spoken = (window.__jarvisSpokenText || "").toLowerCase();
+      if (!spoken) return false;
+      const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+      if (!words.length) return false;
+      const matches = words.filter(w => spoken.includes(w)).length;
+      return matches / words.length > 0.6;
+    }
+
+    function maybeBargeIn(text) {
+      if (voiceState !== VoiceState.SPEAKING) return false;
+      const words = text.trim().split(/\s+/).filter(Boolean);
+      if (words.length < voiceCfg.bargeInMinWords) return false;
+      if (isEcho(text)) return false;
+      stopSpeaking();
+      setVoiceState(VoiceState.LISTENING);
+      openConversation();
+      return true;
     }
 
     recognition.onstart = () => {
-      listening = true;
-      micBtn.classList.add("listening");
-      if (wakeBtn) wakeBtn.classList.toggle("armed", micMode === "wake");
-      if (micMode === "command") window.setOrbReason("listening", true);
-    };
-    recognition.onerror = () => {
-      listening = false;
-      micBtn.classList.remove("listening");
-      if (wakeBtn) wakeBtn.classList.remove("armed");
-      if (micMode === "command") window.setOrbReason("listening", false);
-      // onend fires right after onerror and handles restarting whichever
-      // mode should still be running — nothing else to do here.
-    };
-    recognition.onend = () => {
-      listening = false;
-      micBtn.classList.remove("listening");
-      if (wakeBtn) wakeBtn.classList.remove("armed");
-      if (micMode === "command" && continuousMode && currentState !== "thinking") {
-        startListening("command");
-      } else if (wakeActive) {
-        // Covers both "a wake-triggered command turn just ended, go back
-        // to background listening" and "the browser's own continuous
-        // session dropped (network hiccup, tab backgrounded, etc.) —
-        // resume it" with the same call.
-        startListening("wake");
-      } else {
-        window.setOrbReason("listening", false);
+      recognizerRunning = true;
+      if (wakeBtn) wakeBtn.classList.toggle("armed", wakeActive && micMode === "wake");
+      if (micMode === "command" && voiceState === VoiceState.IDLE) {
+        setVoiceState(VoiceState.LISTENING);
       }
     };
-    recognition.onresult = async (event) => {
-      const result = event.results[event.results.length - 1];
-      const transcript = result[0].transcript.trim();
-      if (!transcript) return;
 
-      if (micMode === "wake") {
-        if (!WAKE_PATTERN.test(transcript)) return;
-        const command = transcript.replace(WAKE_PATTERN, "").trim();
-        window.setOrbReason("listening", true);
-        if (command && result.isFinal) {
-          // Said the whole thing in one breath ("Hey Jarvis, what's on my
-          // calendar") — no need to reopen the mic for a second turn.
-          if (window.sendMessage) await window.sendMessage(command);
-        } else {
-          // Heard its name alone — open a real command turn for whatever
-          // comes next, same as a manual mic click.
-          recognition.stop();
-          startListening("command");
-        }
+    recognition.onerror = (e) => {
+      // "no-speech" and "aborted" are routine in a continuously-running
+      // recognizer and must not tear the session down; anything else
+      // lets onend restart it.
+      if (e && (e.error === "not-allowed" || e.error === "service-not-allowed")) {
+        wantsRecognizer = false;
+        wakeActive = false;
+        if (wakeBtn) { wakeBtn.classList.remove("active", "armed"); }
+        console.warn("[Jarvis voice] microphone permission denied.");
+      }
+    };
+
+    recognition.onend = () => {
+      recognizerRunning = false;
+      if (wakeBtn) wakeBtn.classList.remove("armed");
+      // Chrome ends a continuous session on its own every so often
+      // (network blips, long silence, tab throttling). Restart it as long
+      // as something still wants the mic — this is what makes "always
+      // armed" actually stay armed.
+      if (wantsRecognizer) {
+        setTimeout(() => {
+          if (wantsRecognizer && !recognizerRunning) {
+            try { recognition.start(); } catch (e) { /* races are harmless */ }
+          }
+        }, 250);
+      } else {
+        setVoiceState(VoiceState.IDLE);
+      }
+    };
+
+    recognition.onresult = (event) => {
+      let finalChunk = "";
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        if (res.isFinal) finalChunk += res[0].transcript;
+        else interim += res[0].transcript;
+      }
+      const heard = (finalChunk + " " + interim).trim();
+      if (!heard) return;
+
+      // Someone talking over JARVIS wins immediately, before any other
+      // interpretation of what was said.
+      maybeBargeIn(heard);
+
+      if (micMode === "wake" && !conversationActive) {
+        if (!WAKE_PATTERN.test(heard)) return;
+        // Heard its name. Everything after the name is already the start
+        // of the directive — keep it rather than throwing the sentence
+        // away and asking the user to repeat themselves.
+        const after = heard.replace(new RegExp("^.*?" + WAKE_PATTERN.source, "i"), "").trim();
+        micMode = "command";
+        openConversation();
+        setVoiceState(VoiceState.LISTENING);
+        utteranceBuffer = after;
+        interimText = "";
+        armEndpoint();
         return;
       }
 
-      if (result.isFinal && window.sendMessage) await window.sendMessage(transcript);
+      // A request is already in flight — ignore rather than queue a
+      // second one for the same breath.
+      if (voiceState === VoiceState.THINKING) return;
+
+      if (finalChunk) utteranceBuffer = (utteranceBuffer + " " + finalChunk).trim();
+      interimText = interim.trim();
+      if (voiceState !== VoiceState.LISTENING) setVoiceState(VoiceState.LISTENING);
+      armEndpoint();
+    };
+
+    // Called by the speech-output code below when JARVIS stops talking.
+    function resumeAfterTurn() {
+      resetTurn();
+      if (conversationActive) {
+        micMode = "command";
+        startRecognizer("command");
+        setVoiceState(VoiceState.CONVERSATION_ACTIVE);
+      } else if (wakeActive) {
+        startRecognizer("wake");
+        setVoiceState(VoiceState.IDLE);
+      } else if (continuousMode) {
+        startRecognizer("command");
+        setVoiceState(VoiceState.CONVERSATION_ACTIVE);
+      } else {
+        stopRecognizer();
+        setVoiceState(VoiceState.IDLE);
+      }
+    }
+    window.__jarvisResumeAfterTurn = resumeAfterTurn;
+    window.__jarvisSetSpeakingState = (on) => {
+      if (on) { setVoiceState(VoiceState.SPEAKING); openConversation(); }
     };
 
     micBtn.addEventListener("click", () => {
       unlockSpeechSynthesis();
-      if (listening) { recognition.stop(); return; }
-      startListening("command");
+      if (voiceState === VoiceState.SPEAKING) { stopSpeaking(); }
+      if (recognizerRunning && micMode === "command") {
+        // Second click = "I'm done talking, go" rather than a dead stop,
+        // which is what a user pressing it mid-directive actually means.
+        if ((utteranceBuffer + interimText).trim()) submitTurn();
+        else { stopRecognizer(); closeConversation(); }
+        return;
+      }
+      openConversation();
+      startRecognizer("command");
+      setVoiceState(VoiceState.LISTENING);
     });
+
     continuousBtn.addEventListener("click", () => {
       continuousMode = !continuousMode;
       localStorage.setItem("jarvis_orb_continuous", continuousMode ? "1" : "0");
       continuousBtn.classList.toggle("active", continuousMode);
-      if (continuousMode && !listening) startListening("command");
+      if (continuousMode) { openConversation(); startRecognizer("command"); setVoiceState(VoiceState.CONVERSATION_ACTIVE); }
+      else if (!wakeActive) { stopRecognizer(); closeConversation(); }
     });
+
     if (wakeBtn) {
       wakeBtn.classList.toggle("active", wakeActive);
       wakeBtn.addEventListener("click", () => {
@@ -3690,19 +3902,12 @@ checkSession();
         localStorage.setItem("jarvis_wake_active", wakeActive ? "1" : "0");
         wakeBtn.classList.toggle("active", wakeActive);
         unlockSpeechSynthesis();
-        if (wakeActive) {
-          if (!listening) startListening("wake");
-        } else {
-          wakeBtn.classList.remove("armed");
-          if (micMode === "wake") recognition.stop();
-        }
+        if (wakeActive) startRecognizer("wake");
+        else if (!continuousMode && !conversationActive) { stopRecognizer(); setVoiceState(VoiceState.IDLE); }
       });
-      // Best-effort resume across page reloads. Most browsers remember a
-      // mic grant per-origin and this just works; if the grant was
-      // revoked, start() silently fails and the toggle stays visually on
-      // until the user clicks it (same failure mode click-to-talk already
-      // has — no new behavior to test around).
-      if (wakeActive) startListening("wake");
+      // Best-effort resume across reloads — most browsers remember the
+      // mic grant per-origin, and start() silently fails if it was revoked.
+      if (wakeActive) startRecognizer("wake");
     }
   }
 
@@ -3800,11 +4005,12 @@ checkSession();
       utterance.rate = 1.0;
       utterance.pitch = 1.0;
       currentUtterance = utterance; // pin — see comment above
-      utterance.onstart = () => { _speaking = true; window.setOrbReason("speaking", true); };
-      utterance.onend = () => { _speaking = false; currentUtterance = null; window.setOrbReason("speaking", false); };
+      utterance.onstart = () => { _speaking = true; window.setOrbReason("speaking", true); onSpeakingStarted(); };
+      utterance.onend = () => { _speaking = false; currentUtterance = null; window.setOrbReason("speaking", false); onSpeakingEnded(); };
       utterance.onerror = (e) => {
         _speaking = false; currentUtterance = null; window.setOrbReason("speaking", false);
         console.warn("[Jarvis orb] speechSynthesis failed:", e.error || e);
+        onSpeakingEnded();
       };
       setTimeout(() => window.speechSynthesis.speak(utterance), 0);
     });
@@ -3814,42 +4020,78 @@ checkSession();
   // real human executive assistant, not OS-default robotic speechSynthesis).
   // null = not checked yet this session, true/false = known, so a
   // configured-off backend only ever costs one request, not one per reply.
-  let elevenLabsAvailable = null;
-  async function speakWithElevenLabs(cleanText) {
+  // Server-side this is Cartesia Sonic first, ElevenLabs as fallback (see
+  // core/headless/ui.py's /tts/speak) — the browser just asks for "the
+  // real voice" and plays whatever comes back, which is why nothing here
+  // is named after a provider any more.
+  let neuralTtsAvailable = null;
+  async function speakWithNeuralVoice(cleanText) {
     try {
       const r = await api("/ui/api/tts/speak", { method: "POST", body: JSON.stringify({ text: cleanText }) });
-      if (!r.configured) { elevenLabsAvailable = false; return false; }
-      elevenLabsAvailable = true;
-      if (!r.ok) { console.warn("[Jarvis orb] ElevenLabs TTS failed:", r.detail); return false; }
+      if (!r.configured) { neuralTtsAvailable = false; return false; }
+      neuralTtsAvailable = true;
+      if (!r.ok) { console.warn("[Jarvis orb] neural TTS failed:", r.detail); return false; }
       if (window.speechSynthesis) window.speechSynthesis.cancel();
       if (currentAudioEl) { currentAudioEl.pause(); }
       const audio = new Audio(`data:${r.mime_type};base64,${r.audio_base64}`);
       currentAudioEl = audio;
-      audio.onplay = () => { _speaking = true; window.setOrbReason("speaking", true); };
-      audio.onended = () => { _speaking = false; currentAudioEl = null; window.setOrbReason("speaking", false); };
+      audio.onplay = () => { _speaking = true; window.setOrbReason("speaking", true); onSpeakingStarted(); };
+      audio.onended = () => { _speaking = false; currentAudioEl = null; window.setOrbReason("speaking", false); onSpeakingEnded(); };
       audio.onerror = () => {
         _speaking = false; currentAudioEl = null; window.setOrbReason("speaking", false);
-        console.warn("[Jarvis orb] ElevenLabs audio playback failed.");
+        console.warn("[Jarvis orb] neural audio playback failed.");
+        onSpeakingEnded();
       };
       await audio.play();
       return true;
     } catch (e) {
-      console.warn("[Jarvis orb] ElevenLabs TTS request failed:", e.message);
+      console.warn("[Jarvis orb] neural TTS request failed:", e.message);
       return false;
     }
   }
+
+  // ── speaking <-> listening handoff ────────────────────────────────────
+  // The mic stays open the whole time JARVIS talks, so these two are what
+  // keep the state machine honest about which of them is currently
+  // holding the floor. __jarvisSpokenText is what the barge-in echo test
+  // compares against, so it must be the text actually being spoken.
+  function onSpeakingStarted() {
+    if (window.__jarvisSetSpeakingState) window.__jarvisSetSpeakingState(true);
+  }
+  function onSpeakingEnded() {
+    window.__jarvisSpokenText = "";
+    if (window.__jarvisResumeAfterTurn) window.__jarvisResumeAfterTurn();
+  }
+  // Hard stop for barge-in: kills whichever output path is live. Called
+  // the instant a real interruption is detected, so JARVIS goes quiet
+  // mid-word rather than finishing his sentence over the top of Lee.
+  function stopSpeaking() {
+    _speaking = false;
+    window.__jarvisSpokenText = "";
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+    if (currentAudioEl) {
+      try { currentAudioEl.pause(); currentAudioEl.currentTime = 0; } catch (e) {}
+      currentAudioEl.onended = null;
+      currentAudioEl = null;
+    }
+    currentUtterance = null;
+    window.setOrbReason("speaking", false);
+  }
+  window.jarvisStopSpeaking = stopSpeaking;
 
   window.speakReply = async function speakReply(text) {
     if (!voiceOn || !text) return;
     const cleanText = cleanForSpeech(text);
     if (!cleanText) return;
-    // Skip the network round-trip once we know ElevenLabs isn't
+    window.__jarvisSpokenText = cleanText;
+    // Skip the network round-trip once we know no neural provider is
     // configured — falls straight to the browser voice from then on.
-    if (elevenLabsAvailable !== false) {
-      const played = await speakWithElevenLabs(cleanText);
+    if (neuralTtsAvailable !== false) {
+      const played = await speakWithNeuralVoice(cleanText);
       if (played) return;
     }
     if (window.speechSynthesis) speakWithBrowserVoice(cleanText);
+    else onSpeakingEnded();
   };
 
   // ── Home stage HUD data orbit (2026-08-31, design-quality pass) ────────
