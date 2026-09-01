@@ -142,6 +142,7 @@ async def voice_ask(body: AskRequest):
     implementation of it.
     """
     from core.headless.ui import run_chat_turn
+    from core.headless.voice_format import to_speech_text
 
     try:
         reply, tool_calls = await run_chat_turn(body.message, body.history)
@@ -150,6 +151,12 @@ async def voice_ask(body: AskRequest):
     except Exception as e:
         logger.exception("voice turn failed")
         raise HTTPException(status_code=500, detail=f"Voice turn failed: {e}")
+
+    # The Line agent speaks `reply` close to verbatim — this is the phone's
+    # enforcement point for "never speak raw code/JSON" (see
+    # voice_format.py's module docstring), matching the same filter the
+    # browser's /ui/api/tts/speak now runs on the way to Cartesia/ElevenLabs.
+    reply = to_speech_text(reply)
 
     return {
         "reply": reply,

@@ -27,6 +27,10 @@ from actions import opportunity_engine as opp_engine
 from actions import strategic_objective as strategic_obj
 from actions import google_auth
 from actions import twilio_integration as twilio
+from actions import hubspot_integration as hubspot
+from actions import buffer_integration as buffer_mod
+from actions import github_integration as github
+from actions import infrastructure_status as infra
 from actions.agent_orchestrator import orchestrator as agent_orchestrator
 from actions.system_monitor import get_system_status
 
@@ -567,6 +571,14 @@ class DashboardServer:
             return self._module_email()
         if module_id == "calendar":
             return self._module_calendar()
+        if module_id == "hubspot":
+            return self._module_hubspot()
+        if module_id == "social":
+            return self._module_social()
+        if module_id == "development":
+            return self._module_development()
+        if module_id == "infrastructure":
+            return self._module_infrastructure()
         # Any other real hierarchy node (careerrocket, personal, etc.) —
         # honest placeholder rather than a 404, since it's still a real,
         # navigable Nucleus even before it has its own live data source.
@@ -743,6 +755,69 @@ class DashboardServer:
         except Exception as e:
             status = {"authorized": False, "credential_file": "unknown", "error": str(e)}
         return {"configured": bool(status.get("authorized")), "status": status}
+
+    def _module_hubspot(self) -> dict:
+        """Real HubSpot data when configured, an honest NOT_CONFIGURED
+        state otherwise — never a fabricated contact/company list. This
+        is what makes the HubSpot planet's panel more than decorative."""
+        if not hubspot.is_configured():
+            return {
+                "configured": False,
+                "detail": "HubSpot isn't configured — set HUBSPOT_TOKEN.",
+            }
+        contacts = hubspot.get_contacts(limit=10)
+        companies = hubspot.get_companies(limit=10)
+        return {
+            "configured": True,
+            "contacts": contacts.get("results", []) if contacts.get("ok") else [],
+            "contacts_error": None if contacts.get("ok") else contacts.get("detail"),
+            "companies": companies.get("results", []) if companies.get("ok") else [],
+            "companies_error": None if companies.get("ok") else companies.get("detail"),
+        }
+
+    def _module_social(self) -> dict:
+        """Real Buffer channel + recent-publish data when configured, an
+        honest NOT_CONFIGURED state otherwise."""
+        if not buffer_mod.get_buffer_token():
+            return {
+                "configured": False,
+                "detail": "Buffer isn't configured — set BUFFER_TOKEN.",
+            }
+        channels_result = buffer_mod.get_channels()
+        recent_posts = buffer_mod.get_recent_posts(limit=10)
+        return {
+            "configured": True,
+            "status": channels_result.get("status"),
+            "channels": channels_result.get("channels", []),
+            "recent_posts": recent_posts,
+        }
+
+    def _module_development(self) -> dict:
+        """Real GitHub repo/commit/issue/PR data when configured, an
+        honest NOT_CONFIGURED state otherwise."""
+        if not github.is_configured():
+            return {
+                "configured": False,
+                "detail": "GitHub isn't configured — set GITHUB_TOKEN and GITHUB_REPO.",
+            }
+        repo = github.get_repo()
+        commits = github.list_commits(limit=10)
+        issues = github.list_issues(limit=10)
+        prs = github.list_pull_requests(limit=10)
+        return {
+            "configured": True,
+            "repo": repo.get("data") if repo.get("ok") else None,
+            "repo_error": None if repo.get("ok") else repo.get("detail"),
+            "commits": commits.get("results", []) if commits.get("ok") else [],
+            "issues": issues.get("results", []) if issues.get("ok") else [],
+            "pull_requests": prs.get("results", []) if prs.get("ok") else [],
+        }
+
+    def _module_infrastructure(self) -> dict:
+        """Real Render deploy/service status when configured; Oracle is
+        always reported as planned/unconfigured (no integration exists
+        yet) — never a fabricated live connection for either."""
+        return infra.get_infrastructure_overview()
 
     def _overview_payload(self) -> dict:
         root = nucleus_hierarchy.get_hierarchy_root()

@@ -51,6 +51,19 @@ def _read_full_config() -> dict:
         return {}
 
 
+def _voice_cfg_from_raw(raw: dict) -> dict:
+    """Map api_keys.json's on-disk voice_* keys to the overlay shape
+    actions/voice_manager.py and main.py's _build_config() both expect —
+    the one place that mapping happens, so the Configure panel and the
+    live session can never drift out of sync on key names."""
+    return {
+        "provider": (raw.get("voice_provider") or "gemini").lower(),
+        "voice": raw.get("voice_name") or "Charon",
+        "speed": float(raw.get("voice_speed") or 1.0),
+        "elevenlabs_api_key": raw.get("elevenlabs_api_key") or "",
+    }
+
+
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
 _LEFT_W  = 148

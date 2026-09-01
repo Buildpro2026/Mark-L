@@ -277,8 +277,21 @@ def ui_tts_speak(body: SpeakRequest):
     browser and the phone the same voice instead of two assistants wearing
     the same name. ElevenLabs stays as a real fallback rather than being
     ripped out — if the Cartesia key is missing or its API is down, the
-    browser keeps a human-sounding voice."""
+    browser keeps a human-sounding voice.
+
+    body.text is filtered through voice_format.to_speech_text() before
+    synthesis regardless of what the client already did to it — the
+    browser's own cleanForSpeech() only protects that one client, and this
+    is the one place every future TTS caller (browser, phone, or anything
+    added later) is guaranteed to pass through, so it is the actual
+    enforcement point for "JARVIS never speaks raw code" rather than a
+    convention every caller has to remember."""
     from actions import cartesia_tts, elevenlabs_tts
+    from core.headless.voice_format import to_speech_text
+
+    speech_text = to_speech_text(body.text)
+    if not speech_text:
+        return {"configured": True, "ok": False, "detail": "Nothing left to speak after filtering."}
 
     providers = [p for p in (cartesia_tts, elevenlabs_tts) if p.is_configured()]
     if not providers:
@@ -286,7 +299,7 @@ def ui_tts_speak(body: SpeakRequest):
 
     last_detail = None
     for provider in providers:
-        result = provider.synthesize_speech(body.text)
+        result = provider.synthesize_speech(speech_text)
         if result.get("ok"):
             return {
                 "configured": True, "ok": True,

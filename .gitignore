@@ -41,3 +41,4 @@ Thumbs.db
 !.env.example
 
 config/api_keys.json
+node_modules/

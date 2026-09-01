@@ -3936,6 +3936,14 @@ checkSession();
   // no-op — a zero-delay setTimeout defers to the next tick and avoids it.
   let currentUtterance = null;
   let currentAudioEl = null;
+  // Bumped on every stopSpeaking() and every new speakReply() call. Any
+  // in-flight async step (a /tts/speak fetch, a whenVoicesReady wait)
+  // captures the token in effect when it started and re-checks it before
+  // actually starting playback — so a response that lands AFTER an
+  // interruption can never resume speech. This is what makes the barge-in
+  // a real cancellation instead of a UI flag a late response can outrun.
+  let speechToken = 0;
+  let currentTtsAbort = null;   // AbortController for the in-flight /tts/speak request, if any
 
   // Safari specifically requires speak() to happen while the page still
   // has "real" user-gesture activation — and by the time a voice command
@@ -3973,10 +3981,34 @@ checkSession();
     setTimeout(finish, 800);
   }
 
+  // First line of defense against JARVIS speaking code/data instead of
+  // natural language (see core/headless/voice_format.py's module
+  // docstring — that server-side filter is the actual enforcement point;
+  // this is the client-side copy applied before either TTS path so a slow
+  // network doesn't mean a raw JSON blob gets read aloud in the meantime).
   function cleanForSpeech(text) {
-    return text
+    let out = text
+      // stack traces / tracebacks
+      .replace(/^Traceback \(most recent call last\):.*$/gm, "")
+      .replace(/^\s*(?:File "[^"]+", line \d+, in \S+|at \S+ ?\([^)]*\)|at \S+:\d+:\d+)\s*$/gm, "")
+      .replace(/^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):.*$/gm, "")
+      // fenced/inline code
       .replace(/```[\s\S]*?```/g, "")
-      .replace(/`([^`]+)`/g, "$1")
+      .replace(/`([^`]+)`/g, "$1");
+
+    // Nested JSON/tool-call-shaped objects — repeat to unwind nesting.
+    for (let i = 0; i < 6; i++) {
+      const next = out.replace(/\{[^{}]*"[A-Za-z_][A-Za-z0-9_]*"\s*:[^{}]*\}/g, "");
+      if (next === out) break;
+      out = next;
+    }
+
+    return out
+      // snake_case_tool_call(...) / kwarg-style foo(x="y")
+      .replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\([^()\n]{0,200}\)/g, "")
+      .replace(/\b[a-zA-Z_][a-zA-Z0-9_]*\([^()\n]*["'=][^()\n]{0,200}\)/g, "")
+      // ISO-8601-ish timestamps
+      .replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "")
       .replace(/\*\*(.*?)\*\*/g, "$1")
       .replace(/\*(.*?)\*/g, "$1")
       .replace(/#{1,6}\s*/g, "")
@@ -3991,8 +4023,9 @@ checkSession();
   // Fallback voice: whatever OS/browser TTS voice happens to be installed
   // on this machine — never great, never guaranteed human-sounding, but
   // always available with zero configuration, so JARVIS is never silent.
-  function speakWithBrowserVoice(cleanText) {
+  function speakWithBrowserVoice(cleanText, myToken) {
     whenVoicesReady(() => {
+      if (myToken !== speechToken) return;   // interrupted/superseded while waiting for voices to load
       window.speechSynthesis.cancel();
       window.speechSynthesis.resume(); // Chrome can leave the engine "paused" after a tab loses focus, silently blocking every speak() after that until resumed
       const utterance = new SpeechSynthesisUtterance(cleanText);
@@ -4012,7 +4045,7 @@ checkSession();
         console.warn("[Jarvis orb] speechSynthesis failed:", e.error || e);
         onSpeakingEnded();
       };
-      setTimeout(() => window.speechSynthesis.speak(utterance), 0);
+      setTimeout(() => { if (myToken === speechToken) window.speechSynthesis.speak(utterance); }, 0);
     });
   }
 
@@ -4025,9 +4058,18 @@ checkSession();
   // real voice" and plays whatever comes back, which is why nothing here
   // is named after a provider any more.
   let neuralTtsAvailable = null;
-  async function speakWithNeuralVoice(cleanText) {
+  async function speakWithNeuralVoice(cleanText, myToken) {
+    const controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    currentTtsAbort = controller;
     try {
-      const r = await api("/ui/api/tts/speak", { method: "POST", body: JSON.stringify({ text: cleanText }) });
+      const r = await api("/ui/api/tts/speak", {
+        method: "POST", body: JSON.stringify({ text: cleanText }),
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      // The interruption (or a newer speakReply()) may have landed while
+      // this request was in flight — a response that arrives after that
+      // must never start audio. See speechToken's declaration above.
+      if (myToken !== speechToken) return false;
       if (!r.configured) { neuralTtsAvailable = false; return false; }
       neuralTtsAvailable = true;
       if (!r.ok) { console.warn("[Jarvis orb] neural TTS failed:", r.detail); return false; }
@@ -4042,11 +4084,17 @@ checkSession();
         console.warn("[Jarvis orb] neural audio playback failed.");
         onSpeakingEnded();
       };
+      // One last check right before playback: an interrupt landing during
+      // the microtask gap between the check above and here must still win.
+      if (myToken !== speechToken) { currentAudioEl = null; return false; }
       await audio.play();
       return true;
     } catch (e) {
+      if (e && e.name === "AbortError") return false;   // interrupted mid-request — not a real failure
       console.warn("[Jarvis orb] neural TTS request failed:", e.message);
       return false;
+    } finally {
+      if (currentTtsAbort === controller) currentTtsAbort = null;
     }
   }
 
@@ -4066,6 +4114,13 @@ checkSession();
   // the instant a real interruption is detected, so JARVIS goes quiet
   // mid-word rather than finishing his sentence over the top of Lee.
   function stopSpeaking() {
+    // Invalidate any in-flight speak attempt FIRST — a /tts/speak fetch or
+    // a whenVoicesReady wait that is already past this point in its own
+    // code has nothing left to check and must be cancelled directly below;
+    // anything that hasn't reached its playback step yet will see this new
+    // token and bail out on its own re-check.
+    speechToken++;
+    if (currentTtsAbort) { try { currentTtsAbort.abort(); } catch (e) {} currentTtsAbort = null; }
     _speaking = false;
     window.__jarvisSpokenText = "";
     try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
@@ -4083,14 +4138,19 @@ checkSession();
     if (!voiceOn || !text) return;
     const cleanText = cleanForSpeech(text);
     if (!cleanText) return;
+    // A new reply always supersedes whatever the previous one was still
+    // doing (mid-fetch, mid-wait) — see speechToken's declaration above.
+    const myToken = ++speechToken;
     window.__jarvisSpokenText = cleanText;
     // Skip the network round-trip once we know no neural provider is
     // configured — falls straight to the browser voice from then on.
     if (neuralTtsAvailable !== false) {
-      const played = await speakWithNeuralVoice(cleanText);
+      const played = await speakWithNeuralVoice(cleanText, myToken);
+      if (myToken !== speechToken) return;   // interrupted/superseded while awaiting
       if (played) return;
     }
-    if (window.speechSynthesis) speakWithBrowserVoice(cleanText);
+    if (myToken !== speechToken) return;
+    if (window.speechSynthesis) speakWithBrowserVoice(cleanText, myToken);
     else onSpeakingEnded();
   };
 

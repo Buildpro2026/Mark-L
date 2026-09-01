@@ -50,6 +50,8 @@ from actions import gmail_integration
 from actions import calendar_integration
 from actions import airtable_integration
 from actions import hubspot_integration
+from actions import github_integration
+from actions import infrastructure_status
 from actions import buffer_integration
 from actions import buildpro_data
 from actions import buildpro_matching
@@ -705,6 +707,78 @@ class ToolExecutor:
                         )
             else:
                 result = f"Unknown hubspot action: {haction}"
+
+        elif name == "github":
+            gaction = (args.get("action") or "status").strip().lower()
+            if gaction == "status":
+                if github_integration.is_configured():
+                    v = await loop.run_in_executor(None, github_integration.verify_github)
+                    result = (
+                        f"GitHub is connected — {v['repo'].get('full_name')}."
+                        if v.get("verified") else
+                        f"GitHub token/repo is set but verification failed: {v.get('detail')}"
+                    )
+                else:
+                    result = "GitHub isn't configured — set GITHUB_TOKEN and GITHUB_REPO."
+            elif gaction == "repo":
+                r = await loop.run_in_executor(None, github_integration.get_repo)
+                if not r["ok"]:
+                    result = f"Couldn't reach GitHub ({r.get('state')}): {r.get('detail')}"
+                else:
+                    d = r["data"]
+                    result = (
+                        f"{d.get('full_name')}: default branch {d.get('default_branch')}, "
+                        f"{d.get('open_issues_count')} open issue(s), last pushed {d.get('pushed_at')}."
+                    )
+            elif gaction == "commits":
+                branch = (args.get("branch") or "").strip() or None
+                limit = int(args.get("limit") or 10)
+                r = await loop.run_in_executor(None, lambda: github_integration.list_commits(branch=branch, limit=limit))
+                if not r["ok"]:
+                    result = f"Couldn't read commits ({r.get('state')}): {r.get('detail')}"
+                elif not r["results"]:
+                    result = "No commits found."
+                else:
+                    result = "; ".join(f"{c['sha']} {c['message']}" for c in r["results"][:8])
+            elif gaction == "branches":
+                limit = int(args.get("limit") or 20)
+                r = await loop.run_in_executor(None, lambda: github_integration.list_branches(limit=limit))
+                if not r["ok"]:
+                    result = f"Couldn't read branches ({r.get('state')}): {r.get('detail')}"
+                else:
+                    result = ", ".join(r["results"]) if r["results"] else "No branches found."
+            elif gaction in ("issues", "pull_requests"):
+                state = (args.get("state") or "open").strip().lower()
+                limit = int(args.get("limit") or 20)
+                fn = github_integration.list_issues if gaction == "issues" else github_integration.list_pull_requests
+                r = await loop.run_in_executor(None, lambda: fn(state=state, limit=limit))
+                if not r["ok"]:
+                    result = f"Couldn't read GitHub {gaction} ({r.get('state')}): {r.get('detail')}"
+                elif not r["results"]:
+                    result = f"No {state} {gaction.replace('_', ' ')}."
+                else:
+                    result = "; ".join(f"#{item['number']} {item['title']}" for item in r["results"][:8])
+            else:
+                result = f"Unknown github action: {gaction}"
+
+        elif name == "infrastructure":
+            iaction = (args.get("action") or "status").strip().lower()
+            if iaction == "status":
+                overview = await loop.run_in_executor(None, infrastructure_status.get_infrastructure_overview)
+                render, oracle = overview["render"], overview["oracle"]
+                if render.get("state") == "OK":
+                    svc = render["service"]
+                    render_summary = f"Render: {svc.get('name')} is {svc.get('status')}"
+                    deploy = render.get("latest_deploy") or {}
+                    if deploy.get("status"):
+                        render_summary += f", last deploy {deploy['status']}"
+                elif render.get("state") == "NOT_CONFIGURED":
+                    render_summary = "Render: not configured (needs RENDER_API_KEY and RENDER_SERVICE_ID)"
+                else:
+                    render_summary = f"Render: {render.get('detail')}"
+                result = f"{render_summary}. Oracle: not connected yet (planned)."
+            else:
+                result = f"Unknown infrastructure action: {iaction}"
 
         elif name == "social_post":
             saction = (args.get("action") or "status").strip().lower()

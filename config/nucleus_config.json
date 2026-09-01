@@ -65,6 +65,99 @@
       ]
     },
     {
+      "id": "hubspot",
+      "name": "HubSpot",
+      "kind": "domain",
+      "children": [
+        {
+          "id": "hubspot-contacts",
+          "name": "CRM Contacts",
+          "kind": "category"
+        },
+        {
+          "id": "hubspot-companies",
+          "name": "Companies",
+          "kind": "category"
+        },
+        {
+          "id": "hubspot-deals",
+          "name": "Deals",
+          "kind": "category"
+        },
+        {
+          "id": "hubspot-pipeline",
+          "name": "Recruiting Pipeline",
+          "kind": "category"
+        }
+      ]
+    },
+    {
+      "id": "social",
+      "name": "Social Media",
+      "kind": "domain",
+      "children": [
+        {
+          "id": "social-channels",
+          "name": "Channels",
+          "kind": "category"
+        },
+        {
+          "id": "social-queue",
+          "name": "Queue",
+          "kind": "category"
+        },
+        {
+          "id": "social-published",
+          "name": "Published",
+          "kind": "category"
+        }
+      ]
+    },
+    {
+      "id": "development",
+      "name": "Development",
+      "kind": "domain",
+      "children": [
+        {
+          "id": "dev-commits",
+          "name": "Commits",
+          "kind": "category"
+        },
+        {
+          "id": "dev-branches",
+          "name": "Branches",
+          "kind": "category"
+        },
+        {
+          "id": "dev-issues",
+          "name": "Issues",
+          "kind": "category"
+        },
+        {
+          "id": "dev-prs",
+          "name": "Pull Requests",
+          "kind": "category"
+        }
+      ]
+    },
+    {
+      "id": "infrastructure",
+      "name": "Infrastructure",
+      "kind": "domain",
+      "children": [
+        {
+          "id": "infra-render",
+          "name": "Render",
+          "kind": "category"
+        },
+        {
+          "id": "infra-oracle",
+          "name": "Oracle",
+          "kind": "category"
+        }
+      ]
+    },
+    {
       "id": "email",
       "name": "Email",
       "kind": "domain",

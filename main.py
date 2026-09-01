@@ -68,6 +68,8 @@ from actions import calendar_integration
 from actions import airtable_integration
 from actions import hubspot_integration
 from actions import buffer_integration
+from actions import github_integration
+from actions import infrastructure_status
 from actions import buildpro_data
 from actions import buildpro_matching
 from actions import daily_deal_finders as ddf
@@ -92,6 +94,11 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+# How much audio, just before speech is detected, Gemini's server-side VAD
+# includes when it decides the user has started talking — the barge-in fix
+# needs this low enough that an interruption is heard almost immediately,
+# not after the user has been talking over JARVIS for a while.
+BARGE_IN_PREFIX_PADDING_MS = 100
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -155,6 +162,10 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._voice_provider       = "gemini"  # set for real by _build_config()
+        self._tts_player            = None     # non-Gemini providers only (actions/voice_manager.py)
+        self._out_stream            = None     # live sd.RawOutputStream — interrupt() aborts this directly
+        self._current_speech_text   = None     # what JARVIS is currently saying, for self-echo suppression
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
@@ -241,8 +252,30 @@ class JarvisLive:
             pass
 
     def interrupt(self) -> None:
-        """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
+        """Stop JARVIS mid-speech: drain queued audio and open mic immediately.
+
+        Gemini-provider sessions speak through the Live audio queue drained
+        below. local/elevenlabs sessions speak through a separate
+        core.tts.TTSPlayer (self._tts_player) instead — that player runs
+        its blocking speak() on its own thread, so interrupt() must also
+        reach it directly, not just the Live audio queue, or barge-in would
+        silently do nothing for those two providers."""
         self._interrupted = True
+        tts_player = getattr(self, "_tts_player", None)
+        if tts_player is not None:
+            try:
+                tts_player.stop()
+            except Exception:
+                pass
+        out_stream = getattr(self, "_out_stream", None)
+        if out_stream is not None:
+            try:
+                # abort() discards in-flight audio immediately; stop() would
+                # wait for the buffered audio to finish draining first,
+                # which defeats the entire point of a hard interrupt.
+                out_stream.abort()
+            except Exception:
+                pass
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -276,8 +309,23 @@ class JarvisLive:
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
-    def _build_config(self) -> types.LiveConnectConfig:
+    def _build_config(self, voice_cfg: dict | None = None) -> types.LiveConnectConfig:
+        """Build the Gemini Live session config for the currently selected
+        voice provider (actions/voice_manager.py). Gemini gets native
+        AUDIO output straight from the Live session, same as always;
+        local/elevenlabs providers get TEXT-only output from Gemini (no
+        speech_config — Gemini never speaks in that case) because the
+        actual audio for those providers comes from a separate
+        core.tts.TTSPlayer, not from this Live session."""
         from datetime import datetime
+
+        if voice_cfg is None:
+            try:
+                from actions.voice_manager import get_voice_provider_config
+                voice_cfg = get_voice_provider_config()
+            except Exception:
+                voice_cfg = {"provider": "gemini", "voice": "Charon", "speed": 1.0}
+        self._voice_provider = (voice_cfg.get("provider") or "gemini").lower()
 
         # Load customization from config
         try:
@@ -292,7 +340,9 @@ class JarvisLive:
         mem_str    = format_memory_for_prompt(memory)
         from core.headless.obsidian import ObsidianVault
         knowledge_str = ObsidianVault().format_for_prompt(query=None, max_chars=6000)
+        sys_prompt = _load_system_prompt()
 
+        parts: list[str] = []
         parts.append(knowledge_str)
 
         if mem_str:
@@ -300,19 +350,44 @@ class JarvisLive:
 
         parts.append(sys_prompt)
 
-        config = types.LiveConnectConfig(
+        common_kwargs = dict(
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
             session_resumption=types.SessionResumptionConfig(),
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
-                    )
-                )
+            # Server-side VAD governs the mic INPUT stream — independent of
+            # which provider speaks the OUTPUT — so every provider needs
+            # this, not just Gemini's own audio path. START_OF_ACTIVITY_
+            # INTERRUPTS is what makes Gemini itself stop generating the
+            # instant it detects the user talking, instead of only the
+            # client-side interrupt() reacting after the fact.
+            realtime_input_config=types.RealtimeInputConfig(
+                activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                    prefix_padding_ms=BARGE_IN_PREFIX_PADDING_MS,
+                ),
             ),
         )
+
+        if self._voice_provider == "gemini":
+            config = types.LiveConnectConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice_cfg.get("voice") or "Charon"
+                        )
+                    )
+                ),
+                **common_kwargs,
+            )
+        else:
+            config = types.LiveConnectConfig(
+                response_modalities=["TEXT"],
+                **common_kwargs,
+            )
+        return config
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
@@ -441,6 +516,32 @@ class JarvisLive:
             response={"result": result}
         )
 
+    def _should_forward_mic_audio(self) -> bool:
+        """Whether mic audio should reach the Live session right now.
+
+        Deliberately independent of self._is_speaking: the old gate
+        dropped every mic frame while JARVIS was talking, so the server
+        could never hear an interruption start — real barge-in requires
+        the mic to stay open through JARVIS's own speech (server-side VAD,
+        via _build_config's realtime_input_config, is what tells the two
+        apart, not a client-side mute-while-speaking hack)."""
+        return not self.ui.muted and not self._phone_active
+
+    def _looks_like_self_echo(self, heard_text: str) -> bool:
+        """Cheap guard against the mic hearing JARVIS's own voice come back
+        through the speakers and mistaking it for a real interruption.
+        Mirrors the browser voice engine's isEcho() (core/headless/
+        ui_static/index.html) — same heuristic, same threshold, so barge-in
+        behaves consistently across surfaces."""
+        spoken = (self._current_speech_text or "").lower()
+        if not spoken:
+            return False
+        words = [w for w in heard_text.lower().split() if len(w) > 3]
+        if not words:
+            return False
+        matches = sum(1 for w in words if w in spoken)
+        return (matches / len(words)) > 0.6
+
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
@@ -451,9 +552,7 @@ class JarvisLive:
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
-            with self._speaking_lock:
-                jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted and not self._phone_active:
+            if self._should_forward_mic_audio():
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -498,6 +597,21 @@ class JarvisLive:
 
                     if response.server_content:
                         sc = response.server_content
+
+                        # Gemini-native VAD already decided the user started
+                        # talking (see _build_config's realtime_input_config)
+                        # — the authoritative signal for the gemini provider,
+                        # so the text heuristic below stays off for it.
+                        if getattr(sc, "interrupted", False):
+                            self.interrupt()
+                        elif (
+                            self._voice_provider != "gemini"
+                            and self._is_speaking
+                            and sc.input_transcription and sc.input_transcription.text
+                        ):
+                            heard = _clean_transcript(sc.input_transcription.text)
+                            if heard and not self._looks_like_self_echo(heard):
+                                self.interrupt()
 
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
@@ -601,6 +715,7 @@ class JarvisLive:
             blocksize=CHUNK_SIZE,
         )
         stream.start()
+        self._out_stream = stream   # interrupt() aborts this directly — see interrupt()
 
         try:
             while True:
@@ -640,6 +755,8 @@ class JarvisLive:
             raise
         finally:
             self.set_speaking(False)
+            if self._out_stream is stream:
+                self._out_stream = None
             stream.stop()
             stream.close()
 

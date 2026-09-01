@@ -93,6 +93,7 @@ const STATE_PULSE_SPEED = {
 
 const NUCLEUS_COLORS = {
   buildpro: 0x4fd6ff, ddf: 0x5cffc4, careerrocket: 0xffb454,
+  hubspot: 0xff7a59, social: 0x5aa9ff, development: 0x8f8fff, infrastructure: 0x66d9a8,
   email: 0x8fb8ff, calendar: 0xff8fd1, knowledge: 0xf5e6a8, files: 0xb98bff,
   reports: 0x9fe6ff, communications: 0x7d8fa6, system: 0xff6b7a,
   personal: 0x8fa8b8,
@@ -105,8 +106,9 @@ const NUCLEUS_COLORS = {
 // the real Obsidian JARVIS Brain vault — distinct from "files" below, which
 // is a general filesystem search, not vault-aware.
 const RAIL_ORDER = [
-  "buildpro", "ddf", "careerrocket", "email", "calendar",
-  "knowledge", "files", "reports", "communications", "system", "personal",
+  "buildpro", "ddf", "careerrocket", "hubspot", "social", "email", "calendar",
+  "knowledge", "files", "development", "infrastructure",
+  "reports", "communications", "system", "personal",
 ];
 
 // ── Three.js setup ──────────────────────────────────────────────────────
@@ -288,8 +290,21 @@ function makeGlowSprite(hexColor, scale = 1) {
 // connector lines each frame is cheap at this node count (< 10). Disabled
 // under prefers-reduced-motion — nuclei stay at their initial positions.
 const ORBIT_SPEED_ROOT = 0.045; // radians/sec — a full revolution takes ~2.3 minutes
+// Root-level orbit fix (2026-09-01): OrbitControls.target was being set once,
+// at click time, to whichever nucleus the camera flew to (flyTo() below) —
+// but root nuclei keep orbiting every frame regardless of focus, so that
+// target position went stale within a fraction of a second, and dragging to
+// rotate the camera orbited around an empty, drifting point in space instead
+// of either JARVIS or the nucleus actually being viewed. This is the
+// "rotation center is effectively one of the outer planets" bug. Freezing
+// the orbit animation for the whole system while anything other than JARVIS
+// himself is focused keeps every position — and therefore controls.target —
+// stable for as long as the user is looking at it; goHome() resumes it
+// (continuing from the live clock, so there's no jump) and JARVIS is the
+// one thing that never orbits, so re-centering on him is always exact.
 function updateOrbits(t) {
   if (REDUCED_MOTION) return;
+  if (currentNucleusId !== "jarvis") return;   // frozen while a nucleus other than JARVIS is focused
   for (const mesh of rootGroup.children) {
     const orbit = mesh.userData.orbit;
     if (!orbit) continue;

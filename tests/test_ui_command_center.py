@@ -204,7 +204,9 @@ def test_orb_tts_does_not_have_the_speak_once_then_silent_bug(monkeypatch):
     # (1) utterance is pinned to a variable that outlives the function call.
     assert "currentUtterance = utterance" in html
     # (2) speak() deferred to the next tick, not called synchronously after cancel().
-    assert "setTimeout(() => window.speechSynthesis.speak(utterance), 0)" in html
+    # (Guarded by the barge-in speechToken check too — see stopSpeaking's
+    # docstring — but still a same-tick setTimeout(..., 0) deferral.)
+    assert "setTimeout(() => { if (myToken === speechToken) window.speechSynthesis.speak(utterance); }, 0)" in html
     # The fallback timer is cleared on every setOrbState call, not just
     # conditionally — this is what stops it firing after real TTS takes over.
     import re

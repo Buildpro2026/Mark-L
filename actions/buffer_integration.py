@@ -207,6 +207,28 @@ def get_channels() -> dict[str, Any]:
         return {"configured": True, "channels": [], "status": f"UNAVAILABLE:{exc}"}
 
 
+def get_recent_posts(limit: int = 10) -> list[dict[str, Any]]:
+    """Real local publish history from buffer_posts — every row here is a
+    post that _record_published_post() wrote only after Buffer's own API
+    confirmed the publish succeeded (see publish_to_buffer below), so this
+    is never a fabricated or predicted list. Used by the Command Center's
+    Social nucleus. Never raises — a read failure degrades to an empty
+    list rather than breaking the panel."""
+    try:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT channel_id, text_preview, buffer_id, published_ts "
+                "FROM buffer_posts ORDER BY published_ts DESC LIMIT ?",
+                (max(1, min(limit, 100)),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
 _VALID_MODES = {"addToQueue", "shareNow", "shareNext", "customScheduled"}
 
 # Schema discovered live via GraphQL introspection against this account's

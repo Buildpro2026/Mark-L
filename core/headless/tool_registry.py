@@ -717,6 +717,53 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "github",
+        "description": (
+            "Read-only visibility into the JARVIS repository on GitHub. "
+            "Actions: 'status' (is GitHub connected, which repo), "
+            "'repo' (repo summary — default branch, open issue count, last "
+            "push), 'commits' (recent commits, optionally on a specific "
+            "branch), 'branches' (branch list), 'issues' (open/closed "
+            "issues, excludes pull requests), 'pull_requests' (open/closed "
+            "PRs). Never creates, merges, or modifies anything — this tool "
+            "only reports real repository state; any actual code change "
+            "still goes through the normal development workflow, not a "
+            "voice command."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "status | repo | commits | branches | issues | pull_requests"},
+                "branch": {"type": "STRING", "description": "Branch name, for 'commits' (optional, defaults to the repo's default branch)"},
+                "state":  {"type": "STRING", "description": "open | closed | all — for 'issues'/'pull_requests' (default open)"},
+                "limit":  {"type": "INTEGER", "description": "Max results to return (default 10-20 depending on action)"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "infrastructure",
+        "description": (
+            "Read-only deployment/infrastructure status for the Command "
+            "Center's Infrastructure nucleus. Actions: 'status' (combined "
+            "Render + Oracle status). Render reports the real live service "
+            "and latest-deploy state via Render's own API when "
+            "RENDER_API_KEY/RENDER_SERVICE_ID are configured, or an honest "
+            "NOT_CONFIGURED state if not. Oracle has no integration built "
+            "yet and always reports as planned/unconfigured — never a "
+            "fabricated live connection. Never returns any secret value, "
+            "only non-secret service metadata and which environment "
+            "variables are set."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "status"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "social_post",
         "description": (
             "Previews and publishes social media posts via Buffer (to any "

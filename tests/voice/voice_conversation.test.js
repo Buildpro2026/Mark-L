@@ -10,10 +10,13 @@ const HTML = require("path").resolve(__dirname, "../../core/headless/ui_static/i
 
 const sent = [];          // everything that reached window.sendMessage
 let spokenCancelled = 0;  // times JARVIS's audio was hard-stopped
+let audioPlayCalls = 0;   // times a <audio> element's play() actually fired
 
-function makeDom() {
+function makeDom(opts) {
+  opts = opts || {};
   sent.length = 0;
   spokenCancelled = 0;
+  audioPlayCalls = 0;
 
   const dom = new JSDOM(fs.readFileSync(HTML, "utf8"), {
     runScripts: "dangerously",
@@ -53,8 +56,26 @@ function makeDom() {
       window.SpeechSynthesisUtterance = function (t) { this.text = t; };
 
       // ── stub network ────────────────────────────────────────────────
-      window.fetch = async (url, opts) => {
+      window.fetch = async (url, fetchOpts) => {
         const u = String(url);
+        if (u.includes("/tts/speak") && opts.ttsMode === "delayed-audio") {
+          // Simulates a slow /ui/api/tts/speak round-trip (real neural TTS
+          // configured) that resolves AFTER an interrupt has already fired
+          // client-side — the race this test exists to catch.
+          await new Promise((r) => setTimeout(r, opts.ttsDelayMs || 300));
+          if (fetchOpts && fetchOpts.signal && fetchOpts.signal.aborted) {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            throw err;
+          }
+          const body = { configured: true, ok: true, audio_base64: "AAAA", mime_type: "audio/mpeg" };
+          return {
+            ok: true, status: 200,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+            headers: { get: () => "application/json" },
+          };
+        }
         let body = {};
         if (u.includes("/tts/speak")) body = { configured: false };
         else if (u.includes("/ui/session")) body = { authenticated: true };
@@ -68,7 +89,12 @@ function makeDom() {
       };
       window.EventSource = function () { this.close = () => {}; };
       window.matchMedia = () => ({ matches: false, addEventListener() {}, addListener() {} });
-      window.HTMLMediaElement.prototype.play = function () { return Promise.resolve(); };
+      // Only count <audio> playback (the TTS reply) — the avatar's idle
+      // <video> autoplays independently and must not pollute this count.
+      window.HTMLMediaElement.prototype.play = function () {
+        if (this.tagName === "AUDIO") audioPlayCalls++;
+        return Promise.resolve();
+      };
       window.HTMLMediaElement.prototype.pause = function () {};
     },
   });
@@ -215,6 +241,74 @@ async function run() {
     await sleep(60);
     check("D1 JARVIS's own voice does not trigger barge-in",
       spokenCancelled === before, `cancels ${before} -> ${spokenCancelled}`);
+    w.close();
+  }
+
+  // ═══ TEST E: interrupting during an in-flight neural-TTS fetch must not
+  // let the stale response resume speech afterward (the "keeps talking
+  // after interruption, only a refresh stops it" bug) ═══
+  {
+    const w = makeDom({ ttsMode: "delayed-audio", ttsDelayMs: 300 });
+    await sleep(200);
+
+    // Kick off a spoken reply — this starts the (slow) /ui/api/tts/speak
+    // round-trip and does not resolve for 300ms.
+    w.speakReply("Here is a fairly long update about your pipeline.");
+    await sleep(20);   // request is in flight, nothing has played yet
+    check("E1 no audio has played yet while the request is in flight",
+      audioPlayCalls === 0, `audioPlayCalls=${audioPlayCalls}`);
+
+    // Interrupt arrives well before the network response does.
+    w.jarvisStopSpeaking();
+
+    // Let the delayed fetch resolve.
+    await sleep(400);
+    check("E2 the stale response never starts audio after interruption",
+      audioPlayCalls === 0, `audioPlayCalls=${audioPlayCalls}`);
+    w.close();
+  }
+
+  // ═══ TEST F: a second speakReply() call supersedes a still-pending
+  // first one, rather than both eventually racing to play ═══
+  {
+    const w = makeDom({ ttsMode: "delayed-audio", ttsDelayMs: 300 });
+    await sleep(200);
+
+    w.speakReply("First reply, about to be superseded.");
+    await sleep(20);
+    w.speakReply("Second, newer reply.");
+    await sleep(500);   // both delayed fetches have now resolved
+    check("F1 exactly one audio element ever plays when a newer reply supersedes an older one",
+      audioPlayCalls === 1, `audioPlayCalls=${audioPlayCalls}`);
+    w.close();
+  }
+
+  // ═══ TEST G: whatever actually reaches the speech engine never contains
+  // code/JSON/timestamps — cleanForSpeech runs before both TTS paths ═══
+  {
+    const w = makeDom();   // default ttsMode -> /tts/speak reports {configured:false} -> falls to browser voice
+    await sleep(200);
+
+    await w.speakReply("Here's the fix:\n```js\nfunction foo() { return 1; }\n```\nDone.");
+    await sleep(20);
+    check("G1 fenced code block never reaches the speech engine",
+      w.__utt && !w.__utt.text.includes("function foo"), JSON.stringify(w.__utt && w.__utt.text));
+
+    await w.speakReply('One moment. {"tool":"web_search","arguments":{"query":"x"}} Found it.');
+    await sleep(20);
+    check("G2 raw JSON tool-call blob never reaches the speech engine",
+      w.__utt && !w.__utt.text.includes('"tool"'), JSON.stringify(w.__utt && w.__utt.text));
+
+    await w.speakReply("It happened at 2026-09-01T05:13:00-05:00 today.");
+    await sleep(20);
+    check("G3 ISO timestamp never reaches the speech engine",
+      w.__utt && !w.__utt.text.includes("2026-09-01"), JSON.stringify(w.__utt && w.__utt.text));
+
+    await w.speakReply("I found several products that match what you're looking for.");
+    await sleep(20);
+    check("G4 ordinary sentence reaches the speech engine unchanged in substance",
+      w.__utt && w.__utt.text === "I found several products that match what you're looking for.",
+      JSON.stringify(w.__utt && w.__utt.text));
     w.close();
   }
 

@@ -95,6 +95,23 @@ CARTESIA_API_VERSION = _env("CARTESIA_API_VERSION", "2026-03-01")
 # Where JARVIS calls when he's the one initiating (E.164, e.g. +13125550142).
 JARVIS_OWNER_PHONE = _env("JARVIS_OWNER_PHONE")
 
+# ── Development (GitHub) ────────────────────────────────────────────────
+# Read-only repository visibility for the Command Center's Development
+# nucleus and the github tool — a personal access token with repo:read
+# scope. GITHUB_REPO is "owner/name"; without it the token alone isn't
+# enough to know which repository to report on.
+GITHUB_TOKEN = _env("GITHUB_TOKEN")
+GITHUB_REPO = _env("GITHUB_REPO")
+
+# ── Infrastructure (Render) ─────────────────────────────────────────────
+# Render's own API, used only to report this service's real deploy/service
+# status in the Command Center's Infrastructure nucleus — never to change
+# anything. Oracle has no integration at all yet and is always reported as
+# planned/unconfigured (see actions/infrastructure_status.py) rather than
+# faked.
+RENDER_API_KEY = _env("RENDER_API_KEY")
+RENDER_SERVICE_ID = _env("RENDER_SERVICE_ID")
+
 def summarize() -> dict:
     return {
         "data_dir": str(DATA_DIR),
@@ -122,4 +139,8 @@ def summarize() -> dict:
         "cartesia_outbound_calls_ready": bool(
             CARTESIA_API_KEY and CARTESIA_AGENT_ID and CARTESIA_PHONE_NUMBER_ID
         ),
+        "github_token_env_set": bool(GITHUB_TOKEN),
+        "github_repo_configured": bool(GITHUB_REPO),
+        "render_api_key_env_set": bool(RENDER_API_KEY),
+        "render_service_id_configured": bool(RENDER_SERVICE_ID),
     }

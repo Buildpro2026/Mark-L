@@ -42,6 +42,56 @@ DEFAULT_HIERARCHY = {
             ],
         },
         {
+            # The primary CRM (see actions/hubspot_integration.py). Airtable
+            # is NOT the intended CRM going forward and gets no planet here —
+            # existing Airtable code stays working elsewhere, it's just not
+            # part of the Command Center's CRM story any more.
+            "id": "hubspot",
+            "name": "HubSpot",
+            "kind": "domain",
+            "children": [
+                {"id": "hubspot-contacts", "name": "CRM Contacts", "kind": "category"},
+                {"id": "hubspot-companies", "name": "Companies", "kind": "category"},
+                {"id": "hubspot-deals", "name": "Deals", "kind": "category"},
+                {"id": "hubspot-pipeline", "name": "Recruiting Pipeline", "kind": "category"},
+            ],
+        },
+        {
+            # Connected social publishing ecosystem, via Buffer
+            # (actions/buffer_integration.py) — whichever channels are
+            # actually connected there, reported live, never invented.
+            "id": "social",
+            "name": "Social Media",
+            "kind": "domain",
+            "children": [
+                {"id": "social-channels", "name": "Channels", "kind": "category"},
+                {"id": "social-queue", "name": "Queue", "kind": "category"},
+                {"id": "social-published", "name": "Published", "kind": "category"},
+            ],
+        },
+        {
+            # GitHub, read-only (actions/github_integration.py).
+            "id": "development",
+            "name": "Development",
+            "kind": "domain",
+            "children": [
+                {"id": "dev-commits", "name": "Commits", "kind": "category"},
+                {"id": "dev-branches", "name": "Branches", "kind": "category"},
+                {"id": "dev-issues", "name": "Issues", "kind": "category"},
+                {"id": "dev-prs", "name": "Pull Requests", "kind": "category"},
+            ],
+        },
+        {
+            # Render (live) + Oracle (planned) — actions/infrastructure_status.py.
+            "id": "infrastructure",
+            "name": "Infrastructure",
+            "kind": "domain",
+            "children": [
+                {"id": "infra-render", "name": "Render", "kind": "category"},
+                {"id": "infra-oracle", "name": "Oracle", "kind": "category"},
+            ],
+        },
+        {
             "id": "email",
             "name": "Email",
             "kind": "domain",
