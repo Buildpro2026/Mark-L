@@ -267,15 +267,35 @@ def ui_tts_speak(body: SpeakRequest):
     sound human, not like OS-default browser speechSynthesis). Returns
     base64 audio for the frontend to play through a real <audio> element;
     never plays anything server-side (no speakers on this container).
-    Honest {"configured": false} when no ElevenLabs key is set, rather
-    than a fake 200 — the frontend falls back to speechSynthesis itself."""
-    from actions import elevenlabs_tts
-    if not elevenlabs_tts.is_configured():
+    Honest {"configured": false} when no TTS provider is configured,
+    rather than a fake 200 — the frontend falls back to speechSynthesis
+    itself.
+
+    Provider order is Cartesia first, ElevenLabs second, and that order is
+    not arbitrary: the phone line is a Cartesia Line agent speaking with
+    CARTESIA_VOICE_ID, so preferring Cartesia here is what makes the
+    browser and the phone the same voice instead of two assistants wearing
+    the same name. ElevenLabs stays as a real fallback rather than being
+    ripped out — if the Cartesia key is missing or its API is down, the
+    browser keeps a human-sounding voice."""
+    from actions import cartesia_tts, elevenlabs_tts
+
+    providers = [p for p in (cartesia_tts, elevenlabs_tts) if p.is_configured()]
+    if not providers:
         return {"configured": False}
-    result = elevenlabs_tts.synthesize_speech(body.text)
-    if not result.get("ok"):
-        return {"configured": True, "ok": False, "detail": result.get("detail")}
-    return {"configured": True, "ok": True, "audio_base64": result["audio_base64"], "mime_type": result["mime_type"]}
+
+    last_detail = None
+    for provider in providers:
+        result = provider.synthesize_speech(body.text)
+        if result.get("ok"):
+            return {
+                "configured": True, "ok": True,
+                "audio_base64": result["audio_base64"],
+                "mime_type": result["mime_type"],
+                "provider": provider.__name__.rsplit(".", 1)[-1].replace("_tts", ""),
+            }
+        last_detail = result.get("detail")
+    return {"configured": True, "ok": False, "detail": last_detail}
 
 
 class ChatRequest(BaseModel):

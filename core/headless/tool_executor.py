@@ -44,6 +44,7 @@ from actions.agent_orchestrator import orchestrator as agent_orchestrator
 from actions import background_monitor
 from actions import strategic_objective
 from actions import twilio_integration as twilio
+from actions import cartesia_calls
 from actions import gmail_integration
 from actions import calendar_integration
 from actions import airtable_integration
@@ -354,6 +355,41 @@ class ToolExecutor:
                     )
             else:
                 result = f"Unknown communications action: {caction}"
+
+        elif name == "voice_call":
+            vaction = (args.get("action") or "status").strip().lower()
+            if vaction == "status":
+                s = await loop.run_in_executor(None, cartesia_calls.get_status)
+                result = f"Voice calling: {s['state']}. {s['detail']}"
+            elif vaction == "history":
+                r = await loop.run_in_executor(None, cartesia_calls.get_history)
+                if not r.get("ok"):
+                    result = f"Couldn't read call history ({r.get('state')}): {r.get('detail')}"
+                elif not r["calls"]:
+                    result = "No voice-agent calls yet."
+                else:
+                    result = "; ".join(
+                        f"{c.get('direction', 'call')} {c.get('to_number') or c.get('from_number') or ''} "
+                        f"({c.get('status', 'unknown')})".strip()
+                        for c in r["calls"][:8]
+                    )
+            elif vaction == "call":
+                to = (args.get("to") or "").strip()
+                reason = (args.get("reason") or "").strip()
+                r = await loop.run_in_executor(
+                    None, lambda: cartesia_calls.place_call(to, reason)
+                )
+                result = (
+                    f"Calling {r['to_number']} now." if r["ok"]
+                    else f"Couldn't place the call ({r['state']}): {r['detail']}"
+                )
+                audit_log.record(
+                    "voice_call", execution_status="succeeded" if r["ok"] else "failed",
+                    result=r, error=None if r["ok"] else r.get("detail"),
+                    external_system="cartesia", reference_id=r.get("agent_call_id"),
+                )
+            else:
+                result = f"Unknown voice_call action: {vaction}"
 
         elif name == "gmail":
             gaction = (args.get("action") or "status").strip().lower()

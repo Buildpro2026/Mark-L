@@ -25,6 +25,7 @@ from core.headless import dashboard_bridge
 from core.headless import orchestrator_api
 from core.headless import tools_api
 from core.headless import status_api
+from core.headless import voice_api
 from core.headless import ui
 from core.headless.background import BackgroundWorker
 
@@ -112,6 +113,8 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     app.include_router(tools_api.router, prefix="/api")
     app.include_router(orchestrator_api.router, prefix="/api/orchestrator")
     app.include_router(status_api.router, prefix="/api")
+    # The Cartesia Line phone agent's brain — see core/headless/voice_api.py.
+    app.include_router(voice_api.router, prefix="/api/voice")
     app.include_router(ui.router)
     app.include_router(ui.api)
     app.include_router(agreement_routes.router)

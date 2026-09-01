@@ -35,6 +35,23 @@ services:
         sync: false   # set as a real secret in the Render dashboard, never committed —
                        # optional fallback once GROQ_API_KEY is set; JARVIS no longer
                        # requires this to operate
+      # Cartesia — one voice across both surfaces. CARTESIA_API_KEY alone
+      # is enough for the browser /ui to speak with Sonic and for the
+      # phone agent to reach this service; the AGENT_ID/PHONE_NUMBER_ID
+      # pair is only needed for JARVIS to place outbound calls himself
+      # (see actions/cartesia_calls.py). Set them after `cartesia deploy`
+      # and after a number is provisioned — voice_agent/README.md has the
+      # order. All secrets, none committed.
+      - key: CARTESIA_API_KEY
+        sync: false
+      - key: CARTESIA_VOICE_ID
+        sync: false   # same id the Line agent uses, or JARVIS is two voices
+      - key: CARTESIA_AGENT_ID
+        sync: false
+      - key: CARTESIA_PHONE_NUMBER_ID
+        sync: false
+      - key: JARVIS_OWNER_PHONE
+        sync: false   # E.164, e.g. +13125550142 — where "call me" rings
       - key: JARVIS_HEADLESS_HOST
         value: "0.0.0.0"
       # No JARVIS_HEADLESS_PORT here — core/headless/config.py falls back

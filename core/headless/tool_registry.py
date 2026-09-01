@@ -543,6 +543,32 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "voice_call",
+        "description": (
+            "Places a REAL two-way phone call where JARVIS talks to the person "
+            "live through the Cartesia voice agent — they can answer, ask "
+            "questions, and give instructions on the call. This is the tool "
+            "for 'call me', 'call me when X happens', or 'get me on the phone'. "
+            "Use this instead of communications/'call' whenever a conversation "
+            "is wanted; communications/'call' only reads one fixed sentence "
+            "aloud and cannot hear a reply. With no number given it calls the "
+            "owner's own phone. Costs real money and rings a real phone — only "
+            "when the user has actually asked to be called, or has standing "
+            "instructions to be called about the specific thing that just "
+            "happened. Actions: 'call' (place it), 'status' (is calling "
+            "configured?), 'history' (recent calls)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "call | status | history"},
+                "to":     {"type": "STRING", "description": "E.164 number to call (e.g. +13125550142). Omit to call the owner."},
+                "reason": {"type": "STRING", "description": "Why JARVIS is calling — spoken as the opening line, e.g. 'the Henderson contract came back signed'"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "gmail",
         "description": (
             "Reads, drafts, and sends Gmail. Actions: 'status' (is Gmail "

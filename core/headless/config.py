@@ -64,6 +64,23 @@ TWILIO_AUTH_TOKEN = _env("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER = _env("TWILIO_FROM_NUMBER")
 ELEVENLABS_API_KEY = _env("ELEVENLABS_API_KEY")
 
+# ── Cartesia (voice) ────────────────────────────────────────────────────
+# One provider covers both voice surfaces Lee actually uses: the browser
+# /ui speaks with Sonic (actions/cartesia_tts.py) and the phone line is a
+# Cartesia Line agent (voice_agent/main.py) whose brain is this service.
+# Same CARTESIA_VOICE_ID in both places is the entire reason JARVIS sounds
+# like one person rather than two different assistants.
+CARTESIA_API_KEY = _env("CARTESIA_API_KEY")
+CARTESIA_VOICE_ID = _env("CARTESIA_VOICE_ID")
+CARTESIA_TTS_MODEL = _env("CARTESIA_TTS_MODEL", "sonic-3")
+# Set after `cartesia deploy` and after a number is provisioned — only
+# outbound calling needs them; inbound works with neither set here.
+CARTESIA_AGENT_ID = _env("CARTESIA_AGENT_ID")
+CARTESIA_PHONE_NUMBER_ID = _env("CARTESIA_PHONE_NUMBER_ID")
+CARTESIA_API_VERSION = _env("CARTESIA_API_VERSION", "2026-03-01")
+# Where JARVIS calls when he's the one initiating (E.164, e.g. +13125550142).
+JARVIS_OWNER_PHONE = _env("JARVIS_OWNER_PHONE")
+
 def summarize() -> dict:
     return {
         "data_dir": str(DATA_DIR),
@@ -81,4 +98,9 @@ def summarize() -> dict:
         "buffer_token_env_set": bool(BUFFER_TOKEN),
         "twilio_env_set": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER),
         "elevenlabs_api_key_env_set": bool(ELEVENLABS_API_KEY),
+        "cartesia_api_key_env_set": bool(CARTESIA_API_KEY),
+        "cartesia_voice_configured": bool(CARTESIA_API_KEY and CARTESIA_VOICE_ID),
+        "cartesia_outbound_calls_ready": bool(
+            CARTESIA_API_KEY and CARTESIA_AGENT_ID and CARTESIA_PHONE_NUMBER_ID
+        ),
     }
