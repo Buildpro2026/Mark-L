@@ -207,6 +207,57 @@ def get_channels() -> dict[str, Any]:
         return {"configured": True, "channels": [], "status": f"UNAVAILABLE:{exc}"}
 
 
+def discover_scheduling_capabilities() -> dict[str, Any]:
+    """Introspects Buffer's LIVE GraphQL schema (via this account's own
+    already-authenticated token) to honestly report which scheduled-post
+    operations are actually available — never guessed, never assumed from
+    Buffer's old REST-era docs. 'create' is already wired and working (see
+    _CREATE_POST_MUTATION below, whose shape was itself discovered the same
+    way). This answers the other half: can this token's schema retrieve,
+    update, delete, or check the status of a scheduled post too?
+
+    Every capability in the returned dict is derived strictly from field
+    names __schema introspection actually reports for this account's
+    Query/Mutation types — a capability reads False if the matching field
+    genuinely isn't there, not as a guess."""
+    token = get_buffer_token()
+    if not token:
+        return {"configured": False, "status": "NOT CONFIGURED", "capabilities": {}}
+    query = """
+    {
+      queryType: __type(name: "Query") { fields { name } }
+      mutationType: __type(name: "Mutation") { fields { name } }
+    }
+    """
+    try:
+        payload = _graphql(query)
+        if payload.get("errors"):
+            detail = payload["errors"][0].get("message", "unknown GraphQL error")
+            return {"configured": True, "status": f"UNAVAILABLE:{detail}", "capabilities": {}}
+        data = payload.get("data") or {}
+        query_fields = sorted({f["name"] for f in (data.get("queryType") or {}).get("fields") or []})
+        mutation_fields = sorted({f["name"] for f in (data.get("mutationType") or {}).get("fields") or []})
+        qf, mf = set(query_fields), set(mutation_fields)
+        capabilities = {
+            "create_post": "createPost" in mf,
+            "retrieve_posts": bool(qf & {"posts", "post", "queue", "queuedPosts", "channelPosts"}),
+            "update_post": bool(mf & {"updatePost", "editPost", "reschedulePost", "updatePostText"}),
+            "delete_post": bool(mf & {"deletePost", "removePost", "cancelPost"}),
+            "post_status_check": bool(qf & {"post", "posts"}),
+        }
+        return {
+            "configured": True, "status": "VERIFIED",
+            "capabilities": capabilities,
+            "available_query_fields": query_fields,
+            "available_mutation_fields": mutation_fields,
+        }
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else "?"
+        return {"configured": True, "status": f"UNAVAILABLE:{code}", "capabilities": {}}
+    except Exception as exc:
+        return {"configured": True, "status": f"UNAVAILABLE:{exc}", "capabilities": {}}
+
+
 _VALID_MODES = {"addToQueue", "shareNow", "shareNext", "customScheduled"}
 
 # Schema discovered live via GraphQL introspection against this account's

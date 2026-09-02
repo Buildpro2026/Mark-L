@@ -721,13 +721,18 @@ TOOL_DECLARATIONS = [
         "description": (
             "Previews and publishes social media posts via Buffer (to any "
             "connected channel — LinkedIn, Instagram, Facebook, Twitter/X, "
-            "etc.). Actions: 'status' (is Buffer connected?), 'preview' "
-            "(validates a post — resolves the channel, checks the target "
-            "platform's character limit, checks for a recent duplicate — "
-            "and shows exactly what would be posted, WITHOUT publishing "
-            "anything; always safe), 'publish' (actually posts — "
-            "irreversible once live, and costs nothing to try since "
-            "'preview' already validated it). "
+            "etc.). Actions: 'status' (is Buffer connected?), 'list_channels' "
+            "(the real connected channels/profiles — name, platform, "
+            "connection state — always safe, read-only, never returns the "
+            "Buffer token), 'capabilities' (live GraphQL introspection of "
+            "what this Buffer account's schema actually supports for "
+            "scheduled posts — create/retrieve/update/delete/status-check — "
+            "never guessed), 'preview' (validates a post — resolves the "
+            "channel, checks the target platform's character limit, checks "
+            "for a recent duplicate — and shows exactly what would be "
+            "posted, WITHOUT publishing anything; always safe), 'publish' "
+            "(actually posts — irreversible once live, and costs nothing to "
+            "try since 'preview' already validated it). "
             "Only call 'publish' when the user has EXPLICITLY approved "
             "posting this exact content — always show them the 'preview' "
             "result first and get their confirmation before calling "
@@ -736,7 +741,7 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":          {"type": "STRING", "description": "status | preview | publish"},
+                "action":          {"type": "STRING", "description": "status | list_channels | capabilities | preview | publish"},
                 "text":            {"type": "STRING", "description": "Post content, for 'preview'/'publish'"},
                 "service":         {"type": "STRING", "description": "Target platform service name (e.g. 'linkedin', 'instagram', 'twitter') — resolves to a connected channel and enables that platform's character-limit check"},
                 "channel_id":      {"type": "STRING", "description": "Exact Buffer channel id, if already known (alternative to 'service')"},

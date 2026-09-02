@@ -37,7 +37,13 @@
       --state-idle: #4b6b7c;
       --state-listening: #4fd6ff;
       --state-thinking: #b98bff;
+      --state-executing: #ffb454;
       --state-speaking: #5cffc4;
+      --state-waiting_for_approval: #ffe066;
+      --state-success: #5cffc4;
+      --state-warning: #ffb454;
+      --state-error: #ff4d4d;
+      --state-offline: #555b66;
       --state-interrupted: #ff6b7a;
 
       --topbar-h: 54px;
@@ -313,11 +319,21 @@
     }
 
     /* ── Bottom command dock ───────────────────────────────────────────── */
-    .dock {
+    .dock-wrap {
       position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 25;
-      display: flex; align-items: center; gap: 8px;
+      display: flex; flex-direction: column; gap: 8px; align-items: stretch;
       width: min(560px, calc(100vw - var(--rail-w) - var(--panel-w) - 48px));
       min-width: 260px;
+    }
+    .dock-reply {
+      padding: 10px 14px; border-radius: 14px; font-size: 12.5px; line-height: 1.5;
+      background: rgba(6,14,22,0.94); border: 1px solid var(--line-strong); backdrop-filter: blur(10px);
+      color: var(--text); max-height: 30vh; overflow-y: auto; box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+    }
+    .dock-reply.pending { color: var(--muted); font-style: italic; }
+    .dock-reply.error { border-color: rgba(255,77,77,0.5); color: #ff9c9c; }
+    .dock {
+      display: flex; align-items: center; gap: 8px;
       padding: 7px 8px 7px 7px; border-radius: 999px;
       background: var(--panel); border: 1px solid var(--line-strong); backdrop-filter: blur(14px);
       box-shadow: 0 10px 30px rgba(0,0,0,0.4);
@@ -336,11 +352,52 @@
       font-size: 13px; padding: 8px 4px; outline: none;
     }
     .dock-input::placeholder { color: var(--muted); }
+    .dock-speak-toggle {
+      flex-shrink: 0; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line-strong);
+      background: rgba(255,255,255,0.04); color: var(--muted); cursor: pointer; font-size: 14px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .dock-speak-toggle.active { border-color: var(--accent-dim); background: rgba(79,214,255,0.14); color: var(--accent); }
     .dock-send {
       flex-shrink: 0; border: 1px solid var(--accent-dim); background: rgba(79,214,255,0.12); color: var(--accent);
       border-radius: 999px; padding: 9px 18px; font-size: 12px; letter-spacing: 0.3px; cursor: pointer;
     }
     .dock-send:hover { background: rgba(79,214,255,0.2); }
+
+    /* ── Approval center overlay ────────────────────────────────────────── */
+    .approvals-overlay {
+      position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+      background: rgba(2,5,9,0.6); backdrop-filter: blur(4px);
+    }
+    .approvals-modal {
+      width: min(480px, calc(100vw - 40px)); max-height: 76vh; display: flex; flex-direction: column;
+      background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.55); overflow: hidden;
+    }
+    .approvals-modal-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; border-bottom: 1px solid var(--line);
+    }
+    .approvals-modal-head h3 { margin: 0; font-size: 14px; letter-spacing: 0.3px; }
+    .approvals-modal-close {
+      border: none; background: none; color: var(--muted); font-size: 18px; cursor: pointer; line-height: 1;
+    }
+    .approvals-modal-close:hover { color: var(--text); }
+    .approvals-modal-body { overflow-y: auto; padding: 12px 16px 16px; display: grid; gap: 10px; }
+    .approval-card {
+      border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px;
+      background: rgba(255,255,255,0.025);
+    }
+    .approval-row { font-size: 11.5px; color: var(--text-dim); margin-bottom: 4px; line-height: 1.5; }
+    .approval-row .k { color: var(--accent); font-weight: 600; }
+    .approval-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .approval-actions button {
+      flex: 1; border-radius: 8px; padding: 7px 10px; font-size: 11.5px; cursor: pointer; border: 1px solid;
+    }
+    .approve-btn { border-color: rgba(92,255,196,0.5); background: rgba(92,255,196,0.12); color: var(--good); }
+    .approve-btn:hover { background: rgba(92,255,196,0.22); }
+    .deny-btn { border-color: rgba(255,107,122,0.5); background: rgba(255,107,122,0.1); color: var(--bad); }
+    .deny-btn:hover { background: rgba(255,107,122,0.2); }
 
     /* ── Mobile / tablet ───────────────────────────────────────────────── */
     @media (max-width: 900px) {
@@ -370,10 +427,11 @@
       }
       .info-panel-toggle::before { content: ""; }
 
-      .dock {
+      .dock-wrap {
         width: calc(100vw - 24px); bottom: calc(46vh + 12px); left: 12px; transform: none;
       }
-      .shell.panel-collapsed .dock { bottom: 66px; }
+      .shell.panel-collapsed .dock-wrap { bottom: 66px; }
+      .approvals-modal { width: calc(100vw - 32px); max-height: 82vh; }
       .toast-stack { max-width: calc(100vw - 32px); }
       .objective-chip { min-width: 130px; }
       .objective-amount { font-size: 10px; }
@@ -482,11 +540,25 @@
       </div>
     </aside>
 
-    <footer class="dock" id="dock">
-      <button class="dock-mic" id="dock-mic" type="button" title="Voice — tap to speak">🎤</button>
-      <input class="dock-input" id="dock-input" type="text" placeholder='Type a command — "open BuildPro", "go home"…' autocomplete="off" />
-      <button class="dock-send" id="dock-send" type="button">Send</button>
-    </footer>
+    <div class="dock-wrap" id="dock-wrap">
+      <div class="dock-reply" id="dock-reply" hidden></div>
+      <footer class="dock" id="dock">
+        <button class="dock-mic" id="dock-mic" type="button" title="Voice — tap to speak">🎤</button>
+        <input class="dock-input" id="dock-input" type="text" placeholder='Type a command — "open BuildPro", "go home"…' autocomplete="off" />
+        <button class="dock-speak-toggle" id="dock-speak-toggle" type="button" title="Voice replies: off">🔊</button>
+        <button class="dock-send" id="dock-send" type="button">Send</button>
+      </footer>
+    </div>
+
+    <div class="approvals-overlay" id="approvals-overlay" hidden>
+      <div class="approvals-modal">
+        <div class="approvals-modal-head">
+          <h3>Pending Approvals</h3>
+          <button class="approvals-modal-close" id="approvals-close" type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="approvals-modal-body" id="approvals-list"></div>
+      </div>
+    </div>
   </div>
 
   <script type="importmap">

@@ -3,9 +3,12 @@
 // Reuses the existing backend as the source of truth:
 //   GET  /3d/api/overview            → root hierarchy + module summaries
 //   GET  /3d/api/module/{id}         → per-Nucleus live data + children/path
-//   POST /3d/api/command             → {action:"navigate", nav_action, nucleus_id}
-//   POST /api/command                → general JARVIS text/voice command relay
-//   WS   /3d/ws                      → {type:"navigate", ...} / {type:"jarvis_state", state} / {type:"notification", text}
+//   GET  /3d/api/approvals           → real PENDING_APPROVAL tasks (AgentOrchestrator)
+//   GET  /3d/api/activity            → real recent activity (status_api.activity())
+//   POST /3d/api/command             → {action:"navigate"|"chat"|"speak"|"approve_task"|"reject_task"|"system_status", ...}
+//                                       "chat" is the real run_chat_turn() bridge — see dashboard/server.py's _handle_3d_chat
+//   POST /api/command                → general JARVIS text/voice command relay (paired sessions only)
+//   WS   /3d/ws                      → {type:"navigate"} / {type:"jarvis_state", state, label} / {type:"activity", ...} / {type:"notification", text}
 //   WS   /ws/phone-audio             → live mic PCM16 → Gemini Live (same channel app.html uses)
 //
 // Nothing here invents backend data — every field rendered in the right
@@ -72,6 +75,11 @@ const knowledgeListBtn = document.getElementById("knowledge-list-btn");
 const dockInput      = document.getElementById("dock-input");
 const dockSend       = document.getElementById("dock-send");
 const dockMic        = document.getElementById("dock-mic");
+const dockReplyEl    = document.getElementById("dock-reply");
+const dockSpeakToggleEl = document.getElementById("dock-speak-toggle");
+const approvalsOverlayEl = document.getElementById("approvals-overlay");
+const approvalsListEl = document.getElementById("approvals-list");
+const approvalsCloseEl = document.getElementById("approvals-close");
 
 // ── Layout constants ────────────────────────────────────────────────────
 const ROOT_RADIUS  = 7.5;
@@ -80,22 +88,37 @@ const ORB_RADIUS   = 1.1;
 const NODE_RADIUS  = 0.55;
 const CHILD_NODE_RADIUS = 0.34;
 
+// Orb states — mirrors dashboard/server.py's _handle_3d_chat broadcasts
+// (jarvis_state events) plus the pre-existing voice states. Every state
+// here is driven by a real backend event; none is decorative.
 const STATE_COLORS = {
   idle:        0x4b6b7c,
   listening:   0x4fd6ff,
   thinking:    0xb98bff,
+  executing:   0xffb454,
   speaking:    0x5cffc4,
+  waiting_for_approval: 0xffe066,
+  success:     0x5cffc4,
+  warning:     0xffb454,
+  error:       0xff4d4d,
+  offline:     0x555b66,
   interrupted: 0xff6b7a,
 };
 const STATE_PULSE_SPEED = {
-  idle: 0.6, listening: 1.2, thinking: 2.4, speaking: 2.0, interrupted: 6.0,
+  idle: 0.6, listening: 1.2, thinking: 2.4, executing: 2.8, speaking: 2.0,
+  waiting_for_approval: 1.5, success: 1.0, warning: 1.4, error: 3.2, offline: 0.15,
+  interrupted: 6.0,
 };
+// States that are a momentary notification rather than an ongoing mode —
+// auto-revert to idle after a beat so the orb doesn't get stuck showing
+// "success"/"error" forever after a turn finishes.
+const TRANSIENT_STATE_MS = { success: 2200, error: 3400, warning: 2800 };
 
 const NUCLEUS_COLORS = {
   buildpro: 0x4fd6ff, ddf: 0x5cffc4, careerrocket: 0xffb454,
   email: 0x8fb8ff, calendar: 0xff8fd1, knowledge: 0xf5e6a8, files: 0xb98bff,
   reports: 0x9fe6ff, communications: 0x7d8fa6, system: 0xff6b7a,
-  personal: 0x8fa8b8,
+  personal: 0x8fa8b8, hubspot: 0xff7ab8, social: 0x66d9ef,
 };
 
 // Display order for the left rail — presentation only; every id below is a
@@ -105,7 +128,7 @@ const NUCLEUS_COLORS = {
 // the real Obsidian JARVIS Brain vault — distinct from "files" below, which
 // is a general filesystem search, not vault-aware.
 const RAIL_ORDER = [
-  "buildpro", "ddf", "careerrocket", "email", "calendar",
+  "buildpro", "ddf", "careerrocket", "email", "calendar", "hubspot", "social",
   "knowledge", "files", "reports", "communications", "system", "personal",
 ];
 
@@ -457,6 +480,7 @@ function updateTween() {
 // ── Jarvis orb state ────────────────────────────────────────────────────
 let currentOrbState = "idle";
 let stateHoldUntil = 0;   // interrupted flashes get a minimum visible duration
+let _transientRevertTimer = null;
 
 function setOrbState(state, opts = {}) {
   const now = performance.now();
@@ -471,7 +495,19 @@ function setOrbState(state, opts = {}) {
   const hex = `#${color.toString(16).padStart(6, "0")}`;
   stateDotEl.style.background = hex;
   stateDotEl.style.boxShadow = `0 0 10px ${hex}`;
-  stateLabelEl.textContent = currentOrbState;
+  stateLabelEl.textContent = opts.label || currentOrbState.replace(/_/g, " ");
+
+  // "success"/"error"/"warning" are momentary — revert to idle after a
+  // beat rather than sticking forever once the real event that caused
+  // them has passed.
+  if (_transientRevertTimer) { clearTimeout(_transientRevertTimer); _transientRevertTimer = null; }
+  const revertMs = TRANSIENT_STATE_MS[currentOrbState];
+  if (revertMs) {
+    const stateAtSchedule = currentOrbState;
+    _transientRevertTimer = setTimeout(() => {
+      if (currentOrbState === stateAtSchedule) setOrbState("idle");
+    }, revertMs);
+  }
 }
 
 // ── Navigation state (mirrors dashboard/server.py's apply_navigation) ──
@@ -659,7 +695,72 @@ async function refreshApprovalsBadge() {
     approvalsBadgeEl.classList.toggle("has-pending", n > 0);
   } catch (_) { /* best-effort — never blocks the rest of the UI */ }
 }
-approvalsBadgeEl.addEventListener("click", () => focusNucleus("system"));
+
+// ── Approval center — real AgentOrchestrator PENDING_APPROVAL tasks via
+// GET /3d/api/approvals, approve/deny via POST /3d/api/command. 'reason' is
+// the task's real description, 'risk' the agent's real permission_level —
+// nothing here is invented (see dashboard/server.py's /3d/api/approvals). ──
+async function openApprovalsPanel() {
+  approvalsOverlayEl.hidden = false;
+  approvalsListEl.innerHTML = `<div class="info-empty">Loading…</div>`;
+  try {
+    const res = await _authFetch("/3d/api/approvals");
+    if (res.status === 401) { _redirectToLogin(); return; }
+    const payload = await res.json();
+    renderApprovalsList(payload.approvals || []);
+  } catch (e) {
+    approvalsListEl.innerHTML = `<div class="info-empty">Couldn't load approvals — check the connection.</div>`;
+  }
+}
+
+function renderApprovalsList(approvals) {
+  if (!approvals.length) {
+    approvalsListEl.innerHTML = `<div class="info-empty">No tasks awaiting approval.</div>`;
+    return;
+  }
+  approvalsListEl.innerHTML = approvals.map(a => `
+    <div class="approval-card">
+      <div class="approval-row"><span class="k">Action</span>: ${escapeHtml(a.description || "")}</div>
+      <div class="approval-row"><span class="k">Agent</span>: ${escapeHtml(a.agent_name || a.agent_id || "")}</div>
+      <div class="approval-row"><span class="k">System</span>: ${escapeHtml(a.system || "")}</div>
+      <div class="approval-row"><span class="k">Risk</span>: ${escapeHtml(a.risk || "unknown")}</div>
+      <div class="approval-row"><span class="k">Requested</span>: ${a.created_ts ? new Date(a.created_ts * 1000).toLocaleString() : "?"}</div>
+      <div class="approval-actions">
+        <button class="approve-btn" type="button" data-action="approve" data-task-id="${escapeHtml(a.id)}">Approve</button>
+        <button class="deny-btn" type="button" data-action="deny" data-task-id="${escapeHtml(a.id)}">Deny</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+approvalsListEl.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-task-id]");
+  if (!btn) return;
+  const taskId = btn.dataset.taskId;
+  const action = btn.dataset.action === "approve" ? "approve_task" : "reject_task";
+  btn.closest(".approval-card")?.querySelectorAll("button").forEach(b => b.disabled = true);
+  try {
+    const res = await _authFetch("/3d/api/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, task_id: taskId }),
+    });
+    const payload = await res.json();
+    if (!payload.ok) {
+      showToast(payload.error || "That action failed.");
+    } else {
+      showToast(action === "approve_task" ? "Task approved." : "Task denied.");
+    }
+  } catch (e) {
+    showToast("Approval action failed — check the connection.");
+  }
+  openApprovalsPanel();
+  refreshApprovalsBadge();
+});
+
+approvalsCloseEl.addEventListener("click", () => { approvalsOverlayEl.hidden = true; });
+approvalsOverlayEl.addEventListener("click", (e) => { if (e.target === approvalsOverlayEl) approvalsOverlayEl.hidden = true; });
+approvalsBadgeEl.addEventListener("click", openApprovalsPanel);
 
 // ── Right-side info panel rendering (data straight from the API, no invented content) ──
 function pushBusinessIntelSection(details, data) {
@@ -828,6 +929,65 @@ function renderInfoPanel(id, node, data) {
       ));
     }
     pushBusinessIntelSection(details, data);
+  } else if (id === "hubspot") {
+    // Real HubSpot module (actions/hubspot_integration.py via
+    // dashboard/server.py's _module_hubspot) — NOT AVAILABLE reported
+    // honestly rather than inventing CRM data when unconfigured.
+    const st = data.status || {};
+    panelStatusEl.textContent = st.verified ? "Connected" : (st.status || "NOT_CONFIGURED");
+    if (!st.verified) {
+      panelDetailsEl.innerHTML = `<div class="unavailable-card"><span class="tag">${escapeHtml(data.note || "NOT AVAILABLE")}</span><br/>${escapeHtml(st.detail || "")}</div>`;
+      panelChildrenEl.innerHTML = `<div class="info-empty">No sub-branches.</div>`;
+      return;
+    }
+    const contacts = Array.isArray(data.recent_contacts) ? data.recent_contacts : [];
+    const companies = Array.isArray(data.recent_companies) ? data.recent_companies : [];
+    statGridMount.innerHTML = `<div class="stat-grid">${statCard(contacts.length, "Recent contacts")}${statCard(companies.length, "Recent companies")}</div>`;
+    if (!contacts.length && !companies.length) details.push(item("No recent HubSpot records."));
+    for (const c of contacts.slice(0, 10)) {
+      const p = c.properties || {};
+      const name = [p.firstname, p.lastname].filter(Boolean).join(" ") || "(no name)";
+      details.push(item(`<span class="k">Contact</span> ${escapeHtml(name)} — ${escapeHtml(p.email || "no email")}`));
+    }
+    for (const c of companies.slice(0, 10)) {
+      const p = c.properties || {};
+      details.push(item(`<span class="k">Company</span> ${escapeHtml(p.name || c.id || "(unnamed)")}`));
+    }
+  } else if (id === "social") {
+    // Real Buffer module (actions/buffer_integration.py via
+    // dashboard/server.py's _module_social) — channel list + live GraphQL
+    // schema introspection for scheduling capabilities. Never renders a
+    // token — the backend already strips it before this ever arrives.
+    const st = data.status || {};
+    panelStatusEl.textContent = st.verified ? "Connected" : (st.status || "NOT_CONFIGURED");
+    if (!st.verified) {
+      panelDetailsEl.innerHTML = `<div class="unavailable-card"><span class="tag">${escapeHtml(data.note || "NOT AVAILABLE")}</span></div>`;
+      panelChildrenEl.innerHTML = `<div class="info-empty">No sub-branches.</div>`;
+      return;
+    }
+    const channels = Array.isArray(data.channels) ? data.channels : [];
+    statGridMount.innerHTML = `<div class="stat-grid">${statCard(channels.length, "Connected channels")}</div>`;
+    if (!channels.length) details.push(item("No channels connected in Buffer."));
+    for (const c of channels) {
+      const disconnected = !!c.isDisconnected;
+      details.push(item(
+        `<span class="k">${escapeHtml(c.displayName || c.name || "Channel")}</span> — ${escapeHtml(c.service || "?")}${disconnected ? " [disconnected]" : ""}`,
+        disconnected
+      ));
+    }
+    const caps = data.scheduling_capabilities?.capabilities;
+    if (caps && Object.keys(caps).length) {
+      details.push(item(`<span class="k">Scheduling capabilities (live schema)</span>`));
+      const LABELS = {
+        create_post: "Create", retrieve_posts: "Retrieve", update_post: "Update",
+        delete_post: "Delete", post_status_check: "Status check",
+      };
+      for (const [k, v] of Object.entries(caps)) {
+        details.push(item(`${escapeHtml(LABELS[k] || k)}: ${v ? "supported" : "not supported"}`, !v));
+      }
+    } else if (data.scheduling_capabilities?.status) {
+      details.push(item(`Scheduling capabilities: ${escapeHtml(data.scheduling_capabilities.status)}`, true));
+    }
   } else {
     panelStatusEl.textContent = data.summary || `${node.name} nucleus`;
   }
@@ -967,7 +1127,16 @@ function connectWS() {
         focusNucleus(msg.nucleus_id, { fromServer: true });
       }
     } else if (msg.type === "jarvis_state") {
-      setOrbState(msg.state);
+      setOrbState(msg.state, { label: msg.label });
+    } else if (msg.type === "activity") {
+      // Real tool/chat/approval events from _handle_3d_chat's on_status/
+      // on_tool_event bridge (dashboard/server.py) — never fabricated.
+      const kind = msg.kind || "";
+      const isError = kind.includes("error");
+      const isApproval = kind === "approval_requested";
+      const source = msg.source ? `[${msg.source}] ` : "";
+      logActivity(`${source}${msg.message || ""}`, { notification: isError, priority: isApproval });
+      if (isApproval) refreshApprovalsBadge();
     } else if (msg.type === "notification") {
       const isPriority = /approval|pending|urgent/i.test(msg.text || "");
       showToast(msg.text || "", { priority: isPriority });
@@ -1039,39 +1208,96 @@ function tryParseNavCommand(text) {
   return false;
 }
 
+// ── Real chat bridge — POST /3d/api/command {action:"chat"} straight into
+// run_chat_turn() (see dashboard/server.py's _handle_3d_chat). This is the
+// Phase 2 priority-1 fix: the dock now shows JARVIS's actual reply, not
+// "Sent." Progress/tool/approval state arrives separately over /3d/ws
+// (jarvis_state / activity messages) while this call is in flight. ───────
+let chatHistory = [];
+const MAX_CLIENT_HISTORY = 20;
+let ttsEnabled = false;
+
+function renderDockReply(text, opts = {}) {
+  dockReplyEl.textContent = text;
+  dockReplyEl.classList.toggle("pending", !!opts.pending);
+  dockReplyEl.classList.toggle("error", !!opts.error);
+  dockReplyEl.hidden = false;
+}
+
 async function submitDockCommand() {
   const text = dockInput.value.trim();
   if (!text) return;
   dockInput.value = "";
   if (tryParseNavCommand(text)) return;
 
-  // Not a recognized nav phrase — relay through the existing general
-  // JARVIS command pathway (/api/command, consumed by main.py's
-  // _process_dashboard_commands). That endpoint only accepts the
-  // desktop pairing-key token, so an /ui-cookie-only visitor (no
-  // pairing session) gets an honest explanation instead of a silent no-op.
-  if (!_authToken) {
-    showToast("Text commands need a paired session — say it to JARVIS, or pair a device from the phone dashboard.");
-    logActivity(`Command not relayed (no paired session): "${text}"`);
-    return;
-  }
+  logActivity(`You: "${text}"`);
+  renderDockReply("Thinking…", { pending: true });
+
   try {
-    const res = await _authFetch("/api/command", {
+    const res = await _authFetch("/3d/api/command", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ action: "chat", text, history: chatHistory }),
     });
-    if (res.status === 401) {
-      showToast("Session expired for the command relay — try again after re-pairing.");
+    if (res.status === 401) { _redirectToLogin(); return; }
+    const payload = await res.json();
+    if (!payload.ok) {
+      renderDockReply(payload.error || "JARVIS couldn't process that.", { error: true });
       return;
     }
-    logActivity(`Sent: "${text}"`);
+    const result = payload.result || {};
+    const reply = result.reply || "(no reply)";
+    renderDockReply(reply, { error: !!result.error });
+    chatHistory.push({ role: "user", text });
+    chatHistory.push({ role: "model", text: reply });
+    while (chatHistory.length > MAX_CLIENT_HISTORY) chatHistory.shift();
+    if (ttsEnabled && !result.error) speakText(reply);
   } catch (e) {
-    showToast("Command relay failed — check the connection.");
+    renderDockReply("Command failed — check the connection.", { error: true });
+    setOrbState("error", { label: "Connection error" });
   }
 }
 dockSend.addEventListener("click", submitDockCommand);
 dockInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submitDockCommand(); });
+
+// ── Cartesia TTS playback — POST /3d/api/command {action:"speak"}, which
+// calls the exact same synthesize_reply_audio() the browser /ui uses (see
+// core/headless/ui.py) — no second voice provider. Toggle defaults off;
+// honest toast if no TTS provider is configured on this deployment. ─────
+async function speakText(text) {
+  try {
+    const res = await _authFetch("/3d/api/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "speak", text }),
+    });
+    if (res.status === 401) { _redirectToLogin(); return; }
+    const payload = await res.json();
+    const result = payload.result || {};
+    if (!payload.ok || !result.configured) {
+      if (ttsEnabled) showToast("Voice output isn't configured on this server.");
+      return;
+    }
+    if (!result.ok) {
+      showToast("Voice synthesis failed.");
+      return;
+    }
+    const audio = new Audio(`data:${result.mime_type};base64,${result.audio_base64}`);
+    setOrbState("speaking", { label: "Speaking..." });
+    const backToIdle = () => { if (currentOrbState === "speaking") setOrbState("idle"); };
+    audio.onended = backToIdle;
+    audio.onerror = backToIdle;
+    await audio.play();
+  } catch (e) {
+    showToast("Voice playback failed.");
+  }
+}
+dockSpeakToggleEl.addEventListener("click", () => {
+  ttsEnabled = !ttsEnabled;
+  dockSpeakToggleEl.classList.toggle("active", ttsEnabled);
+  dockSpeakToggleEl.title = ttsEnabled ? "Voice replies: on" : "Voice replies: off";
+  showToast(ttsEnabled ? "Voice replies enabled" : "Voice replies disabled");
+});
 
 // ── Mic — same PCM16 → /ws/phone-audio pipeline app.html already uses.
 // Gated on the pairing-key token for the same reason as the text relay:
@@ -1239,9 +1465,28 @@ async function boot() {
 
   refreshApprovalsBadge();
   setInterval(refreshApprovalsBadge, 30000);
+  loadRecentActivity();
 
   connectWS();
   animate();
+}
+
+// ── Load real recent activity on open — GET /3d/api/activity, which reuses
+// status_api.activity() (agent events + audit log + proactive triggers) —
+// so the feed shows real history instead of resetting empty every load. ──
+async function loadRecentActivity() {
+  try {
+    const res = await _authFetch("/3d/api/activity?limit=20");
+    if (!res.ok) return;
+    const payload = await res.json();
+    const events = (payload.activity || []).slice().reverse();
+    if (!events.length) return;
+    activityFeedEl.innerHTML = "";
+    for (const e of events) {
+      const isError = (e.kind || "").includes("fail") || (e.kind || "").includes("error");
+      logActivity(`[${e.source || "system"}] ${e.message || e.kind || ""}`, { notification: isError });
+    }
+  } catch (_) { /* best-effort — an empty feed is a fine fallback */ }
 }
 
 boot();

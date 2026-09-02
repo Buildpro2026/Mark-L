@@ -129,6 +129,23 @@ DEFAULT_HIERARCHY = {
                 {"id": "system-files", "name": "System Files", "kind": "category"},
             ],
         },
+        {
+            "id": "hubspot",
+            "name": "HubSpot",
+            "kind": "domain",
+            "children": [
+                {"id": "hubspot-contacts", "name": "HubSpot Contacts", "kind": "category"},
+                {"id": "hubspot-companies", "name": "HubSpot Companies", "kind": "category"},
+            ],
+        },
+        {
+            "id": "social",
+            "name": "Buffer / Social",
+            "kind": "domain",
+            "children": [
+                {"id": "social-channels", "name": "Channels", "kind": "category"},
+            ],
+        },
     ],
 }
 

@@ -261,23 +261,28 @@ class SpeakRequest(BaseModel):
     text: str
 
 
-@api.post("/tts/speak")
-def ui_tts_speak(body: SpeakRequest):
-    """Real neural TTS for the web UI (2026-08-31, Lee's spec: JARVIS must
-    sound human, not like OS-default browser speechSynthesis). Returns
-    base64 audio for the frontend to play through a real <audio> element;
-    never plays anything server-side (no speakers on this container).
-    Honest {"configured": false} when no TTS provider is configured,
-    rather than a fake 200 — the frontend falls back to speechSynthesis
-    itself.
+def synthesize_reply_audio(text: str) -> dict:
+    """Real neural TTS — shared by /ui/api/tts/speak (cookie-auth browser
+    UI) and the 3D Command Center's /3d/api/command 'speak' action (which
+    accepts the pairing-token/Bearer credentials _3d_auth allows, not just
+    the /ui cookie). Extracted here so both surfaces call the exact same
+    Cartesia/ElevenLabs logic instead of dashboard/server.py re-implementing
+    a second TTS provider chain (2026-09, Lee's /3d spec: 'no duplicate
+    voice provider under any circumstance').
+
+    Returns base64 audio for the caller to play through a real <audio>
+    element; never plays anything server-side (no speakers on this
+    container). Honest {"configured": false} when no TTS provider is
+    configured, rather than a fake 200 — callers fall back to
+    speechSynthesis themselves.
 
     Provider order is Cartesia first, ElevenLabs second, and that order is
     not arbitrary: the phone line is a Cartesia Line agent speaking with
     CARTESIA_VOICE_ID, so preferring Cartesia here is what makes the
-    browser and the phone the same voice instead of two assistants wearing
-    the same name. ElevenLabs stays as a real fallback rather than being
-    ripped out — if the Cartesia key is missing or its API is down, the
-    browser keeps a human-sounding voice."""
+    browser/3D and the phone the same voice instead of two assistants
+    wearing the same name. ElevenLabs stays as a real fallback rather than
+    being ripped out — if the Cartesia key is missing or its API is down,
+    the caller keeps a human-sounding voice."""
     from actions import cartesia_tts, elevenlabs_tts
 
     providers = [p for p in (cartesia_tts, elevenlabs_tts) if p.is_configured()]
@@ -286,7 +291,7 @@ def ui_tts_speak(body: SpeakRequest):
 
     last_detail = None
     for provider in providers:
-        result = provider.synthesize_speech(body.text)
+        result = provider.synthesize_speech(text)
         if result.get("ok"):
             return {
                 "configured": True, "ok": True,
@@ -296,6 +301,11 @@ def ui_tts_speak(body: SpeakRequest):
             }
         last_detail = result.get("detail")
     return {"configured": True, "ok": False, "detail": last_detail}
+
+
+@api.post("/tts/speak")
+def ui_tts_speak(body: SpeakRequest):
+    return synthesize_reply_audio(body.text)
 
 
 class ChatRequest(BaseModel):

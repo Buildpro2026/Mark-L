@@ -711,6 +711,35 @@ class ToolExecutor:
             if saction == "status":
                 s = await loop.run_in_executor(None, buffer_integration.verify_buffer)
                 result = f"Buffer: {s['status']}." if s["configured"] else "Buffer isn't configured — no token set."
+            elif saction == "list_channels":
+                c = await loop.run_in_executor(None, buffer_integration.get_channels)
+                if not c["configured"]:
+                    result = "Buffer isn't configured — no token set."
+                elif c["status"] != "VERIFIED":
+                    result = f"Couldn't list Buffer channels ({c['status']})."
+                elif not c["channels"]:
+                    result = "No channels connected in Buffer."
+                else:
+                    lines = [
+                        f"- {ch.get('displayName') or ch.get('name')} ({ch.get('service')})"
+                        f"{' [disconnected]' if ch.get('isDisconnected') else ''}"
+                        for ch in c["channels"]
+                    ]
+                    result = f"{len(c['channels'])} connected Buffer channel(s):\n" + "\n".join(lines)
+            elif saction == "capabilities":
+                caps = await loop.run_in_executor(None, buffer_integration.discover_scheduling_capabilities)
+                if not caps["configured"]:
+                    result = "Buffer isn't configured — no token set."
+                elif caps["status"] != "VERIFIED":
+                    result = f"Couldn't check Buffer's scheduling capabilities ({caps['status']})."
+                else:
+                    cap = caps["capabilities"]
+                    result = (
+                        "Buffer scheduling capabilities (live schema introspection): "
+                        f"create={cap['create_post']}, retrieve={cap['retrieve_posts']}, "
+                        f"update={cap['update_post']}, delete={cap['delete_post']}, "
+                        f"status_check={cap['post_status_check']}."
+                    )
             elif saction in ("preview", "publish"):
                 text = (args.get("text") or "").strip()
                 if not text:

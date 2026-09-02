@@ -27,6 +27,8 @@ from actions import opportunity_engine as opp_engine
 from actions import strategic_objective as strategic_obj
 from actions import google_auth
 from actions import twilio_integration as twilio
+from actions import hubspot_integration
+from actions import buffer_integration
 from actions.agent_orchestrator import orchestrator as agent_orchestrator
 from actions.system_monitor import get_system_status
 
@@ -511,6 +513,83 @@ class DashboardServer:
         event to the spatial scene."""
         await self._broadcast_3d(payload)
 
+    # ── /3d spatial command center — the real chat bridge ────────────────
+    # Root-cause fix (Phase 2, priority 1): dashboard_bridge.py drains
+    # _command_queue into run_chat_turn() but only ever broadcasts to the
+    # PHONE _clients pool via self.broadcast() — never to _3d_ws_clients —
+    # so the 3D dock's command box only ever showed "Sent." This handler is
+    # the fix: same run_chat_turn() brain, same on_status/on_tool_event
+    # hooks that already exist for exactly this purpose, just pushed out
+    # over _broadcast_3d instead. No second chat implementation.
+
+    async def _handle_3d_chat(self, text: str, history: list) -> dict:
+        from core.headless.ui import run_chat_turn
+        from actions.agent_orchestrator import orchestrator as agent_orchestrator
+
+        async def _on_status(label: str) -> None:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "thinking", "label": label, "ts": time.time()})
+
+        async def _on_tool_event(event: dict) -> None:
+            ev_type = event.get("type")
+            tool_name = event.get("name", "tool")
+            if ev_type == "tool_start":
+                await self._broadcast_3d({
+                    "type": "jarvis_state", "state": "executing",
+                    "label": f"Running {tool_name}...", "ts": time.time(),
+                })
+                await self._broadcast_3d({
+                    "type": "activity", "source": "tool", "kind": "tool_start",
+                    "message": f"{tool_name} started", "ts": time.time(),
+                })
+            elif ev_type == "tool_end":
+                ok = event.get("ok", True)
+                await self._broadcast_3d({
+                    "type": "activity", "source": "tool",
+                    "kind": "tool_end" if ok else "tool_error",
+                    "message": f"{tool_name} {'completed' if ok else 'failed'}",
+                    "ts": time.time(),
+                })
+
+        def _pending_count() -> int:
+            try:
+                return agent_orchestrator.summary().get("pending_approval_count", 0)
+            except Exception:
+                return 0
+
+        before_pending = _pending_count()
+        await self._broadcast_3d({"type": "jarvis_state", "state": "thinking", "label": "Thinking...", "ts": time.time()})
+
+        error = None
+        try:
+            reply, tool_calls = await run_chat_turn(text, history, on_status=_on_status, on_tool_event=_on_tool_event)
+        except Exception as e:
+            reply = f"Error: {e}"
+            tool_calls = []
+            error = str(e)
+
+        after_pending = _pending_count()
+
+        if error:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "error", "label": reply[:160], "ts": time.time()})
+            await self._broadcast_3d({
+                "type": "activity", "source": "chat", "kind": "error",
+                "message": reply[:200], "ts": time.time(),
+            })
+        elif after_pending > before_pending:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "waiting_for_approval", "label": "Waiting for approval...", "ts": time.time()})
+            await self._broadcast_3d({
+                "type": "activity", "source": "approval", "kind": "approval_requested",
+                "message": "A new task needs your approval.", "ts": time.time(),
+            })
+        else:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "success", "label": "Done", "ts": time.time()})
+            await self._broadcast_3d({
+                "type": "activity", "source": "chat", "kind": "reply",
+                "message": reply[:200], "ts": time.time(),
+            })
+
+        return {"reply": reply, "tool_calls": tool_calls, "error": error, "pending_approval_count": after_pending}
+
     # ── /3d spatial command center — per-module live data ───────────────
     # Each of these honestly reports NOT_CONFIGURED/empty rather than
     # fabricating data — matching the same standard as every tool in
@@ -567,6 +646,10 @@ class DashboardServer:
             return self._module_email()
         if module_id == "calendar":
             return self._module_calendar()
+        if module_id in ("hubspot", "hubspot-contacts", "hubspot-companies"):
+            return self._module_hubspot()
+        if module_id in ("social", "buffer", "social-channels"):
+            return self._module_social()
         # Any other real hierarchy node (careerrocket, personal, etc.) —
         # honest placeholder rather than a 404, since it's still a real,
         # navigable Nucleus even before it has its own live data source.
@@ -652,6 +735,133 @@ class DashboardServer:
             data["business_intelligence"] = biz_intel.summary()
         except Exception:
             data["business_intelligence"] = {"counts": {}}
+        data["integration_health"] = self._integration_health()
+        return data
+
+    def _integration_health(self) -> dict:
+        """Cheap, local/config-presence health for every system the /3d
+        spec calls out — CONNECTED / DEGRADED / NOT_CONFIGURED / ERROR /
+        OFFLINE, never a fabricated status. Deliberately avoids live
+        network calls (Buffer/HubSpot verify_*) here since this feeds a
+        30s-polled panel; those get their own live check only when a user
+        actually opens that module (_module_hubspot/_module_social below),
+        not on every poll. Never returns a credential value — presence
+        only, same standard as core/headless/config.py's summarize()."""
+        from core.headless import config as headless_config
+        health: dict[str, str] = {}
+        health["jarvis_backend"] = "CONNECTED"      # this call running IS the backend
+        health["render"] = "CONNECTED"               # same process — if this runs, Render is serving it
+        health["tool_executor"] = "CONNECTED"        # importable/running in this same process
+        health["ollama"] = "CONNECTED" if headless_config.OLLAMA_API_KEY else "NOT_CONFIGURED"
+        health["cartesia"] = (
+            "CONNECTED" if (headless_config.CARTESIA_API_KEY and headless_config.CARTESIA_VOICE_ID)
+            else "NOT_CONFIGURED"
+        )
+        health["buffer"] = "CONNECTED" if headless_config.BUFFER_TOKEN else "NOT_CONFIGURED"
+        health["hubspot"] = "CONNECTED" if headless_config.HUBSPOT_TOKEN else "NOT_CONFIGURED"
+        try:
+            g_status = google_auth.get_credential_status()
+            if g_status.get("authorized"):
+                health["gmail"] = "CONNECTED"
+                health["calendar"] = "CONNECTED"
+            elif g_status.get("credential_file") == "present":
+                health["gmail"] = "DEGRADED"
+                health["calendar"] = "DEGRADED"
+            else:
+                health["gmail"] = "NOT_CONFIGURED"
+                health["calendar"] = "NOT_CONFIGURED"
+        except Exception:
+            health["gmail"] = "ERROR"
+            health["calendar"] = "ERROR"
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{headless_config.DB_PATH}?mode=ro", uri=True, timeout=2)
+            conn.execute("SELECT 1")
+            conn.close()
+            health["database"] = "CONNECTED"
+        except Exception:
+            health["database"] = "ERROR"
+        try:
+            from memory.memory_manager import load_memory
+            load_memory()
+            health["memory"] = "CONNECTED"
+        except Exception:
+            health["memory"] = "ERROR"
+        try:
+            from core.headless.obsidian import ObsidianVault
+            vstatus = ObsidianVault().status()
+            if not vstatus.get("configured"):
+                health["knowledge"] = "NOT_CONFIGURED"
+            elif vstatus.get("exists"):
+                health["knowledge"] = "CONNECTED"
+            else:
+                health["knowledge"] = "ERROR"
+        except Exception:
+            health["knowledge"] = "ERROR"
+        return health
+
+    def _module_hubspot(self) -> dict:
+        """Real HubSpot module — verify_hubspot() is a live, lightweight
+        auth check (see actions/hubspot_integration.py), then a small
+        recent-records pull. User-initiated (opened from the Nucleus tree),
+        not polled, so a live call here is fine. NOT_AVAILABLE is reported
+        honestly rather than fabricating data when HubSpot isn't
+        configured or the live check fails."""
+        try:
+            verify = hubspot_integration.verify_hubspot()
+        except Exception as e:
+            verify = {"configured": False, "verified": False, "status": f"ERROR:{e}"}
+        data: dict = {"status": verify}
+        if not verify.get("verified"):
+            data["recent_contacts"] = []
+            data["recent_companies"] = []
+            data["note"] = "NOT AVAILABLE" if not verify.get("configured") else "NOT AVAILABLE — HubSpot check failed."
+            return data
+        try:
+            contacts = hubspot_integration.get_contacts(limit=10)
+            data["recent_contacts"] = contacts.get("results", []) if contacts.get("ok") else []
+        except Exception:
+            data["recent_contacts"] = []
+        try:
+            companies = hubspot_integration.get_companies(limit=10)
+            data["recent_companies"] = companies.get("results", []) if companies.get("ok") else []
+        except Exception:
+            data["recent_companies"] = []
+        return data
+
+    def _module_social(self) -> dict:
+        """Real Buffer/social module — status, connected channels, and
+        (live schema introspection) which scheduled-post operations this
+        account's token genuinely supports. Never returns the Buffer token
+        anywhere in this payload — get_channels()/verify_buffer() don't
+        carry it, and channel dicts are defensively stripped of anything
+        that looks like a credential field before being sent to the
+        browser. User-initiated (opened from the Nucleus tree), not
+        polled."""
+        try:
+            verify = buffer_integration.verify_buffer()
+        except Exception as e:
+            verify = {"configured": False, "verified": False, "status": f"ERROR:{e}"}
+        data: dict = {"status": verify}
+        if not verify.get("verified"):
+            data["channels"] = []
+            data["scheduling_capabilities"] = {"configured": verify.get("configured", False), "status": verify.get("status"), "capabilities": {}}
+            data["note"] = "NOT AVAILABLE" if not verify.get("configured") else "NOT AVAILABLE — Buffer check failed."
+            return data
+        try:
+            channels_result = buffer_integration.get_channels()
+            raw_channels = channels_result.get("channels", []) if channels_result.get("status") == "VERIFIED" else []
+        except Exception:
+            raw_channels = []
+        _CRED_KEYS = {"token", "accesstoken", "access_token", "secret", "apikey", "api_key"}
+        data["channels"] = [
+            {k: v for k, v in c.items() if k.lower() not in _CRED_KEYS}
+            for c in raw_channels
+        ]
+        try:
+            data["scheduling_capabilities"] = buffer_integration.discover_scheduling_capabilities()
+        except Exception as e:
+            data["scheduling_capabilities"] = {"configured": True, "status": f"ERROR:{e}", "capabilities": {}}
         return data
 
     def _module_files(self, query: str) -> dict:
@@ -1207,11 +1417,90 @@ class DashboardServer:
                     asyncio.create_task(self._broadcast_3d(result))
                 elif action == "system_status":
                     result = get_system_status()
+                elif action == "chat":
+                    text = (body.get("text") or "").strip()
+                    if not text:
+                        return JSONResponse({"ok": False, "error": "No text provided."}, status_code=400)
+                    history = body.get("history") or []
+                    result = await self._handle_3d_chat(text, history)
+                elif action == "speak":
+                    text = (body.get("text") or "").strip()
+                    if not text:
+                        return JSONResponse({"ok": False, "error": "No text provided."}, status_code=400)
+                    from core.headless.ui import synthesize_reply_audio
+                    result = synthesize_reply_audio(text)
+                elif action == "approve_task":
+                    from actions.agent_orchestrator import orchestrator as agent_orchestrator
+                    task_id = (body.get("task_id") or "").strip()
+                    if not task_id:
+                        return JSONResponse({"ok": False, "error": "No task_id provided."}, status_code=400)
+                    try:
+                        task = agent_orchestrator.approve_task(task_id)
+                    except KeyError as e:
+                        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+                    result = task.to_public_dict()
+                    asyncio.create_task(self._broadcast_3d({
+                        "type": "activity", "source": "approval", "kind": "approved",
+                        "message": f"Approved: {result.get('description', task_id)}", "ts": time.time(),
+                    }))
+                    asyncio.create_task(self._broadcast_3d({"type": "jarvis_state", "state": "success", "label": "Task approved", "ts": time.time()}))
+                elif action == "reject_task":
+                    from actions.agent_orchestrator import orchestrator as agent_orchestrator
+                    task_id = (body.get("task_id") or "").strip()
+                    if not task_id:
+                        return JSONResponse({"ok": False, "error": "No task_id provided."}, status_code=400)
+                    try:
+                        task = agent_orchestrator.reject_task(task_id)
+                    except KeyError as e:
+                        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+                    result = task.to_public_dict()
+                    asyncio.create_task(self._broadcast_3d({
+                        "type": "activity", "source": "approval", "kind": "rejected",
+                        "message": f"Denied: {result.get('description', task_id)}", "ts": time.time(),
+                    }))
+                    asyncio.create_task(self._broadcast_3d({"type": "jarvis_state", "state": "idle", "label": "Task denied", "ts": time.time()}))
                 else:
                     return JSONResponse({"ok": False, "error": f"Unknown command action: {action!r}"}, status_code=400)
             except Exception as e:
                 return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
             return JSONResponse({"ok": True, "result": result})
+
+        @app.get("/3d/api/approvals")
+        async def three_d_approvals(req: Request):
+            """Real pending-approval queue for the 3D approval center — the
+            same AgentOrchestrator PENDING_APPROVAL tasks /ui/api/tasks
+            already exposes (cookie-only), surfaced here so a
+            pairing-token/Bearer 3D session can read it too. 'reason' is
+            the task's real description (AgentTask has no separate reason
+            field — see orchestrator_api.py); 'risk' is the agent's actual
+            permission_level (always EXECUTE for anything reaching this
+            state) rather than an invented numeric score."""
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from actions.agent_orchestrator import orchestrator as agent_orchestrator, TaskStatus
+            pending = [t for t in agent_orchestrator.list_tasks() if t.status == TaskStatus.PENDING_APPROVAL]
+            pending.sort(key=lambda t: t.created_ts, reverse=True)
+            out = []
+            for t in pending:
+                agent = agent_orchestrator.get_agent(t.agent_id)
+                d = t.to_public_dict()
+                d["agent_name"] = agent.name if agent else t.agent_id
+                d["system"] = agent.nucleus_id if agent else "unknown"
+                d["risk"] = agent.permission_level.value if agent else "unknown"
+                out.append(d)
+            return JSONResponse({"approvals": out})
+
+        @app.get("/3d/api/activity")
+        async def three_d_activity(req: Request, limit: int = 30):
+            """Real recent-activity history for the 3D feed to load on
+            open, instead of resetting empty every time the page loads —
+            reuses status_api.activity() (agent events + audit log +
+            proactive triggers, already time-sorted) directly rather than
+            re-implementing a second activity feed."""
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core.headless import status_api
+            return JSONResponse(status_api.activity(limit=limit))
 
         @app.websocket("/3d/ws")
         async def three_d_ws(websocket: WebSocket, token: str = ""):
