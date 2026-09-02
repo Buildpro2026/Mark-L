@@ -163,7 +163,7 @@ class AgentTask:
 @dataclass
 class AgentEvent:
     agent_id: str
-    kind: str              # "status_change" | "task_assigned" | "task_done" | "task_failed" | "log"
+    kind: str              # "status_change" | "task_assigned" | "task_done" | "task_error" | "task_failed" | "log"
     message: str
     ts: float = field(default_factory=time.time)
 
@@ -332,6 +332,42 @@ def _load_events(limit: int = 500) -> list["AgentEvent"]:
     ]
 
 
+# 2026-09-02 reliability audit finding: every scan below used to query
+# Gmail with `is:unread` as its ONLY "don't reprocess this" mechanism.
+# That silently and permanently excluded any candidate/client email ever
+# opened by anyone with mailbox access — real resumes sat unseen forever,
+# and the agent's own "0 relevant" summary looked identical to a healthy
+# empty scan, which is exactly what made this untrustworthy (see Lee's
+# audit request). Scope is now `in:inbox` (same inbox scope as before,
+# read or unread) with real per-message idempotency tracked in
+# buildpro_data.buildpro_processed_messages, so widening the scan can't
+# create duplicate HubSpot writes / welcome drafts for a message already
+# handled on an earlier scheduled run.
+_INTAKE_QUERY = "in:inbox"
+
+
+def _notify_owner_sms(body: str) -> dict[str, Any]:
+    """Best-effort SMS to Lee via the existing Twilio integration/JARVIS_OWNER_PHONE
+    config — the same channel actions/approval_notifier.py already uses, not a
+    second notification system. Never raises; always reports whether the
+    send actually succeeded rather than assuming a call returning meant it
+    was delivered."""
+    from core.headless import config as headless_config
+    from actions import twilio_integration
+    owner = headless_config.JARVIS_OWNER_PHONE
+    if not owner:
+        return {"sent": False, "error": "JARVIS_OWNER_PHONE isn't configured — nowhere to send this notification."}
+    if not twilio_integration.is_configured():
+        return {"sent": False, "error": "Twilio isn't configured — can't deliver this notification."}
+    try:
+        result = twilio_integration.send_sms(owner, body)
+    except Exception as exc:
+        return {"sent": False, "error": str(exc)}
+    if not result.get("ok"):
+        return {"sent": False, "error": result.get("detail") or "Twilio send_sms failed."}
+    return {"sent": True, "error": None}
+
+
 def _buildpro_email_monitor_handler(task: "AgentTask") -> dict:
     """J3: wired to the real Gmail integration (actions/buildpro_email_monitor.py)
     now that Gmail is a real, OAuth-authorized capability (J2) — this used
@@ -350,7 +386,7 @@ def _buildpro_email_monitor_handler(task: "AgentTask") -> dict:
             "configured": False,
         }
     from actions.buildpro_email_monitor import scan_inbox
-    result = scan_inbox(query="is:unread", max_results=15, draft_replies=False)
+    result = scan_inbox(query=_INTAKE_QUERY, max_results=15, draft_replies=False)
     if not result["ok"]:
         return {"summary": f"Gmail scan failed ({result.get('state')}): {result.get('detail')}", "configured": True, "error": result.get("detail")}
     return {"summary": result["summary"], "configured": True, "relevant": result["relevant"]}
@@ -366,7 +402,14 @@ def _buildpro_candidate_intake_handler(task: "AgentTask") -> dict:
     still a placeholder pending Lee's real legal language). SUGGEST-level:
     HubSpot writes and the local candidate record are safe, reversible CRM
     organization, not a consequential external action — the one thing that
-    IS consequential (actually sending the welcome email) stays a draft."""
+    IS consequential (actually sending the welcome email) stays a draft.
+
+    2026-09-02: scan scope widened from is:unread to in:inbox (see
+    _INTAKE_QUERY), guarded by buildpro_data's processed-message table so
+    an already-handled email is skipped rather than reprocessed every run.
+    A successful run now also texts Lee a real summary — the previous
+    version never notified him at all; a background agent silently
+    "processing" a candidate wasn't visible anywhere he'd actually see it."""
     from actions import google_auth
     if not google_auth.get_credential_status().get("authorized"):
         return {
@@ -375,30 +418,70 @@ def _buildpro_candidate_intake_handler(task: "AgentTask") -> dict:
         }
     from actions import gmail_integration
     from actions import candidate_intake
+    from actions import buildpro_data
 
-    r = gmail_integration.list_messages(query="is:unread", max_results=15)
+    r = gmail_integration.list_messages(query=_INTAKE_QUERY, max_results=15)
     if not r["ok"]:
         return {"summary": f"Gmail scan failed ({r.get('state')}): {r.get('detail')}", "configured": True, "error": r.get("detail")}
 
-    processed = []
-    for message in r["messages"]:
-        if gmail_integration.classify_message(message) != "candidate_reply":
-            continue
-        result = candidate_intake.process_candidate_email(message, auto_send_welcome=False)
-        processed.append(result)
+    candidate_messages = [m for m in r["messages"] if gmail_integration.classify_message(m) == "candidate_reply"]
+    already_handled = [m for m in candidate_messages if buildpro_data.is_message_processed(m["id"], "candidate_intake")]
+    to_process = [m for m in candidate_messages if m["id"] not in {x["id"] for x in already_handled}]
 
-    if not processed:
-        return {"summary": f"Scanned {len(r['messages'])} message(s); no new candidate replies to process.", "configured": True, "processed": []}
+    processed = []
+    failed = []
+    for message in to_process:
+        result = candidate_intake.process_candidate_email(message, auto_send_welcome=False)
+        buildpro_data.mark_message_processed(message["id"], "candidate_intake")
+        if result.get("ok"):
+            processed.append(result)
+        else:
+            failed.append({"message_id": message["id"], "sender": message.get("sender"), "detail": result.get("detail")})
+
+    if not processed and not failed:
+        return {
+            "summary": (
+                f"Scanned {len(r['messages'])} message(s), {len(candidate_messages)} classified as candidate replies "
+                f"({len(already_handled)} already processed on a prior run); no new candidate replies to process."
+            ),
+            "configured": True, "processed": [], "failed": [],
+        }
 
     drafted = sum(1 for p in processed if p.get("welcome_email_drafted"))
     resumes = sum(1 for p in processed if p.get("resume_attached_to_hubspot"))
+    hubspot_failures = sum(1 for p in processed if p.get("hubspot_configured") and not p.get("hubspot_ok"))
+    summary = (
+        f"Processed {len(processed)} candidate email(s): {drafted} welcome-packet draft(s) created, "
+        f"{resumes} resume(s) attached in HubSpot. Welcome emails are drafts, not sent — review before sending."
+    )
+    if hubspot_failures:
+        summary += f" WARNING: {hubspot_failures} candidate(s) could not be synced to HubSpot (see 'processed'[].hubspot_error)."
+    if failed:
+        summary += f" {len(failed)} candidate email(s) FAILED to process — see 'failed' for reasons."
+
+    notification = {"sent": False, "error": None}
+    if processed or failed:
+        lines = [f"JARVIS: {len(processed)} candidate email(s) processed."]
+        for p in processed[:5]:
+            if not p.get("hubspot_configured"):
+                hs = "HubSpot not configured"
+            elif p.get("hubspot_ok"):
+                hs = "HubSpot OK"
+            else:
+                hs = f"HubSpot FAILED ({p.get('hubspot_error') or 'unknown error'})"
+            resume = "resume attached" if p.get("resume_found") else "no resume attachment found"
+            lines.append(f"- {p.get('candidate_name') or p.get('candidate_email')}: {hs}, {resume}")
+        if failed:
+            lines.append(f"{len(failed)} candidate email(s) FAILED — check the /3d activity feed.")
+        notification = _notify_owner_sms("\n".join(lines))
+
     return {
-        "summary": (
-            f"Processed {len(processed)} candidate email(s): {drafted} welcome-packet draft(s) created, "
-            f"{resumes} resume(s) attached in HubSpot. Welcome emails are drafts, not sent — review before sending."
-        ),
+        "summary": summary,
         "configured": True,
         "processed": processed,
+        "failed": failed,
+        "notification_sent": notification["sent"],
+        "notification_error": notification["error"],
     }
 
 
@@ -421,22 +504,35 @@ def _buildpro_client_intake_handler(task: "AgentTask") -> dict:
         }
     from actions import gmail_integration
     from actions import buildpro_client_intake
+    from actions import buildpro_data
 
-    r = gmail_integration.list_messages(query="is:unread", max_results=15)
+    r = gmail_integration.list_messages(query=_INTAKE_QUERY, max_results=15)
     if not r["ok"]:
         return {"summary": f"Gmail scan failed ({r.get('state')}): {r.get('detail')}", "configured": True, "error": r.get("detail")}
 
+    client_messages = [m for m in r["messages"] if gmail_integration.classify_message(m) == "client_inquiry"]
+    to_process = [m for m in client_messages if not buildpro_data.is_message_processed(m["id"], "client_intake")]
+
     processed = []
-    for message in r["messages"]:
-        if gmail_integration.classify_message(message) != "client_inquiry":
-            continue
+    for message in to_process:
         result = buildpro_client_intake.process_client_email(message, auto_send=False)
+        buildpro_data.mark_message_processed(message["id"], "client_intake")
         processed.append(result)
 
     if not processed:
-        return {"summary": f"Scanned {len(r['messages'])} message(s); no new client inquiries to process.", "configured": True, "processed": []}
+        return {
+            "summary": (
+                f"Scanned {len(r['messages'])} message(s), {len(client_messages)} classified as client inquiries "
+                f"({len(client_messages) - len(to_process)} already processed on a prior run); no new inquiries to process."
+            ),
+            "configured": True, "processed": [],
+        }
 
     drafted = sum(1 for p in processed if p.get("welcome_email_drafted"))
+    notification = _notify_owner_sms(
+        f"JARVIS: {len(processed)} client inquiry email(s) processed, {drafted} welcome draft(s) created. "
+        "Review in Gmail Drafts."
+    )
     return {
         "summary": (
             f"Processed {len(processed)} client inquiry email(s): {drafted} welcome draft(s) created. "
@@ -444,6 +540,8 @@ def _buildpro_client_intake_handler(task: "AgentTask") -> dict:
         ),
         "configured": True,
         "processed": processed,
+        "notification_sent": notification["sent"],
+        "notification_error": notification["error"],
     }
 
 
@@ -1106,8 +1204,28 @@ class AgentOrchestrator:
             result = agent.handler(task) if agent.handler else {"summary": "No handler configured."}
             task.result = result
             task.status = TaskStatus.DONE
-            agent.last_error = None
-            self._log_event(agent.id, "task_done", f"{agent.name} completed task {task_id}.")
+            # 2026-09-02 reliability audit finding: several handlers (the
+            # BuildPro email/candidate/client scans in particular) catch
+            # their own failures and return them as a normal DONE result
+            # rather than raising — necessary so one bad message doesn't
+            # abort the whole scan, but it meant a real Gmail-auth failure
+            # or HubSpot sync failure produced the exact same generic
+            # "completed task" event as a healthy empty run. This surfaces
+            # a handler-reported error/failure the same way an exception
+            # does, instead of only being visible to something that reads
+            # task.result directly.
+            handler_error = result.get("error") if isinstance(result, dict) else None
+            handler_failures = result.get("failed") if isinstance(result, dict) else None
+            result_summary = (result.get("summary") if isinstance(result, dict) else None) or f"{agent.name} completed task {task_id}."
+            if handler_error:
+                agent.last_error = str(handler_error)
+                self._log_event(agent.id, "task_error", f"{agent.name}: {result_summary}")
+            elif handler_failures:
+                agent.last_error = f"{len(handler_failures)} item(s) failed — see task result."
+                self._log_event(agent.id, "task_error", f"{agent.name}: {result_summary}")
+            else:
+                agent.last_error = None
+                self._log_event(agent.id, "task_done", f"{agent.name}: {result_summary}")
         except Exception as exc:
             task.error = str(exc)
             task.status = TaskStatus.FAILED

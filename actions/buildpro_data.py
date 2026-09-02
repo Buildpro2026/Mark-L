@@ -137,6 +137,24 @@ def _connect() -> sqlite3.Connection:
             ts REAL NOT NULL
         )
     """)
+    # 2026-09-02 reliability audit finding: the candidate/client intake
+    # handlers used to gate their Gmail search on `is:unread` as their ONLY
+    # "don't reprocess this message" mechanism. That silently and
+    # permanently excluded any candidate email ever opened by anyone with
+    # mailbox access (Lee included) — real resumes sat unseen forever. The
+    # fix widens the Gmail query, so this table becomes the real dedup
+    # mechanism: one row per (message_id, kind) the intake chain has
+    # actually run against, so widening the search can't cause the same
+    # message to create duplicate HubSpot notes/welcome drafts on every
+    # scheduled re-scan.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS buildpro_processed_messages (
+            message_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            processed_ts REAL NOT NULL,
+            PRIMARY KEY (message_id, kind)
+        )
+    """)
     # Additive-only migration for installs that created these tables before
     # the matching/sync columns existed — ALTER TABLE ADD COLUMN is cheap
     # and each call is guarded individually so one already-present column
@@ -693,6 +711,38 @@ def list_sync_runs(entity_type: str | None = None, limit: int = 10) -> list[dict
     rows = conn.execute(q, params).fetchall()
     conn.close()
     return _rows(rows)
+
+
+# ── Email-intake idempotency ─────────────────────────────────────────────
+# Real dedup for the candidate/client intake chain — see the
+# buildpro_processed_messages table comment above for why this exists.
+# `kind` keeps candidate and client intake independent (the same message
+# could in principle be relevant to both scans without one blocking the
+# other), and lets a future intake type reuse this table for its own dedup
+# key rather than inventing a fourth storage mechanism.
+
+def is_message_processed(message_id: str, kind: str) -> bool:
+    if not message_id:
+        return False
+    conn = _connect()
+    row = conn.execute(
+        "SELECT 1 FROM buildpro_processed_messages WHERE message_id = ? AND kind = ?",
+        (message_id, kind),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def mark_message_processed(message_id: str, kind: str) -> None:
+    if not message_id:
+        return
+    conn = _connect()
+    conn.execute(
+        "INSERT OR REPLACE INTO buildpro_processed_messages (message_id, kind, processed_ts) VALUES (?, ?, ?)",
+        (message_id, kind, time.time()),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ── Command Center summary ───────────────────────────────────────────────

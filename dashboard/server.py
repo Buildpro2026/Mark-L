@@ -384,6 +384,26 @@ def _read(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
+def _verify_to_health_status(verify: dict) -> str:
+    """Maps a hubspot_integration.verify_hubspot()/buffer_integration.
+    verify_buffer() live-check result onto the same CONFIGURED /
+    AUTHENTICATED / NOT_CONFIGURED / AUTH_FAILED / RUNTIME_FAILED
+    vocabulary _integration_health() uses, so a module opened from the
+    Nucleus tree and the polled system panel never disagree on what
+    "working" means. A 401/403 from the live call is a real auth
+    rejection (AUTH_FAILED); anything else (network error, 5xx, an
+    unexpected exception) is RUNTIME_FAILED — distinct because one means
+    the token is wrong and the other means we couldn't tell."""
+    if verify.get("verified"):
+        return "AUTHENTICATED"
+    if not verify.get("configured"):
+        return "NOT_CONFIGURED"
+    status = str(verify.get("status") or "")
+    if status.startswith("UNAVAILABLE:401") or status.startswith("UNAVAILABLE:403"):
+        return "AUTH_FAILED"
+    return "RUNTIME_FAILED"
+
+
 def _verify_twilio_signature(req, form: dict) -> bool:
     """Independently implements Twilio's documented request-signing
     algorithm (HMAC-SHA1 over the request URL + sorted form param
@@ -740,64 +760,86 @@ class DashboardServer:
 
     def _integration_health(self) -> dict:
         """Cheap, local/config-presence health for every system the /3d
-        spec calls out — CONNECTED / DEGRADED / NOT_CONFIGURED / ERROR /
-        OFFLINE, never a fabricated status. Deliberately avoids live
-        network calls (Buffer/HubSpot verify_*) here since this feeds a
-        30s-polled panel; those get their own live check only when a user
-        actually opens that module (_module_hubspot/_module_social below),
-        not on every poll. Never returns a credential value — presence
-        only, same standard as core/headless/config.py's summarize()."""
+        spec calls out.
+
+        2026-09-02 reliability audit finding: the previous vocabulary used
+        "CONNECTED" for both "a credential is present" and "this in-process
+        component is actually running" — Lee's own words, "Do not label an
+        integration 'working' merely because an environment variable
+        exists," is exactly the gap that conflation created (e.g. Buffer/
+        HubSpot showed CONNECTED purely because BUFFER_TOKEN/HUBSPOT_TOKEN
+        were set, never because either was actually verified live).
+        Vocabulary is now:
+          CONFIGURED    — a credential/setting is present; not verified live
+                          here (this feeds a 30s-polled panel — a live
+                          network call per integration per poll isn't
+                          reasonable; see _module_hubspot/_module_social for
+                          the live AUTHENTICATED/AUTH_FAILED check, run only
+                          when a user actually opens that module).
+          AUTHENTICATED — a live credential check has actually succeeded
+                          (Gmail/Calendar's OAuth status is already a real,
+                          fast local check, not a network round-trip).
+          OPERATIONAL   — an in-process component with no external
+                          credential to check; it's already proven to work
+                          by the fact that this call is executing.
+          NOT_CONFIGURED — no credential/setting present.
+          AUTH_FAILED   — a credential is present but the live check
+                          rejected it.
+          RUNTIME_FAILED — an unexpected error while checking, distinct
+                          from "not configured" or "auth failed."
+        Never returns a credential value — presence only, same standard as
+        core/headless/config.py's summarize()."""
         from core.headless import config as headless_config
         health: dict[str, str] = {}
-        health["jarvis_backend"] = "CONNECTED"      # this call running IS the backend
-        health["render"] = "CONNECTED"               # same process — if this runs, Render is serving it
-        health["tool_executor"] = "CONNECTED"        # importable/running in this same process
-        health["ollama"] = "CONNECTED" if headless_config.OLLAMA_API_KEY else "NOT_CONFIGURED"
+        health["jarvis_backend"] = "OPERATIONAL"     # this call running IS the backend
+        health["render"] = "OPERATIONAL"             # same process — if this runs, Render is serving it
+        health["tool_executor"] = "OPERATIONAL"      # importable/running in this same process
+        health["ollama"] = "CONFIGURED" if headless_config.OLLAMA_API_KEY else "NOT_CONFIGURED"
         health["cartesia"] = (
-            "CONNECTED" if (headless_config.CARTESIA_API_KEY and headless_config.CARTESIA_VOICE_ID)
+            "CONFIGURED" if (headless_config.CARTESIA_API_KEY and headless_config.CARTESIA_VOICE_ID)
             else "NOT_CONFIGURED"
         )
-        health["buffer"] = "CONNECTED" if headless_config.BUFFER_TOKEN else "NOT_CONFIGURED"
-        health["hubspot"] = "CONNECTED" if headless_config.HUBSPOT_TOKEN else "NOT_CONFIGURED"
+        health["buffer"] = "CONFIGURED" if headless_config.BUFFER_TOKEN else "NOT_CONFIGURED"
+        health["hubspot"] = "CONFIGURED" if headless_config.HUBSPOT_TOKEN else "NOT_CONFIGURED"
         try:
             g_status = google_auth.get_credential_status()
             if g_status.get("authorized"):
-                health["gmail"] = "CONNECTED"
-                health["calendar"] = "CONNECTED"
+                health["gmail"] = "AUTHENTICATED"
+                health["calendar"] = "AUTHENTICATED"
             elif g_status.get("credential_file") == "present":
-                health["gmail"] = "DEGRADED"
-                health["calendar"] = "DEGRADED"
+                health["gmail"] = "AUTH_FAILED"
+                health["calendar"] = "AUTH_FAILED"
             else:
                 health["gmail"] = "NOT_CONFIGURED"
                 health["calendar"] = "NOT_CONFIGURED"
         except Exception:
-            health["gmail"] = "ERROR"
-            health["calendar"] = "ERROR"
+            health["gmail"] = "RUNTIME_FAILED"
+            health["calendar"] = "RUNTIME_FAILED"
         try:
             import sqlite3
             conn = sqlite3.connect(f"file:{headless_config.DB_PATH}?mode=ro", uri=True, timeout=2)
             conn.execute("SELECT 1")
             conn.close()
-            health["database"] = "CONNECTED"
+            health["database"] = "OPERATIONAL"
         except Exception:
-            health["database"] = "ERROR"
+            health["database"] = "RUNTIME_FAILED"
         try:
             from memory.memory_manager import load_memory
             load_memory()
-            health["memory"] = "CONNECTED"
+            health["memory"] = "OPERATIONAL"
         except Exception:
-            health["memory"] = "ERROR"
+            health["memory"] = "RUNTIME_FAILED"
         try:
             from core.headless.obsidian import ObsidianVault
             vstatus = ObsidianVault().status()
             if not vstatus.get("configured"):
                 health["knowledge"] = "NOT_CONFIGURED"
             elif vstatus.get("exists"):
-                health["knowledge"] = "CONNECTED"
+                health["knowledge"] = "OPERATIONAL"
             else:
-                health["knowledge"] = "ERROR"
+                health["knowledge"] = "RUNTIME_FAILED"
         except Exception:
-            health["knowledge"] = "ERROR"
+            health["knowledge"] = "RUNTIME_FAILED"
         return health
 
     def _module_hubspot(self) -> dict:
@@ -811,7 +853,7 @@ class DashboardServer:
             verify = hubspot_integration.verify_hubspot()
         except Exception as e:
             verify = {"configured": False, "verified": False, "status": f"ERROR:{e}"}
-        data: dict = {"status": verify}
+        data: dict = {"status": verify, "health_status": _verify_to_health_status(verify)}
         if not verify.get("verified"):
             data["recent_contacts"] = []
             data["recent_companies"] = []
@@ -842,7 +884,7 @@ class DashboardServer:
             verify = buffer_integration.verify_buffer()
         except Exception as e:
             verify = {"configured": False, "verified": False, "status": f"ERROR:{e}"}
-        data: dict = {"status": verify}
+        data: dict = {"status": verify, "health_status": _verify_to_health_status(verify)}
         if not verify.get("verified"):
             data["channels"] = []
             data["scheduling_capabilities"] = {"configured": verify.get("configured", False), "status": verify.get("status"), "capabilities": {}}

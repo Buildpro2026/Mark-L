@@ -52,6 +52,18 @@
       --dock-h: 58px;
     }
     * { box-sizing: border-box; }
+    /* Root cause of the "stuck Pending Approvals banner" bug: any element
+       given its own `display` value by a class rule below (e.g.
+       .approvals-overlay's `display: flex`) stops responding to the
+       `hidden` attribute — author stylesheet rules always beat the
+       browser's built-in `[hidden]{display:none}` UA rule regardless of
+       selector order or specificity, so toggling `.hidden = true/false`
+       in JS became a no-op and the modal rendered permanently, empty, on
+       top of the whole page. This attribute-selector rule sits in the
+       author stylesheet too, so it wins the same way — every element
+       using `hidden` for show/hide (approvals overlay, dock reply, etc.)
+       is now guaranteed to actually disappear. */
+    [hidden] { display: none !important; }
     html, body { height: 100%; }
     body {
       margin: 0;

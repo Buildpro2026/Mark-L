@@ -49,8 +49,50 @@ LOG_PATH = LOG_DIR / "jarvis.log"
 # primary signal either way.
 _STALE_APP_LOCK_SECONDS = 6 * 3600
 
-REQUIRED_CONFIG_KEYS = ["gemini_api_key"]
-OPTIONAL_CONFIG_KEYS = ["hubspot_token", "twilio", "buffer_token", "airtable_token"]
+# 2026-09-02 reliability audit finding: this used to require "gemini_api_key"
+# and check ONLY config/api_keys.json for every key. Both were wrong for
+# production. (1) Ollama Cloud has been THE LLM provider since the Ollama
+# migration — see core/headless/config.py's own comments ("Ollama Cloud is
+# THE provider... one brain behind every surface") — Gemini is explicitly
+# "read-but-unused config," so requiring it was checking the wrong variable
+# entirely. (2) config/api_keys.json is a local-dev convenience file; the
+# Render deployment (render.yaml, free plan, no persistent disk) sets every
+# real secret as a Render environment variable and never writes this file,
+# so this check reported EVERY key "missing" on Render regardless of true
+# configuration — including ones (e.g. Buffer) independently verified live
+# and working. summarize_startup_config() below now checks the actual env
+# vars via core.headless.config (the same source every integration module
+# reads at call time), falling back to api_keys.json only for local dev
+# installs that still use that file. Required/optional key names here are
+# the config.py attribute names, not the raw env var names, since a few
+# (twilio) are multi-variable.
+REQUIRED_CONFIG_KEYS = ["ollama_api_key"]
+OPTIONAL_CONFIG_KEYS = ["hubspot_token", "twilio", "buffer_token", "airtable_token", "cartesia_api_key"]
+
+# Maps a key name above to how to check it live (env-backed config.py
+# attributes first, api_keys.json second) — kept as one small table so a
+# key's "is it set" logic lives in exactly one place.
+def _is_key_present(key: str, file_data: dict) -> bool:
+    from core.headless import config as headless_config
+    checks: dict[str, "callable"] = {
+        "ollama_api_key": lambda: bool(headless_config.OLLAMA_API_KEY),
+        "gemini_api_key": lambda: bool(headless_config.GEMINI_API_KEY),
+        "hubspot_token": lambda: bool(headless_config.HUBSPOT_TOKEN),
+        "buffer_token": lambda: bool(headless_config.BUFFER_TOKEN),
+        "airtable_token": lambda: bool(headless_config.AIRTABLE_TOKEN),
+        "cartesia_api_key": lambda: bool(headless_config.CARTESIA_API_KEY),
+        "twilio": lambda: bool(
+            headless_config.TWILIO_ACCOUNT_SID
+            and headless_config.TWILIO_AUTH_TOKEN
+            and headless_config.TWILIO_FROM_NUMBER
+        ),
+    }
+    check = checks.get(key)
+    if check and check():
+        return True
+    # Fall back to the local file for a local-dev install that hasn't set
+    # environment variables at all.
+    return bool(file_data.get(key))
 
 _logger: logging.Logger | None = None
 
@@ -211,8 +253,11 @@ def is_port_free(port: int, host: str = "0.0.0.0") -> bool:
 
 def summarize_startup_config(config_path: Path | None = None) -> dict:
     """Read-only summary of which required/optional config keys are
-    present — never returns or prints actual values, only key presence.
-    Never raises."""
+    present — checks real environment variables first (via
+    core.headless.config, the same source every integration module reads
+    at call time) and falls back to config/api_keys.json only for a
+    local-dev install that hasn't set env vars. Never returns or prints
+    actual values, only key presence. Never raises."""
     path = config_path or (BASE_DIR / "config" / "api_keys.json")
     summary = {"required_missing": [], "optional_missing": [], "config_readable": True}
     try:
@@ -221,10 +266,10 @@ def summarize_startup_config(config_path: Path | None = None) -> dict:
         data = {}
         summary["config_readable"] = False
     for key in REQUIRED_CONFIG_KEYS:
-        if not data.get(key):
+        if not _is_key_present(key, data):
             summary["required_missing"].append(key)
     for key in OPTIONAL_CONFIG_KEYS:
-        if not data.get(key):
+        if not _is_key_present(key, data):
             summary["optional_missing"].append(key)
     return summary
 

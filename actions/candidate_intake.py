@@ -126,9 +126,11 @@ def process_candidate_email(message: dict[str, Any], auto_send_welcome: bool = F
 
     # 3. HubSpot contact — best-effort; the local record above already
     # exists regardless of whether HubSpot is configured/reachable.
+    hubspot_configured = hubspot_integration.is_configured()
     hubspot_contact_id: str | None = None
     hubspot_ok = False
-    if hubspot_integration.is_configured():
+    hubspot_error: str | None = None
+    if hubspot_configured:
         props: dict[str, str] = {}
         if name:
             parts = name.split(" ", 1)
@@ -140,6 +142,8 @@ def process_candidate_email(message: dict[str, Any], auto_send_welcome: bool = F
         if hubspot_ok:
             hubspot_contact_id = hs_result["record"]["id"]
             buildpro_data.update_candidate(candidate_id, hubspot_contact_id=hubspot_contact_id)
+        else:
+            hubspot_error = hs_result.get("detail") or f"HubSpot {hs_result.get('state', 'ERROR')}"
 
     # 4. Resume upload + attach to the HubSpot contact — best-effort,
     # requires both a resume file and a successful HubSpot contact above.
@@ -168,8 +172,10 @@ def process_candidate_email(message: dict[str, Any], auto_send_welcome: bool = F
         "candidate_action": candidate_action,
         "candidate_email": email,
         "candidate_name": name,
+        "hubspot_configured": hubspot_configured,
         "hubspot_contact_id": hubspot_contact_id,
         "hubspot_ok": hubspot_ok,
+        "hubspot_error": hubspot_error,
         "resume_found": resume_bytes is not None,
         "resume_attached_to_hubspot": resume_attached,
         "sign_token": sign_token,

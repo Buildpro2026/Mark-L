@@ -158,46 +158,105 @@ def test_is_port_free_reports_false_for_a_bound_port():
 
 
 # ── startup config summary ──────────────────────────────────────────────
+# 2026-09-02 reliability audit finding: this used to check ONLY
+# config/api_keys.json and require "gemini_api_key" — wrong on both counts
+# for the real Render deployment (env-var configured, Ollama is the
+# required LLM provider; see core/startup.py's comment above
+# REQUIRED_CONFIG_KEYS). These tests now monkeypatch the actual env-backed
+# config attributes _is_key_present() reads, the same source every
+# integration module reads at call time, so they exercise the real
+# production code path instead of the stale file-only one.
 
-def test_summarize_startup_config_reports_missing_required_and_optional_keys(tmp_path):
+def _clear_all_config_env(monkeypatch):
+    """Zeroes every attribute _is_key_present() can see, so a test starts
+    from a known "nothing configured" baseline regardless of what's
+    actually set in this sandbox's environment/.env."""
+    from core.headless import config as headless_config
+    for attr in (
+        "OLLAMA_API_KEY", "GEMINI_API_KEY", "HUBSPOT_TOKEN", "BUFFER_TOKEN",
+        "AIRTABLE_TOKEN", "CARTESIA_API_KEY",
+        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
+    ):
+        monkeypatch.setattr(headless_config, attr, None, raising=False)
+
+
+def test_summarize_startup_config_reports_missing_required_and_optional_keys(tmp_path, monkeypatch):
+    _clear_all_config_env(monkeypatch)
     cfg = tmp_path / "api_keys.json"
     cfg.write_text(json.dumps({}), encoding="utf-8")
     summary = startup.summarize_startup_config(cfg)
     assert summary["config_readable"] is True
-    assert "gemini_api_key" in summary["required_missing"]
+    assert "ollama_api_key" in summary["required_missing"]
     assert set(summary["optional_missing"]) == set(startup.OPTIONAL_CONFIG_KEYS)
 
 
-def test_summarize_startup_config_reports_present_keys(tmp_path):
+def test_summarize_startup_config_reports_present_keys_from_env(tmp_path, monkeypatch):
+    """The real production path: Render sets environment variables, not
+    config/api_keys.json (which doesn't exist on Render's disk-less free
+    plan — see render.yaml). A key configured only via env must be
+    reported present even when the file is empty."""
+    _clear_all_config_env(monkeypatch)
+    from core.headless import config as headless_config
+    monkeypatch.setattr(headless_config, "OLLAMA_API_KEY", "real-ollama-key", raising=False)
+    monkeypatch.setattr(headless_config, "BUFFER_TOKEN", "real-buffer-token", raising=False)
     cfg = tmp_path / "api_keys.json"
-    cfg.write_text(json.dumps({"gemini_api_key": "x", "twilio": {"auth_token": "y"}}), encoding="utf-8")
+    cfg.write_text(json.dumps({}), encoding="utf-8")
+    summary = startup.summarize_startup_config(cfg)
+    assert summary["required_missing"] == []
+    assert "buffer_token" not in summary["optional_missing"]
+    assert "hubspot_token" in summary["optional_missing"]
+
+
+def test_summarize_startup_config_reports_present_keys_from_file(tmp_path, monkeypatch):
+    """Local-dev fallback: no env vars set, but api_keys.json has the key."""
+    _clear_all_config_env(monkeypatch)
+    cfg = tmp_path / "api_keys.json"
+    cfg.write_text(json.dumps({"ollama_api_key": "x", "twilio": {"auth_token": "y"}}), encoding="utf-8")
     summary = startup.summarize_startup_config(cfg)
     assert summary["required_missing"] == []
     assert "twilio" not in summary["optional_missing"]
     assert "hubspot_token" in summary["optional_missing"]
 
 
-def test_summarize_startup_config_handles_missing_file_without_raising(tmp_path):
+def test_summarize_startup_config_handles_missing_file_without_raising(tmp_path, monkeypatch):
+    _clear_all_config_env(monkeypatch)
     summary = startup.summarize_startup_config(tmp_path / "does_not_exist.json")
-    assert summary["required_missing"] == ["gemini_api_key"]
+    assert summary["required_missing"] == ["ollama_api_key"]
 
 
-def test_summarize_startup_config_handles_corrupt_json_without_raising(tmp_path):
+def test_summarize_startup_config_handles_corrupt_json_without_raising(tmp_path, monkeypatch):
+    _clear_all_config_env(monkeypatch)
     cfg = tmp_path / "api_keys.json"
     cfg.write_text("not json{{{", encoding="utf-8")
     summary = startup.summarize_startup_config(cfg)
     assert summary["config_readable"] is False
-    assert summary["required_missing"] == ["gemini_api_key"]
+    assert summary["required_missing"] == ["ollama_api_key"]
 
 
 def test_print_startup_banner_never_prints_a_config_value(tmp_path, monkeypatch, capsys):
+    _clear_all_config_env(monkeypatch)
+    from core.headless import config as headless_config
+    secret_value = "sk-super-secret-value-should-never-appear"
+    monkeypatch.setattr(headless_config, "OLLAMA_API_KEY", secret_value, raising=False)
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
-    cfg = cfg_dir / "api_keys.json"
-    secret_value = "sk-super-secret-value-should-never-appear"
-    cfg.write_text(json.dumps({"gemini_api_key": secret_value}), encoding="utf-8")
     monkeypatch.setattr(startup, "BASE_DIR", tmp_path)
     startup.print_startup_banner()
     out = capsys.readouterr().out
     assert secret_value not in out
     assert "Required configuration present" in out
+
+
+def test_print_startup_banner_reports_required_missing_when_ollama_unset(tmp_path, monkeypatch, capsys):
+    """Guards the exact bug Lee reported: a Render deploy with real secrets
+    set as env vars, and no config/api_keys.json on disk, must not report
+    everything as missing just because the file is absent."""
+    _clear_all_config_env(monkeypatch)
+    from core.headless import config as headless_config
+    monkeypatch.setattr(headless_config, "OLLAMA_API_KEY", "real-key", raising=False)
+    monkeypatch.setattr(headless_config, "HUBSPOT_TOKEN", "real-hubspot-token", raising=False)
+    monkeypatch.setattr(startup, "BASE_DIR", tmp_path)  # config/api_keys.json under here does not exist
+    startup.print_startup_banner()
+    out = capsys.readouterr().out
+    assert "Required configuration present" in out
+    assert "hubspot_token" not in out.split("Optional integrations not configured")[-1]

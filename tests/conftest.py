@@ -15,6 +15,8 @@ from logging.handlers import RotatingFileHandler
 import pytest
 
 from actions import agent_orchestrator as _ao
+from actions import buildpro_data as _bd
+from actions import business_intelligence as _bi
 from core import startup as _startup
 from core.headless import config as _headless_config
 
@@ -31,8 +33,24 @@ DASHBOARD_AUTH_HEADERS = {"Authorization": f"Bearer {DASHBOARD_TEST_TOKEN}"}
 
 @pytest.fixture(autouse=True)
 def _isolate_agent_orchestrator_db(monkeypatch, tmp_path):
-    monkeypatch.setattr(_ao, "DB_PATH", tmp_path / "test_agent_orchestrator.db")
+    # actions/agent_orchestrator.py, actions/buildpro_data.py, and
+    # actions/business_intelligence.py each hold their own module-level
+    # DB_PATH pointing at the SAME physical file (DATA_DIR/jarvis2.db) —
+    # separate Python names, one file on disk. Isolating only _ao.DB_PATH
+    # left the other two pointed at the real file, invisible as long as
+    # nothing durable was being written through them from an
+    # orchestrator-level test. The 2026-09-02 reliability-audit dedup table
+    # (buildpro_data.buildpro_processed_messages, written from inside
+    # actions/agent_orchestrator.py's BuildPro intake handlers) made that
+    # leak observable: a handler-level test using a real message id could
+    # permanently mark it "processed" in the real data/jarvis2.db, and
+    # every later run — in this session or a future one — would silently
+    # skip it. All three now share one isolated tmp_path file per test.
+    shared_db_path = tmp_path / "test_agent_orchestrator.db"
+    monkeypatch.setattr(_ao, "DB_PATH", shared_db_path)
     monkeypatch.setattr(_ao, "LOCK_PATH", tmp_path / "test_agent_scheduler.lock")
+    monkeypatch.setattr(_bd, "DB_PATH", shared_db_path)
+    monkeypatch.setattr(_bi, "DB_PATH", shared_db_path)
 
 
 @pytest.fixture

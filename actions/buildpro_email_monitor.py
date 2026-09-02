@@ -56,16 +56,25 @@ def _extract_signal(message: dict[str, Any], classification: str) -> dict[str, A
 
 
 def scan_inbox(
-    query: str = "is:unread",
+    query: str = "in:inbox",
     max_results: int = 15,
     draft_replies: bool = False,
 ) -> dict[str, Any]:
-    """Lists messages (default: unread), classifies each, logs a business
-    intelligence entry for every candidate_reply/client_inquiry found, and
-    — only if draft_replies=True — creates a real (but never sent) Gmail
-    draft acknowledgment for each one. Honest about auth/API failure
-    (never fabricates a scan result) via the same {"ok": False, ...}
-    convention gmail_integration.py itself uses."""
+    """Lists messages (default: whole inbox, read or unread), classifies
+    each, logs a business intelligence entry for every candidate_reply/
+    client_inquiry found, and — only if draft_replies=True — creates a real
+    (but never sent) Gmail draft acknowledgment for each one. Honest about
+    auth/API failure (never fabricates a scan result) via the same
+    {"ok": False, ...} convention gmail_integration.py itself uses.
+
+    2026-09-02 reliability audit finding: the default used to be
+    "is:unread", which silently and permanently excluded any candidate/
+    client email ever opened by anyone with mailbox access — see
+    actions/agent_orchestrator.py's _INTAKE_QUERY comment for the full
+    story. This function is read-only (log only, no HubSpot/draft writes
+    unless draft_replies=True), so unlike the candidate/client intake
+    handlers it doesn't need message-level dedup to stay safe when the
+    scope widens."""
     r = gmail_integration.list_messages(query=query, max_results=max_results)
     if not r["ok"]:
         return {

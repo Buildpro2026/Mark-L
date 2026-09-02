@@ -163,10 +163,18 @@ def test_candidate_intake_agent_reports_honestly_when_gmail_not_authorized(monke
     assert task.result["configured"] is False
 
 
-def test_candidate_intake_agent_processes_only_candidate_reply_messages(monkeypatch):
+def test_candidate_intake_agent_processes_only_candidate_reply_messages(monkeypatch, tmp_path):
     import actions.google_auth as google_auth
     import actions.gmail_integration as gmail
     import actions.candidate_intake as intake
+    import actions.buildpro_data as bd
+
+    # Isolate from the real jarvis2.db — this test's whole point is
+    # asserting which of two fresh message ids get processed, and the
+    # 2026-09-02 reliability-audit dedup table (buildpro_processed_messages)
+    # would otherwise mark "m1" processed on first run and make every
+    # subsequent run of this test see it as already-handled.
+    monkeypatch.setattr(bd, "DB_PATH", tmp_path / "test_candidate_intake.db")
 
     monkeypatch.setattr(google_auth, "get_credential_status", lambda: {"authorized": True})
     messages = [
@@ -193,10 +201,48 @@ def test_candidate_intake_agent_processes_only_candidate_reply_messages(monkeypa
     assert len(task.result["processed"]) == 1
 
 
-def test_candidate_intake_agent_reports_gmail_scan_failure_honestly(monkeypatch):
+def test_candidate_intake_agent_skips_a_message_already_processed_on_a_prior_run(monkeypatch, tmp_path):
+    """2026-09-02 reliability audit: the scan query widened from is:unread
+    to in:inbox (so an already-read candidate email isn't excluded
+    forever), which only stays safe because buildpro_data now tracks which
+    messages this chain already ran against. Same message id, two scans:
+    the second must not reprocess it (no duplicate HubSpot write / welcome
+    draft) or send a second notification."""
     import actions.google_auth as google_auth
     import actions.gmail_integration as gmail
+    import actions.candidate_intake as intake
+    import actions.buildpro_data as bd
 
+    monkeypatch.setattr(bd, "DB_PATH", tmp_path / "test_candidate_intake_dedup.db")
+    monkeypatch.setattr(google_auth, "get_credential_status", lambda: {"authorized": True})
+    messages = [{"id": "m1", "sender": "jane@example.com", "subject": "Application - Electrician"}]
+    monkeypatch.setattr(gmail, "list_messages", lambda query, max_results: {"ok": True, "messages": messages})
+    monkeypatch.setattr(gmail, "classify_message", lambda m: "candidate_reply")
+
+    processed_ids = []
+    monkeypatch.setattr(intake, "process_candidate_email",
+                         lambda msg, auto_send_welcome: (
+                             processed_ids.append(msg["id"]),
+                             {"ok": True, "welcome_email_drafted": True, "resume_attached_to_hubspot": False,
+                              "candidate_name": "Jane Doe", "candidate_email": "jane@example.com",
+                              "hubspot_configured": False, "hubspot_ok": False, "resume_found": False},
+                         )[1])
+
+    orch = ao.AgentOrchestrator()
+    task1 = orch.assign_task("buildpro_candidate_intake", "check for new candidates")
+    assert len(task1.result["processed"]) == 1
+
+    task2 = orch.assign_task("buildpro_candidate_intake", "check for new candidates")
+    assert task2.result["processed"] == []
+    assert processed_ids == ["m1"]  # process_candidate_email only ever ran once
+
+
+def test_candidate_intake_agent_reports_gmail_scan_failure_honestly(monkeypatch, tmp_path):
+    import actions.google_auth as google_auth
+    import actions.gmail_integration as gmail
+    import actions.buildpro_data as bd
+
+    monkeypatch.setattr(bd, "DB_PATH", tmp_path / "test_candidate_intake_scanfail.db")
     monkeypatch.setattr(google_auth, "get_credential_status", lambda: {"authorized": True})
     monkeypatch.setattr(gmail, "list_messages",
                          lambda query, max_results: {"ok": False, "state": "ERROR", "detail": "network down"})

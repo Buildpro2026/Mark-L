@@ -167,8 +167,9 @@ _CLASSIFICATION_RULES: list[tuple[str, tuple[str, ...]]] = [
 
 
 def classify_message(message: dict[str, Any]) -> str:
-    """Rule-based classification over subject/sender/body keywords. Returns
-    one of the labels above, or 'uncategorized' — never a fabricated label.
+    """Rule-based classification over subject/sender/body keywords, plus a
+    real-resume-attachment check. Returns one of the labels above, or
+    'uncategorized' — never a fabricated label.
 
     Originally checked subject+sender only. Real candidate/client emails
     routinely have a generic subject line ("Hi", "Following up", a forwarded
@@ -177,12 +178,31 @@ def classify_message(message: dict[str, Any]) -> str:
     get_message() already extracts body/snippet (see _extract_body above);
     this just actually uses them instead of leaving real signal unread.
     Body is capped so a long quoted thread or signature block can't drown
-    out the check with irrelevant boilerplate."""
+    out the check with irrelevant boilerplate.
+
+    2026-09-02 reliability audit finding: even with body text scanned, the
+    haystack never included attachment filenames. A candidate who writes
+    "Hi, please see attached." and attaches resume.pdf matched none of the
+    keyword phrases above and fell through to 'uncategorized' — silently
+    dropped despite carrying the single strongest, most specific signal
+    there is (a real resume file). get_message() already returns attachment
+    metadata (see _extract_attachments) and is_likely_resume() already
+    exists to filter it; this was a wiring gap, not a missing capability.
+    Automated/no-reply senders are excluded so a PDF receipt or platform
+    notification never gets mistaken for a candidate just because it has a
+    PDF attached."""
     subject = (message.get("subject") or "").lower()
     sender = (message.get("sender") or "").lower()
     snippet = (message.get("snippet") or "").lower()
     body = (message.get("body") or "")[:2000].lower()
     haystack = f"{subject} {sender} {snippet} {body}"
+
+    is_automated_sender = any(k in sender for k in ("no-reply", "noreply", "do-not-reply"))
+    if not is_automated_sender:
+        attachments = message.get("attachments") or []
+        if any(is_likely_resume(a.get("filename") or "") for a in attachments):
+            return "candidate_reply"
+
     for label, keywords in _CLASSIFICATION_RULES:
         if any(keyword in haystack for keyword in keywords):
             return label
