@@ -216,4 +216,8 @@ def process_client_email(message: dict[str, Any], auto_send: bool = False) -> di
         "welcome_email_sent": auto_send and bool(send_result.get("ok")),
         "welcome_email_drafted": (not auto_send) and bool(send_result.get("ok")),
         "welcome_email_error": None if send_result.get("ok") else send_result.get("detail"),
+        # 2026-09-03: see candidate_intake.process_candidate_email's matching
+        # comment — lets agent_orchestrator.py auto-queue this draft as a
+        # real buildpro_email_responder PENDING_APPROVAL task.
+        "draft_id": send_result.get("draft_id") if not auto_send else None,
     }

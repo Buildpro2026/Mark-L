@@ -368,6 +368,31 @@ def _notify_owner_sms(body: str) -> dict[str, Any]:
     return {"sent": True, "error": None}
 
 
+def _queue_draft_for_approval(draft_id: str | None) -> None:
+    """2026-09-03: candidate/client intake used to leave a freshly-drafted
+    welcome email findable only by a human manually opening Gmail Drafts
+    — the intended notification (Twilio SMS, see _notify_owner_sms above)
+    is silent whenever Twilio isn't configured, which it currently isn't
+    (no TWILIO_* env vars set). Lee's spec for the /3d approval flow is
+    explicit: 'Gmail/source data -> JARVIS analyzes -> HubSpot record ->
+    JARVIS prepares personalized email -> approval item/draft -> USER
+    REVIEWS -> USER APPROVES -> SEND -> RESULT LOGGED', with the Command
+    Center making the approval state obvious. buildpro_email_responder
+    (EXECUTE-level, schedule=None — see its own docstring) is exactly
+    that gate: assign_task() on an EXECUTE agent always leaves the task
+    PENDING_APPROVAL until Lee calls approve_task(), and /3d/api/approvals
+    already surfaces every PENDING_APPROVAL task. This just closes the
+    loop by actually queuing one instead of leaving it undiscoverable.
+    Never raises — a queuing failure must not fail the intake chain that
+    already succeeded (the draft still exists in Gmail either way)."""
+    if not draft_id:
+        return
+    try:
+        orchestrator.assign_task("buildpro_email_responder", draft_id)
+    except Exception:
+        pass
+
+
 def _buildpro_email_monitor_handler(task: "AgentTask") -> dict:
     """J3: wired to the real Gmail integration (actions/buildpro_email_monitor.py)
     now that Gmail is a real, OAuth-authorized capability (J2) — this used
@@ -435,6 +460,7 @@ def _buildpro_candidate_intake_handler(task: "AgentTask") -> dict:
         buildpro_data.mark_message_processed(message["id"], "candidate_intake")
         if result.get("ok"):
             processed.append(result)
+            _queue_draft_for_approval(result.get("draft_id"))
         else:
             failed.append({"message_id": message["id"], "sender": message.get("sender"), "detail": result.get("detail")})
 
@@ -518,6 +544,8 @@ def _buildpro_client_intake_handler(task: "AgentTask") -> dict:
         result = buildpro_client_intake.process_client_email(message, auto_send=False)
         buildpro_data.mark_message_processed(message["id"], "client_intake")
         processed.append(result)
+        if result.get("ok"):
+            _queue_draft_for_approval(result.get("draft_id"))
 
     if not processed:
         return {
@@ -779,6 +807,47 @@ def _buildpro_prospecting_agent_handler(task: "AgentTask") -> dict:
     }
 
 
+def _buildpro_hubspot_sync_handler(task: "AgentTask") -> dict:
+    """2026-09-03: actions/buildpro_sync.py — a complete, already-tested
+    HubSpot contacts/companies -> buildpro_candidates/buildpro_clients
+    bulk mirror, with real dedup (hubspot_contact_id/hubspot_company_id)
+    and per-run error accounting (buildpro_data.record_sync_run) — existed
+    but was never called from anywhere except its own tests. That's the
+    entire reason HubSpot showed real, live contacts/companies in the
+    /3d HubSpot module while BuildPro's own candidate/client counts sat
+    near zero: nothing ever pulled the existing HubSpot roster in.
+    buildpro_prospecting_agent (above) is NOT a substitute for this — it
+    only ever adds companies it doesn't already know about, tagged
+    status='prospect', and never contacts/candidates at all.
+
+    This agent is the "reliable scheduled execution path" for that bulk
+    sync: SUGGEST-level (the same tier candidate/client intake already
+    use for their own automatic HubSpot writes — this only ever writes
+    real HubSpot property values into local rows, never contacts anyone
+    or sends anything), autonomous_ok=True (a fixed, already-connected
+    data source with no per-call topic needed, same rationale as
+    buildpro_prospecting_agent's own autonomous_ok), and schedule="60m"
+    so a fresh deploy (this Render tier has no persistent disk — see
+    AgentOrchestrator.__init__) starts backfilling within the hour with
+    no manual start_agent() call required. The hubspot tool's 'sync'
+    action (core/headless/tool_executor.py) is the on-demand trigger
+    Lee/JARVIS can call from chat without waiting for the schedule."""
+    from actions import buildpro_sync
+    result = buildpro_sync.sync_all(limit=200)
+    contacts, companies = result["contacts"], result["companies"]
+    if contacts["state"] == "NOT_CONFIGURED":
+        return {"summary": "HubSpot isn't configured — nothing to sync.", "configured": False, "result": result}
+    summary = (
+        f"HubSpot sync: {contacts['created']} candidate(s) created, {contacts['updated']} updated "
+        f"({contacts['pulled']} contact(s) pulled); {companies['created']} client(s) created, "
+        f"{companies['updated']} updated ({companies['pulled']} compan{'y' if companies['pulled'] == 1 else 'ies'} pulled)."
+    )
+    errors = contacts["errors"] + companies["errors"]
+    if errors:
+        summary += f" {len(errors)} record(s) failed to sync — see 'result' for details."
+    return {"summary": summary, "configured": True, "result": result}
+
+
 # Fixed, code-level set of agent blueprints — the ONLY way new agents enter
 # the system. See module guardrails above. Every handler either uses real,
 # already-built infrastructure (web_search, daily_deal_finders, twilio,
@@ -786,6 +855,18 @@ def _buildpro_prospecting_agent_handler(task: "AgentTask") -> dict:
 # system_monitor, buffer_integration) or honestly reports that no data
 # source is connected yet — never a fabricated result.
 BUILTIN_AGENTS: dict[str, AgentDefinition] = {
+    "buildpro_hubspot_sync": AgentDefinition(
+        id="buildpro_hubspot_sync", name="BuildPro HubSpot Sync",
+        description=(
+            "Bulk-mirrors real HubSpot contacts/companies into BuildPro's own candidate/client "
+            "tables (dedup'd by hubspot_contact_id/hubspot_company_id — safe to re-run any time). "
+            "Read from HubSpot, write locally only; never contacts anyone or writes back to HubSpot."
+        ),
+        nucleus_id="buildpro", business="buildpro",
+        permission_level=PermissionLevel.SUGGEST, schedule="60m",
+        handler=_buildpro_hubspot_sync_handler,
+        autonomous_ok=True,  # surveys HubSpot data — no topic needed, safe to run unattended
+    ),
     "buildpro_email_monitor": AgentDefinition(
         id="buildpro_email_monitor", name="BuildPro Email Monitor",
         description="Watches the BuildPro inbox for new candidate/client messages and drafts triage suggestions.",

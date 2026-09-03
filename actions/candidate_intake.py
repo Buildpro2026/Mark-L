@@ -183,4 +183,11 @@ def process_candidate_email(message: dict[str, Any], auto_send_welcome: bool = F
         "welcome_email_sent": auto_send_welcome and bool(send_result.get("ok")),
         "welcome_email_drafted": (not auto_send_welcome) and bool(send_result.get("ok")),
         "welcome_email_error": None if send_result.get("ok") else send_result.get("detail"),
+        # 2026-09-03: exposed so agent_orchestrator.py's candidate-intake
+        # handler can automatically queue this draft as a real
+        # buildpro_email_responder PENDING_APPROVAL task — see that
+        # handler's docstring. draft_id is only ever present when
+        # welcome_email_drafted is True; gmail_integration.create_draft()
+        # doesn't return one on failure.
+        "draft_id": send_result.get("draft_id") if not auto_send_welcome else None,
     }

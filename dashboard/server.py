@@ -387,13 +387,17 @@ def _read(name: str) -> str:
 def _verify_to_health_status(verify: dict) -> str:
     """Maps a hubspot_integration.verify_hubspot()/buffer_integration.
     verify_buffer() live-check result onto the same CONFIGURED /
-    AUTHENTICATED / NOT_CONFIGURED / AUTH_FAILED / RUNTIME_FAILED
-    vocabulary _integration_health() uses, so a module opened from the
-    Nucleus tree and the polled system panel never disagree on what
-    "working" means. A 401/403 from the live call is a real auth
-    rejection (AUTH_FAILED); anything else (network error, 5xx, an
-    unexpected exception) is RUNTIME_FAILED — distinct because one means
-    the token is wrong and the other means we couldn't tell."""
+    AUTHENTICATED / NOT_CONFIGURED / AUTH_FAILED / RATE_LIMITED /
+    RUNTIME_FAILED vocabulary _integration_health() uses, so a module
+    opened from the Nucleus tree and the polled system panel never
+    disagree on what "working" means. A 401/403 from the live call is a
+    real auth rejection (AUTH_FAILED); a 429 is the provider rate-
+    limiting a token that's otherwise fine (RATE_LIMITED — see
+    buffer_integration.verify_buffer()'s 2026-09-03 finding: this used to
+    fall into RUNTIME_FAILED, which reads like our bug rather than the
+    provider's own throttling); anything else (network error, 5xx, an
+    unexpected exception) is RUNTIME_FAILED — distinct because those mean
+    we couldn't tell, not that the token is wrong."""
     if verify.get("verified"):
         return "AUTHENTICATED"
     if not verify.get("configured"):
@@ -401,6 +405,8 @@ def _verify_to_health_status(verify: dict) -> str:
     status = str(verify.get("status") or "")
     if status.startswith("UNAVAILABLE:401") or status.startswith("UNAVAILABLE:403"):
         return "AUTH_FAILED"
+    if status.startswith("RATE_LIMITED"):
+        return "RATE_LIMITED"
     return "RUNTIME_FAILED"
 
 
@@ -458,6 +464,17 @@ class DashboardServer:
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
+        # 2026-09-03 finding: _module_social() made up to 3 live Buffer
+        # GraphQL calls (verify + channels + capabilities) on every single
+        # /3d Buffer/Social module open, with zero caching — repeatedly
+        # opening the module in normal use was enough to trip Buffer's own
+        # rate limit, which then showed up looking like a broken
+        # integration rather than "you clicked this a few times in a
+        # row." Cached briefly here rather than inside
+        # buffer_integration.py itself, which tests call directly and
+        # expect a fresh network call every time.
+        self._buffer_module_cache = {"ts": 0.0, "data": None}
+        self._hubspot_portal_id = None  # cached once verify_hubspot() succeeds; portal id never changes
         self.app                          = self._build_app()
 
     # ── one-time key management ───────────────────────────────────────────
@@ -636,13 +653,16 @@ class DashboardServer:
         if module_id == "buildpro":
             return self._module_buildpro()
         if module_id == "candidates":
-            results = bd.list_candidates(limit=100)
+            self._ensure_hubspot_portal_id()
+            results = self._decorate_buildpro_candidates(bd.list_candidates(limit=100))
             return {"results": results, "summary": f"{len(results)} candidate(s) on file."}
         if module_id == "clients":
-            results = bd.list_clients(limit=100)
+            self._ensure_hubspot_portal_id()
+            results = self._decorate_buildpro_clients(bd.list_clients(limit=100))
             return {"results": results, "summary": f"{len(results)} client(s) on file."}
         if module_id == "prospects":
-            results = bd.list_clients(status="prospect", limit=100)
+            self._ensure_hubspot_portal_id()
+            results = self._decorate_buildpro_clients(bd.list_clients(status="prospect", limit=100))
             return {"results": results, "summary": f"{len(results)} prospect(s) on file."}
         if module_id == "jobs":
             results = bd.list_jobs(limit=100)
@@ -663,7 +683,7 @@ class DashboardServer:
         if module_id == "reports":
             return self._module_reports()
         if module_id == "email":
-            return self._module_email()
+            return self._module_email(query)
         if module_id == "calendar":
             return self._module_calendar()
         if module_id in ("hubspot", "hubspot-contacts", "hubspot-companies"):
@@ -842,6 +862,69 @@ class DashboardServer:
             health["knowledge"] = "RUNTIME_FAILED"
         return health
 
+    def _hubspot_portal_url(self, kind: str, record_id: str | None) -> str | None:
+        """'Open in HubSpot' deep link for a contact/company record — Lee's
+        instruction that HubSpot stays the authoritative CRM record and
+        /3d never builds a duplicate detail view: every BuildPro
+        candidate/client/prospect/match that's actually linked to a real
+        HubSpot record (hubspot_contact_id/hubspot_company_id) should
+        resolve straight to that record instead. Returns None (never a
+        broken link) when there's no record id or the portal id hasn't
+        been discovered yet — the portal id itself comes from a live
+        verify_hubspot() call the module functions below already make;
+        cached here since it never changes once known, so it costs one
+        real network round-trip total, not one per record rendered."""
+        if not record_id:
+            return None
+        portal_id = self._hubspot_portal_id
+        if not portal_id:
+            return None
+        path = "contact" if kind == "contact" else "company"
+        return f"https://app.hubspot.com/contacts/{portal_id}/{path}/{record_id}"
+
+    def _remember_hubspot_portal_id(self, verify: dict) -> None:
+        if self._hubspot_portal_id or not verify.get("verified"):
+            return
+        account = verify.get("account") or {}
+        portal_id = account.get("portalId") or account.get("portal_id") or account.get("hub_id")
+        if portal_id:
+            self._hubspot_portal_id = str(portal_id)
+
+    def _ensure_hubspot_portal_id(self) -> None:
+        """Lazily discovers and caches the HubSpot portal id so BuildPro
+        candidate/client/prospect/match views (not just the HubSpot
+        module itself) can render 'Open in HubSpot' links. A no-op (no
+        network call) after the first successful lookup — the portal id
+        never changes for a given account — and a cheap no-op every time
+        if HubSpot genuinely isn't configured, same as every other
+        'live check on module open' path in this file."""
+        if self._hubspot_portal_id:
+            return
+        try:
+            verify = hubspot_integration.verify_hubspot()
+        except Exception:
+            return
+        self._remember_hubspot_portal_id(verify)
+
+    def _decorate_hubspot_contacts(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to raw HubSpot contact records (top-level 'id')."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("contact", r.get("id"))} for r in records]
+
+    def _decorate_hubspot_companies(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to raw HubSpot company records (top-level 'id')."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("company", r.get("id"))} for r in records]
+
+    def _decorate_buildpro_candidates(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to buildpro_data candidate rows — None
+        (never a broken link) for a candidate with no hubspot_contact_id,
+        e.g. one that only ever came in through the Gmail intake chain
+        before a successful HubSpot sync."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("contact", r.get("hubspot_contact_id"))} for r in records]
+
+    def _decorate_buildpro_clients(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to buildpro_data client rows."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("company", r.get("hubspot_company_id"))} for r in records]
+
     def _module_hubspot(self) -> dict:
         """Real HubSpot module — verify_hubspot() is a live, lightweight
         auth check (see actions/hubspot_integration.py), then a small
@@ -853,7 +936,8 @@ class DashboardServer:
             verify = hubspot_integration.verify_hubspot()
         except Exception as e:
             verify = {"configured": False, "verified": False, "status": f"ERROR:{e}"}
-        data: dict = {"status": verify, "health_status": _verify_to_health_status(verify)}
+        self._remember_hubspot_portal_id(verify)
+        data: dict = {"status": verify, "health_status": _verify_to_health_status(verify), "hubspot_portal_id": self._hubspot_portal_id}
         if not verify.get("verified"):
             data["recent_contacts"] = []
             data["recent_companies"] = []
@@ -861,15 +945,18 @@ class DashboardServer:
             return data
         try:
             contacts = hubspot_integration.get_contacts(limit=10)
-            data["recent_contacts"] = contacts.get("results", []) if contacts.get("ok") else []
+            data["recent_contacts"] = self._decorate_hubspot_contacts(contacts.get("results", []) if contacts.get("ok") else [])
         except Exception:
             data["recent_contacts"] = []
         try:
             companies = hubspot_integration.get_companies(limit=10)
-            data["recent_companies"] = companies.get("results", []) if companies.get("ok") else []
+            data["recent_companies"] = self._decorate_hubspot_companies(companies.get("results", []) if companies.get("ok") else [])
         except Exception:
             data["recent_companies"] = []
         return data
+
+    _BUFFER_MODULE_CACHE_TTL = 60           # normal: avoid re-hitting Buffer on rapid repeat opens
+    _BUFFER_MODULE_CACHE_TTL_RATE_LIMITED = 300  # back off harder once Buffer has actually 429'd us
 
     def _module_social(self) -> dict:
         """Real Buffer/social module — status, connected channels, and
@@ -879,7 +966,24 @@ class DashboardServer:
         carry it, and channel dicts are defensively stripped of anything
         that looks like a credential field before being sent to the
         browser. User-initiated (opened from the Nucleus tree), not
-        polled."""
+        polled.
+
+        2026-09-03 finding: this used to fire 3 live Buffer GraphQL calls
+        (verify + channels + capabilities) on every single open with no
+        caching at all — a genuinely healthy token showed
+        "UNAVAILABLE:429" after a few normal opens because WE were the
+        rate limit, not because Buffer or the token were unhealthy. Now
+        cached briefly (see the TTLs above); a 429 gets cached longer so
+        the next open doesn't immediately re-trigger the same limit."""
+        cached = self._buffer_module_cache.get("data")
+        if cached is not None:
+            ttl = (
+                self._BUFFER_MODULE_CACHE_TTL_RATE_LIMITED
+                if str(cached.get("status", {}).get("status", "")).startswith("RATE_LIMITED")
+                else self._BUFFER_MODULE_CACHE_TTL
+            )
+            if time.time() - self._buffer_module_cache["ts"] < ttl:
+                return {**cached, "cached": True}
         try:
             verify = buffer_integration.verify_buffer()
         except Exception as e:
@@ -888,7 +992,11 @@ class DashboardServer:
         if not verify.get("verified"):
             data["channels"] = []
             data["scheduling_capabilities"] = {"configured": verify.get("configured", False), "status": verify.get("status"), "capabilities": {}}
-            data["note"] = "NOT AVAILABLE" if not verify.get("configured") else "NOT AVAILABLE — Buffer check failed."
+            if str(verify.get("status", "")).startswith("RATE_LIMITED"):
+                data["note"] = verify.get("detail") or "RATE LIMITED — Buffer is throttling this token right now; try again shortly."
+            else:
+                data["note"] = "NOT AVAILABLE" if not verify.get("configured") else "NOT AVAILABLE — Buffer check failed."
+            self._buffer_module_cache = {"ts": time.time(), "data": data}
             return data
         try:
             channels_result = buffer_integration.get_channels()
@@ -904,6 +1012,7 @@ class DashboardServer:
             data["scheduling_capabilities"] = buffer_integration.discover_scheduling_capabilities()
         except Exception as e:
             data["scheduling_capabilities"] = {"configured": True, "status": f"ERROR:{e}", "capabilities": {}}
+        self._buffer_module_cache = {"ts": time.time(), "data": data}
         return data
 
     def _module_files(self, query: str) -> dict:
@@ -982,12 +1091,76 @@ class DashboardServer:
             pass
         return {"system_status": get_system_status(), "report_files": report_files}
 
-    def _module_email(self) -> dict:
+    def _module_email(self, query: str = "") -> dict:
+        """Real Gmail module — the live inbox itself (sender/subject/date/
+        classification/attachments/processing status), not just whether
+        Gmail is authorized.
+
+        2026-09-03 finding: this used to unconditionally return "Email is
+        authorized. Live content retrieval isn't wired into this view
+        yet." — Gmail was already a real, working, tested integration
+        (actions/gmail_integration.py's list_messages()/classify_message(),
+        the same functions the scheduled buildpro_email_monitor/
+        buildpro_candidate_intake/buildpro_client_intake agents already
+        run every hour) that this specific view simply never called.
+        User-initiated (opened from the Nucleus tree), not polled, so a
+        live Gmail call here is fine — same standard as
+        _module_hubspot()/_module_social(). Defaults to the same in:inbox
+        scope agent_orchestrator.py's _INTAKE_QUERY uses (never is:unread
+        — see that module's 2026-09-02 finding: is:unread silently and
+        permanently excludes every message anyone with mailbox access has
+        ever opened), and honors an explicit search query the same way
+        _module_files()/_module_knowledge() do.
+
+        'processed'/'processed_as' cross-references buildpro_data's real
+        per-message dedup table (is_message_processed) — the same table
+        the scheduled intake agents write to — so this honestly reflects
+        whether JARVIS already acted on a message rather than guessing."""
         try:
             status = google_auth.get_credential_status()
         except Exception as e:
             status = {"authorized": False, "credential_file": "unknown", "error": str(e)}
-        return {"configured": bool(status.get("authorized")), "status": status}
+        if not status.get("authorized"):
+            return {"configured": False, "status": status, "messages": [], "note": "Gmail isn't authorized yet — run the one-time Google sign-in to enable this view."}
+        from actions import gmail_integration
+        gmail_query = query.strip() if query and query.strip() else "in:inbox"
+        try:
+            r = gmail_integration.list_messages(query=gmail_query, max_results=20)
+        except Exception as e:
+            return {"configured": True, "status": status, "messages": [], "note": f"Gmail scan failed: {e}"}
+        if not r.get("ok"):
+            return {
+                "configured": True, "status": status, "messages": [], "query": gmail_query,
+                "note": f"Gmail scan failed ({r.get('state')}): {r.get('detail')}",
+            }
+        messages = []
+        for m in r.get("messages", []):
+            message_id = m.get("id") or ""
+            classification = gmail_integration.classify_message(m)
+            processed_candidate = bd.is_message_processed(message_id, "candidate_intake")
+            processed_client = bd.is_message_processed(message_id, "client_intake")
+            attachments = m.get("attachments") or []
+            messages.append({
+                "id": message_id,
+                "sender": m.get("sender"),
+                "subject": m.get("subject"),
+                "date": m.get("date"),
+                "snippet": m.get("snippet"),
+                "classification": classification,
+                "unread": "UNREAD" in (m.get("labels") or []),
+                "has_attachments": bool(attachments),
+                "attachment_names": [a.get("filename") for a in attachments if a.get("filename")],
+                "processed": processed_candidate or processed_client,
+                "processed_as": "candidate_intake" if processed_candidate else ("client_intake" if processed_client else None),
+            })
+        relevant = sum(1 for m in messages if m["classification"] in ("candidate_reply", "client_inquiry"))
+        return {
+            "configured": True,
+            "status": status,
+            "query": gmail_query,
+            "messages": messages,
+            "summary": f"{len(messages)} message(s) in view ({relevant} candidate/client-relevant, {sum(1 for m in messages if m['processed'])} already processed by JARVIS).",
+        }
 
     def _module_calendar(self) -> dict:
         try:

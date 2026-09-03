@@ -703,6 +703,27 @@ class ToolExecutor:
                             result={"company_name": company_name, "action": r.get("action")}, error=None if r["ok"] else r.get("detail"),
                             external_system="hubspot", reference_id=r.get("id"),
                         )
+            elif haction == "sync":
+                # Manual on-demand trigger for actions/buildpro_sync.py —
+                # the same real bulk mirror the buildpro_hubspot_sync
+                # agent already runs automatically every hour (see
+                # agent_orchestrator.py's _buildpro_hubspot_sync_handler).
+                # Safe/idempotent: read from HubSpot, write locally only,
+                # deduped by hubspot_contact_id/hubspot_company_id.
+                from actions import buildpro_sync
+                r = await loop.run_in_executor(None, lambda: buildpro_sync.sync_all(limit=200))
+                contacts, companies = r["contacts"], r["companies"]
+                if contacts["state"] == "NOT_CONFIGURED":
+                    result = "HubSpot isn't configured — nothing to sync."
+                else:
+                    result = (
+                        f"HubSpot sync done: {contacts['created']} candidate(s) created, "
+                        f"{contacts['updated']} updated; {companies['created']} client(s) created, "
+                        f"{companies['updated']} updated."
+                    )
+                    errors = contacts["errors"] + companies["errors"]
+                    if errors:
+                        result += f" {len(errors)} record(s) failed — see the /3d activity feed."
             else:
                 result = f"Unknown hubspot action: {haction}"
 

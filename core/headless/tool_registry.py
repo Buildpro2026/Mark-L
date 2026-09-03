@@ -698,7 +698,13 @@ TOOL_DECLARATIONS = [
             "— property defaults to email for contacts, name for "
             "companies), 'upsert_contact'/'upsert_company' (creates a REAL "
             "record if none matches, or updates the existing one if a "
-            "match is found by email/name — never creates a duplicate). "
+            "match is found by email/name — never creates a duplicate), "
+            "'sync' (pulls ALL real HubSpot contacts/companies into "
+            "BuildPro's own candidate/client tables right now, deduped by "
+            "HubSpot id — safe and idempotent, always safe to call; this "
+            "also runs automatically every hour, so 'sync' is only needed "
+            "to force it immediately, e.g. right after connecting HubSpot "
+            "or when the user asks to refresh BuildPro from HubSpot now). "
             "Only call 'upsert_contact'/'upsert_company' when the user has "
             "EXPLICITLY stated what to add/change — never invent property "
             "values or guess at a contact/company the user didn't name."
@@ -706,7 +712,7 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":        {"type": "STRING", "description": "status | list_contacts | list_companies | search_contacts | search_companies | upsert_contact | upsert_company"},
+                "action":        {"type": "STRING", "description": "status | list_contacts | list_companies | search_contacts | search_companies | upsert_contact | upsert_company | sync"},
                 "query":         {"type": "STRING", "description": "Search term, for 'search_contacts'/'search_companies'"},
                 "email":         {"type": "STRING", "description": "Contact email — the dedup key for 'upsert_contact'"},
                 "company_name":  {"type": "STRING", "description": "Company name — the dedup key for 'upsert_company'"},

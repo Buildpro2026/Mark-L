@@ -143,6 +143,18 @@ def _graphql(query: str, variables: dict[str, Any] | None = None, timeout: int =
 
 
 def verify_buffer() -> dict[str, Any]:
+    """2026-09-03 finding: a live /3d Buffer/Social module open was
+    returning "UNAVAILABLE:429" — lumped in with every other failure
+    under the generic UNAVAILABLE bucket, which reads exactly like a bad
+    token even though it isn't one. A 429 here is Buffer's own GraphQL
+    API rate-limiting this token (see get_channels()/
+    discover_scheduling_capabilities() below, which each also call
+    _graphql() — three live calls can fire from a single module open,
+    with zero caching on the caller side; dashboard/server.py's
+    _module_social() now caches this result briefly for exactly that
+    reason). Labelled RATE_LIMITED so the UI/health surface can say so
+    honestly instead of showing a red "auth failed"-looking status for a
+    token that's actually fine."""
     token = get_buffer_token()
     if not token:
         return {"configured": False, "authenticated": False, "verified": False, "functional": False, "status": "NOT CONFIGURED"}
@@ -156,8 +168,21 @@ def verify_buffer() -> dict[str, Any]:
             return {"configured": True, "authenticated": True, "verified": True, "functional": True, "status": "VERIFIED", "data": account}
         return {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": "UNAVAILABLE:empty response"}
     except requests.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else "?"
-        return {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": f"UNAVAILABLE:{code}"}
+        code = exc.response.status_code if exc.response is not None else None
+        if code == 429:
+            retry_after = None
+            try:
+                retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else None
+            except Exception:
+                retry_after = None
+            detail = "Buffer's API is rate-limiting this token right now — not an authentication problem."
+            if retry_after:
+                detail += f" Retry after {retry_after}s."
+            return {
+                "configured": True, "authenticated": False, "verified": False, "functional": False,
+                "status": "RATE_LIMITED:429", "detail": detail,
+            }
+        return {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": f"UNAVAILABLE:{code if code is not None else '?'}"}
     except Exception as exc:
         return {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": f"UNAVAILABLE:{exc}"}
 
