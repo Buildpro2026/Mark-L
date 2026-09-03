@@ -95,6 +95,28 @@ CARTESIA_API_VERSION = _env("CARTESIA_API_VERSION", "2026-03-01")
 # Where JARVIS calls when he's the one initiating (E.164, e.g. +13125550142).
 JARVIS_OWNER_PHONE = _env("JARVIS_OWNER_PHONE")
 
+# ── Product-data discovery (2026-09-03, autonomous-CEO/COS spec Section
+# FIFTH) ────────────────────────────────────────────────────────────────
+# Amazon's own Product Advertising API requires an approved Associates
+# account (and, per Amazon's policy, 3 qualifying sales in the trailing 180
+# days just to KEEP API access) — nothing in this codebase has that
+# credential, so it is deliberately not the default path. This is a
+# provider-agnostic key/URL pair for a third-party product-data API (e.g.
+# Rainforest API, which mirrors Amazon listings for a plain API key with no
+# Associates approval needed) — see actions/ddf_discovery.py. Absent, real
+# discovery honestly reports NOT_CONFIGURED; nothing here fabricates data.
+PRODUCT_DATA_API_KEY = _env("PRODUCT_DATA_API_KEY")
+PRODUCT_DATA_API_PROVIDER = _env("PRODUCT_DATA_API_PROVIDER", "rainforest")
+PRODUCT_DATA_API_URL = _env("PRODUCT_DATA_API_URL", "https://api.rainforestapi.com/request")
+
+# ── CEO operating cycle (Section THIRD) ─────────────────────────────────
+# UTC hour the autonomous morning cycle targets. No per-user timezone
+# concept exists anywhere else in this codebase (see BackgroundWorker's
+# other loops, all plain interval polls) — documented here rather than
+# silently assumed. Runs at most once per UTC calendar date; see
+# actions/ceo_operating_cycle.py's own dedup table for the exact contract.
+JARVIS_CEO_CYCLE_HOUR_UTC = int(_env("JARVIS_CEO_CYCLE_HOUR_UTC", "11") or 11)  # ~06:00 US Central
+
 def summarize() -> dict:
     return {
         "data_dir": str(DATA_DIR),
@@ -122,4 +144,7 @@ def summarize() -> dict:
         "cartesia_outbound_calls_ready": bool(
             CARTESIA_API_KEY and CARTESIA_AGENT_ID and CARTESIA_PHONE_NUMBER_ID
         ),
+        "product_data_api_key_env_set": bool(PRODUCT_DATA_API_KEY),
+        "product_data_api_provider": PRODUCT_DATA_API_PROVIDER,
+        "ceo_cycle_hour_utc": JARVIS_CEO_CYCLE_HOUR_UTC,
     }

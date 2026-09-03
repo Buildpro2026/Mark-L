@@ -39,12 +39,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 from actions import agent_orchestrator as agent_scheduler_lock
 from actions.agent_orchestrator import orchestrator as agent_orchestrator
 from actions import background_monitor
 from actions import business_intelligence as biz_intel
+from actions import ceo_operating_cycle
 from actions.proactive import ProactiveEngine
+from core.headless import config as headless_config
 from memory import config_manager
 
 logger = logging.getLogger("jarvis.headless.background")
@@ -57,6 +60,12 @@ PROACTIVE_POLL_SECS = 60
 # deduplicates by task id, so this poll rate never turns into repeat texts.
 APPROVAL_NOTIFY_POLL_SECS = 300
 OBJECTIVE_LOOP_POLL_SECS = 21_600  # 6 hours — matches get_stale_autonomous_agents()'s default staleness
+# How often to check whether it's time for the daily CEO operating cycle
+# (Lee's autonomous-CEO/COS spec, Section THIRD). 15 minutes gives a UTC-hour
+# target reasonable precision without being a busy poll; the cycle itself is
+# idempotent per UTC date (see ceo_operating_cycle.already_ran_today), so a
+# missed or repeated tick near the boundary can never double-run it.
+CEO_CYCLE_POLL_SECS = 900
 
 
 class BackgroundWorker:
@@ -81,6 +90,7 @@ class BackgroundWorker:
             asyncio.create_task(self._run_proactive_observer(), name="proactive_observer"),
             asyncio.create_task(self._run_objective_loop(), name="objective_loop"),
             asyncio.create_task(self._run_approval_notifier(), name="approval_notifier"),
+            asyncio.create_task(self._run_ceo_cycle_loop(), name="ceo_operating_cycle"),
         ]
 
     async def stop(self) -> None:
@@ -236,3 +246,28 @@ class BackgroundWorker:
                 await self.run_proactive_check_once()
             except Exception as e:
                 logger.warning("proactive observer check failed: %s", e)
+
+    # ── CEO operating cycle (Section THIRD) ──────────────────────────────
+    # Deliberately thin, same pattern as every other loop here: the real
+    # WAKE->REPORT logic lives in actions/ceo_operating_cycle.py so it can
+    # be unit-tested and manually triggered without an event loop. This
+    # just decides WHEN to call it — once the current UTC hour reaches the
+    # configured target, and at most once per UTC calendar date (enforced
+    # by ceo_operating_cycle.already_ran_today, not by this poll cadence,
+    # so a restart mid-day can never double-run it).
+
+    async def run_ceo_cycle_once(self, force: bool = False) -> dict:
+        return await asyncio.to_thread(ceo_operating_cycle.run_cycle, force)
+
+    async def _run_ceo_cycle_loop(self) -> None:
+        await asyncio.sleep(20)   # brief settle time after process start
+        while not self._stopping:
+            try:
+                now = datetime.now(timezone.utc)
+                if now.hour >= headless_config.JARVIS_CEO_CYCLE_HOUR_UTC:
+                    if not await asyncio.to_thread(ceo_operating_cycle.already_ran_today):
+                        result = await self.run_ceo_cycle_once()
+                        logger.info("CEO operating cycle: %s", result.get("state"))
+            except Exception as e:
+                logger.warning("CEO operating cycle check failed: %s", e)
+            await asyncio.sleep(CEO_CYCLE_POLL_SECS)

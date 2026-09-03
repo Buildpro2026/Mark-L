@@ -813,16 +813,24 @@ TOOL_DECLARATIONS = [
             "approved=true unless Lee actually said to publish. "
             "'high_ticket_picks' reports today's two high-ticket "
             "selections. 'you_might_have_missed' and 'this_weeks_hottest' "
-            "surface older but still-strong products. 'status' reports "
-            "one product's current lifecycle stage. Posting about a "
-            "published product on social media is a separate step — use "
-            "the social_post tool for that, this tool only manages the "
-            "product catalog itself."
+            "surface older but still-strong products. 'trending' answers "
+            "'what's on Deals Trending' — the same ranking (trend "
+            "strength, then views) the public /trending page and the "
+            "morning brief already use. 'status' reports one product's "
+            "current lifecycle stage. 'discover' runs real product "
+            "discovery against the configured product-data API (never "
+            "invents results — honestly reports NOT_CONFIGURED if no "
+            "provider key is set; when it IS configured this is how new "
+            "candidates get found without Lee hand-building a CSV; "
+            "discovered products are saved but never published). Posting "
+            "about a published product on social media is a separate "
+            "step — use the social_post tool for that, this tool only "
+            "manages the product catalog itself."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "add_product | publish | status | high_ticket_picks | you_might_have_missed | this_weeks_hottest"},
+                "action": {"type": "STRING", "description": "add_product | publish | status | high_ticket_picks | you_might_have_missed | this_weeks_hottest | trending | discover"},
                 "product_id": {"type": "STRING", "description": "Target product id, for 'publish'/'status'. Omit on 'add_product' to auto-generate one."},
                 "name": {"type": "STRING", "description": "Product name, for 'add_product'"},
                 "category": {"type": "STRING", "description": "Product category, for 'add_product'"},
@@ -841,6 +849,7 @@ TOOL_DECLARATIONS = [
                 "tags": {"type": "STRING", "description": "Comma-separated tags, for 'add_product' (optional)"},
                 "approved": {"type": "BOOLEAN", "description": "Must be true to actually publish, for 'publish' — only set true on Lee's explicit instruction"},
                 "limit": {"type": "INTEGER", "description": "Max results, for the read-only actions (default varies)"},
+                "queries": {"type": "STRING", "description": "Comma-separated search terms for 'discover' (optional — defaults to a small fixed rotation)"},
             },
             "required": ["action"],
         },

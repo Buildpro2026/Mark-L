@@ -160,3 +160,65 @@ def test_unknown_action_reports_a_clear_error():
     l = _live(main)
     response = _run(l._execute_tool(_make_fc(action="not_a_real_action")))
     assert "unknown daily_deal_finders action" in response.response["result"].lower()
+
+
+# ── trending (2026-09-03: "what's on Deals Trending" used to have no ────
+# tool action at all — get_trending_deals() existed but nothing exposed it) ─
+
+def test_trending_reports_honestly_when_nothing_is_trending():
+    main, live = _new_live()
+    l = _live(main)
+    response = _run(l._execute_tool(_make_fc(action="trending")))
+    assert "nothing is trending yet" in response.response["result"].lower()
+
+
+def test_trending_surfaces_a_published_product():
+    main, live = _new_live()
+    l = _live(main)
+    _run(l._execute_tool(_make_fc(action="add_product", name="Trendy Gadget", price=19.99, product_id="tg1")))
+    _run(l._execute_tool(_make_fc(action="publish", product_id="tg1", approved=True)))
+
+    response = _run(l._execute_tool(_make_fc(action="trending")))
+    assert "trendy gadget" in response.response["result"].lower()
+
+
+# ── discover (2026-09-03: real product discovery, replaces "JARVIS can't ──
+# pull Amazon products, build a CSV" for the configured case) ────────────
+
+def test_discover_reports_not_configured_without_an_api_key(monkeypatch):
+    from core.headless import config as hc
+    monkeypatch.setattr(hc, "PRODUCT_DATA_API_KEY", None)
+    main, live = _new_live()
+    l = _live(main)
+    response = _run(l._execute_tool(_make_fc(action="discover")))
+    result = response.response["result"].lower()
+    assert "product_data_api_key" in result or "not configured" in result or "no product-data api key" in result
+
+
+def test_discover_saves_candidates_when_a_source_is_wired(monkeypatch):
+    from core.headless import config as hc
+    from actions import ddf_discovery
+    monkeypatch.setattr(hc, "PRODUCT_DATA_API_KEY", "fake-key")
+
+    class _FakeSource:
+        name = "fake"
+
+        def search(self, query, limit):
+            return [{
+                "name": "Discovered Gadget", "source": "fake_api", "price": 15.0, "current_price": 15.0,
+                "product_id": "disc-1", "retailer": "amazon",
+                "sales_signal": 0, "demand": 0, "trend_strength": 0, "competition": 0,
+                "content_potential": 0, "repeatability": 0, "historical_performance": 0,
+            }]
+
+    monkeypatch.setattr(ddf_discovery, "_active_source", lambda: _FakeSource())
+    main, live = _new_live()
+    l = _live(main)
+    response = _run(l._execute_tool(_make_fc(action="discover", queries="testcat")))
+    result = response.response["result"].lower()
+    assert "1 new candidate" in result
+
+    from actions import daily_deal_finders as ddf
+    product = ddf.get_product("disc-1")
+    assert product is not None
+    assert product["status"] == ddf.STATUS_DISCOVERED

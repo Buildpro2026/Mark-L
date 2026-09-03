@@ -1090,6 +1090,32 @@ class ToolExecutor:
                     "; ".join(f"{p['name']} (id {p['product_id']}, score {p['rank_score']})" for p in hottest)
                     if hottest else "Nothing published in the last 7 days yet."
                 )
+            elif daction == "trending":
+                limit = int(args.get("limit") or 10)
+                trending = await loop.run_in_executor(None, lambda: ddf.get_trending_deals(limit=limit))
+                result = (
+                    "; ".join(f"{p['name']} (id {p['product_id']}, trend {p.get('trend_strength')})" for p in trending)
+                    if trending else "Nothing is trending yet — no published products have trend/view data."
+                )
+            elif daction == "discover":
+                from actions import ddf_discovery
+                queries = args.get("queries")
+                if isinstance(queries, str):
+                    queries = [q.strip() for q in queries.split(",") if q.strip()]
+                r = await loop.run_in_executor(None, lambda: ddf_discovery.discover_new_products(queries=queries))
+                audit_log.record(
+                    "ddf_discover_products", execution_status="succeeded" if r.get("ok") else "failed",
+                    result={"saved": r.get("saved"), "state": r.get("state")}, error=None if r.get("ok") else r.get("detail"),
+                    external_system=r.get("provider") or "ddf_discovery",
+                )
+                if r.get("state") == "NOT_CONFIGURED":
+                    result = r["detail"]
+                elif r.get("ok"):
+                    result = f"Discovery ran ({r.get('provider')}): {r.get('saved', 0)} new candidate(s) saved as discovered — not published."
+                    if r.get("errors"):
+                        result += f" {len(r['errors'])} querie(s) hit an error."
+                else:
+                    result = f"Discovery failed: {r.get('detail') or 'unknown error'}"
             else:
                 result = f"Unknown daily_deal_finders action: {daction}"
 
