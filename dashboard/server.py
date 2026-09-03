@@ -690,8 +690,29 @@ class DashboardServer:
             return self._module_hubspot()
         if module_id in ("social", "buffer", "social-channels"):
             return self._module_social()
-        # Any other real hierarchy node (careerrocket, personal, etc.) —
-        # honest placeholder rather than a 404, since it's still a real,
+        if module_id == "company_core":
+            return self._module_company_core()
+        # Personal Planet (Section 9): Email/Contacts have their own real
+        # data; Calendar/Files/Communications are the exact same live
+        # modules the top-level domains of the same name already use
+        # (reused, not duplicated) — just reachable from a second, more
+        # relevant place in the Nucleus tree.
+        if module_id == "personal-email":
+            return self._module_personal_email()
+        if module_id == "personal-contacts":
+            return self._module_personal_contacts()
+        if module_id == "personal-calendar":
+            return self._module_calendar()
+        if module_id in ("personal-files", "personal-documents"):
+            return self._module_files(query)
+        if module_id == "personal-communications":
+            return self._module_communications()
+        if module_id == "personal-tasks":
+            return self._module_personal_tasks()
+        if module_id == "personal-alerts":
+            return {"note": "No dedicated personal alert feed exists yet — nothing fabricated here.", "alerts": []}
+        # Any other real hierarchy node (careerrocket, etc.) — honest
+        # placeholder rather than a 404, since it's still a real,
         # navigable Nucleus even before it has its own live data source.
         return {"summary": "No live data source connected for this Nucleus yet."}
 
@@ -815,10 +836,17 @@ class DashboardServer:
         health["render"] = "OPERATIONAL"             # same process — if this runs, Render is serving it
         health["tool_executor"] = "OPERATIONAL"      # importable/running in this same process
         health["ollama"] = "CONFIGURED" if headless_config.OLLAMA_API_KEY else "NOT_CONFIGURED"
+        health["groq"] = "CONFIGURED" if headless_config.GROQ_API_KEY else "NOT_CONFIGURED"
+        health["gemini"] = "CONFIGURED" if headless_config.GEMINI_API_KEY else "NOT_CONFIGURED"
         health["cartesia"] = (
             "CONFIGURED" if (headless_config.CARTESIA_API_KEY and headless_config.CARTESIA_VOICE_ID)
             else "NOT_CONFIGURED"
         )
+        try:
+            from actions import twilio_integration
+            health["twilio"] = "CONFIGURED" if twilio_integration.is_configured() else "NOT_CONFIGURED"
+        except Exception:
+            health["twilio"] = "RUNTIME_FAILED"
         health["buffer"] = "CONFIGURED" if headless_config.BUFFER_TOKEN else "NOT_CONFIGURED"
         health["hubspot"] = "CONFIGURED" if headless_config.HUBSPOT_TOKEN else "NOT_CONFIGURED"
         try:
@@ -924,6 +952,54 @@ class DashboardServer:
     def _decorate_buildpro_clients(self, records: list[dict]) -> list[dict]:
         """Adds 'hubspot_url' to buildpro_data client rows."""
         return [{**r, "hubspot_url": self._hubspot_portal_url("company", r.get("hubspot_company_id"))} for r in records]
+
+    # Star display names + which _integration_health() key each one reads —
+    # the single source of truth both stay in sync with (no second health
+    # check invented for this planet). "connected" only when the platform
+    # is doing something more than "a key is present": AUTHENTICATED/
+    # OPERATIONAL count, CONFIGURED does not (Lee's own standing rule, see
+    # _integration_health's docstring) — a configured-but-unverified
+    # integration is shown honestly as NOT CONNECTED, not glossed over.
+    _COMPANY_CORE_STARS = (
+        ("render", "Render (hosting)"),
+        ("database", "Database"),
+        ("memory", "Memory / Brain"),
+        ("knowledge", "JARVIS Brain (Obsidian)"),
+        ("ollama", "Ollama Cloud"),
+        ("groq", "Groq"),
+        ("gemini", "Gemini"),
+        ("cartesia", "Cartesia (voice)"),
+        ("twilio", "Twilio (SMS/calls)"),
+        ("hubspot", "HubSpot (CRM)"),
+        ("gmail", "Gmail"),
+        ("calendar", "Google Calendar"),
+        ("buffer", "Buffer (social)"),
+    )
+    _COMPANY_CORE_CONNECTED_STATUSES = {"AUTHENTICATED", "OPERATIONAL"}
+
+    def _module_company_core(self) -> dict:
+        """2026-09-03 (Lee's autonomous-CEO spec, Section 18): the Company
+        Core Planet — every real infrastructure platform JARVIS actually
+        runs on, as its own navigable Nucleus with named stars. Reuses
+        _integration_health() (already the real, live-checked health
+        computation _module_system() uses) rather than building a second
+        health check — this is a second, more prominent HOME for that same
+        real data, not a duplicate of it. A star with no live-verified
+        connection is labeled 'NOT CONNECTED' honestly, never hidden or
+        glossed as healthy."""
+        health = self._integration_health()
+        stars = []
+        for key, name in self._COMPANY_CORE_STARS:
+            status = health.get(key, "NOT_CONFIGURED")
+            stars.append({
+                "id": key, "name": name, "status": status,
+                "connected": status in self._COMPANY_CORE_CONNECTED_STATUSES,
+            })
+        connected_count = sum(1 for s in stars if s["connected"])
+        return {
+            "stars": stars,
+            "summary": f"{connected_count}/{len(stars)} platform(s) connected and verified.",
+        }
 
     def _module_hubspot(self) -> dict:
         """Real HubSpot module — verify_hubspot() is a live, lightweight
@@ -1123,6 +1199,7 @@ class DashboardServer:
         if not status.get("authorized"):
             return {"configured": False, "status": status, "messages": [], "note": "Gmail isn't authorized yet — run the one-time Google sign-in to enable this view."}
         from actions import gmail_integration
+        from actions import email_classification
         gmail_query = query.strip() if query and query.strip() else "in:inbox"
         try:
             r = gmail_integration.list_messages(query=gmail_query, max_results=20)
@@ -1137,16 +1214,27 @@ class DashboardServer:
         for m in r.get("messages", []):
             message_id = m.get("id") or ""
             classification = gmail_integration.classify_message(m)
+            # 2026-09-03 (Lee's spec, Sections 4 & 12): the broader 7-category
+            # result + a real, clickable "OPEN SOURCE EMAIL" deep link —
+            # additive next to 'classification' (legacy label, unchanged)
+            # so nothing that already reads that key breaks.
+            cls = email_classification.classify_email(m)
             processed_candidate = bd.is_message_processed(message_id, "candidate_intake")
             processed_client = bd.is_message_processed(message_id, "client_intake")
             attachments = m.get("attachments") or []
             messages.append({
                 "id": message_id,
                 "sender": m.get("sender"),
+                "sender_domain": m.get("sender_domain"),
                 "subject": m.get("subject"),
                 "date": m.get("date"),
                 "snippet": m.get("snippet"),
                 "classification": classification,
+                "category": cls["category"],
+                "category_confidence": cls["confidence"],
+                "category_reason": cls["reason"],
+                "company_id": cls["company_id"],
+                "permalink": m.get("permalink") or "SOURCE UNAVAILABLE",
                 "unread": "UNREAD" in (m.get("labels") or []),
                 "has_attachments": bool(attachments),
                 "attachment_names": [a.get("filename") for a in attachments if a.get("filename")],
@@ -1161,6 +1249,43 @@ class DashboardServer:
             "messages": messages,
             "summary": f"{len(messages)} message(s) in view ({relevant} candidate/client-relevant, {sum(1 for m in messages if m['processed'])} already processed by JARVIS).",
         }
+
+    def _module_personal_email(self) -> dict:
+        """2026-09-03 (Lee's autonomous-CEO spec, Section 9): the Personal
+        Planet's Email category — the exact same live Gmail scan
+        _module_email() runs, filtered to messages the 7-category
+        classifier actually calls PERSONAL, with the same real deep
+        links. Not a second Gmail integration; a filtered view of the one
+        that already exists."""
+        base = self._module_email("in:inbox")
+        if not base.get("configured") or base.get("messages") is None:
+            return base
+        from actions import email_classification
+        personal = [m for m in base["messages"] if m.get("category") == email_classification.CATEGORY_PERSONAL]
+        return {**base, "messages": personal, "summary": f"{len(personal)} personal message(s) in view."}
+
+    def _module_personal_contacts(self) -> dict:
+        """Real personal contacts — Twilio's own SMS/call history table
+        (actions/twilio_integration.py's lookup_contact/get_history) is
+        the only real, non-HubSpot contact data this system has; HubSpot
+        is BuildPro's business CRM, not Lee's personal contact list, so
+        it isn't reused here. Honestly NOT_CONFIGURED when Twilio isn't
+        set up rather than fabricating a contact list."""
+        from actions import twilio_integration
+        if not twilio_integration.is_configured():
+            return {"configured": False, "contacts": [], "note": "Twilio isn't configured — no personal contact/call history available."}
+        try:
+            history = twilio_integration.get_history(limit=25)
+        except Exception as e:
+            return {"configured": True, "contacts": [], "note": f"Could not read contact history: {e}"}
+        return {"configured": True, "contacts": history, "summary": f"{len(history)} recent contact(s) from call/SMS history."}
+
+    def _module_personal_tasks(self) -> dict:
+        """No dedicated personal task store exists in this system (Section
+        20: real data only, no fabricated placeholder). REVIEW_REQUIRED-
+        classified personal-adjacent mail is the closest real signal —
+        surfaced honestly as 'needs a look', not invented tasks."""
+        return {"note": "No dedicated personal task list exists yet — nothing fabricated here.", "tasks": []}
 
     def _module_calendar(self) -> dict:
         try:

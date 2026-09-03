@@ -35,6 +35,11 @@ DB_PATH = DATA_DIR / "jarvis2.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 BUSINESSES = {"buildpro", "careerrocket", "ddf", "general"}
+# Not enforced by add_entry() (that check is deliberately left to the
+# 'general' catch-all above for anything without its own dedicated
+# business — see actions/email_classification.py's company_id vocabulary,
+# which is Lee's spec's own literal set and is intentionally broader than
+# this historical 'business' tag).
 CATEGORIES = {
     "research", "competitors", "market_observations", "experiments",
     "decisions", "outcomes", "revenue", "lessons_learned", "recommendations",

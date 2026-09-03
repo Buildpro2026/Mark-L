@@ -573,6 +573,143 @@ def _buildpro_client_intake_handler(task: "AgentTask") -> dict:
     }
 
 
+_EMAIL_ROUTER_KIND = "email_router"
+
+
+def _email_intelligence_router_handler(task: "AgentTask") -> dict:
+    """2026-09-03 (Lee's autonomous-CEO/COS spec, Sections 4 & 8): the
+    cross-business half of email intelligence. buildpro_candidate_intake/
+    buildpro_client_intake above already fully own BUILDPRO-category mail
+    (real HubSpot/CRM records) — this agent deliberately does NOT touch
+    those, so there is exactly one system creating BuildPro CRM records,
+    not two. What this agent does is classify every inbox message with
+    the broader 7-category system (actions/email_classification.py) and
+    route the categories BuildPro's own agents don't cover:
+
+        DAILY_DEAL_FINDERS / CAREERROCKET -> a real, visible research entry
+            (business_intelligence, category='research') so a genuine
+            deal/creator lead or coaching inquiry doesn't sit invisible
+            just because it isn't a BuildPro candidate/client.
+        JARVIS                            -> a real 'risks' entry — the
+            system's own infrastructure telling on itself deserves the
+            same visibility a business risk gets, not silence.
+        REVIEW_REQUIRED                   -> a real 'risks' entry so a
+            genuinely ambiguous message surfaces for a human decision
+            instead of disappearing.
+        PERSONAL                          -> NOT persisted here at all;
+            dashboard/server.py's Personal Planet queries Gmail live and
+            filters by category, the same pattern _module_email already
+            uses for BuildPro mail. Nothing to route to a business system.
+        IRRELEVANT                        -> the hard rule (Section 8):
+            NEVER creates a record, draft, or SMS of any kind. Not even a
+            log entry — counted in the summary only.
+
+    Every persisted entry carries the same provenance fields
+    (gmail_message_id/gmail_thread_id/source_url/company_id) BuildPro's
+    intake chains now write (Section 11) so nothing here is an orphan
+    record either. Dedup reuses buildpro_data's existing per-message
+    table (kind='email_router') rather than a new one — one BuildPro
+    message can appear in that table twice (once per kind), which is the
+    table's existing, intended design."""
+    from actions import google_auth
+    if not google_auth.get_credential_status().get("authorized"):
+        return {
+            "summary": "Gmail isn't authorized yet — nothing to route. Run the one-time Google sign-in to enable this agent.",
+            "configured": False,
+        }
+    from actions import gmail_integration
+    from actions import email_classification
+    from actions import business_intelligence as biz_intel
+    from actions import buildpro_data
+
+    r = gmail_integration.list_messages(query=_INTAKE_QUERY, max_results=15)
+    if not r["ok"]:
+        return {"summary": f"Gmail scan failed ({r.get('state')}): {r.get('detail')}", "configured": True, "error": r.get("detail")}
+
+    to_route = [m for m in r["messages"] if not buildpro_data.is_message_processed(m["id"], _EMAIL_ROUTER_KIND)]
+    counts = {c: 0 for c in email_classification.ALL_CATEGORIES}
+    routed: list[dict[str, Any]] = []
+
+    # business_intelligence's 'business' tag predates this spec's
+    # company_id vocabulary (Section 10) — 'ddf' not 'daily_deal_finders'
+    # for the Daily Deal Finders venture, 'general' for anything without
+    # its own dedicated business row (JARVIS-the-system, review-required).
+    # This is the one place that mapping happens; company_id itself (what
+    # gets stored on the entry's data payload and is what Section 10
+    # actually asks for) always uses the spec's own literal values.
+    _BI_BUSINESS = {
+        email_classification.CATEGORY_DDF: "ddf",
+        email_classification.CATEGORY_CAREERROCKET: "careerrocket",
+        email_classification.CATEGORY_JARVIS: "general",
+        email_classification.CATEGORY_REVIEW: "general",
+    }
+
+    for message in to_route:
+        cls = email_classification.classify_email(message)
+        category = cls["category"]
+        counts[category] += 1
+        buildpro_data.mark_message_processed(message["id"], _EMAIL_ROUTER_KIND)
+
+        if category in (email_classification.CATEGORY_BUILDPRO, email_classification.CATEGORY_PERSONAL):
+            continue  # BuildPro: owned by the dedicated intake agents. Personal: read live from Gmail, never persisted.
+        if category == email_classification.CATEGORY_IRRELEVANT:
+            continue  # Hard rule: IRRELEVANT never creates any record — not even this one.
+
+        bi_category = "risks" if category in (email_classification.CATEGORY_JARVIS, email_classification.CATEGORY_REVIEW) else "research"
+        label = {
+            email_classification.CATEGORY_DDF: "DDF Email",
+            email_classification.CATEGORY_CAREERROCKET: "CareerRocket Email",
+            email_classification.CATEGORY_JARVIS: "System Alert",
+            email_classification.CATEGORY_REVIEW: "Needs Review",
+        }[category]
+        entry_id = biz_intel.add_entry(
+            category=bi_category, business=_BI_BUSINESS[category],
+            title=f"[{label}] {message.get('subject') or '(no subject)'}",
+            content=f"From: {message.get('sender')}\nSnippet: {message.get('snippet')}\nReason: {cls['reason']}",
+            data={
+                "company_id": cls["company_id"],
+                "confidence": cls["confidence"],
+                "source_system": "gmail",
+                "gmail_message_id": message.get("id"),
+                "gmail_thread_id": message.get("thread_id"),
+                "source_url": message.get("permalink") or "SOURCE UNAVAILABLE",
+                "sender": message.get("sender"),
+            },
+        )
+        routed.append({"message_id": message["id"], "category": category, "entry_id": entry_id})
+
+    summary = (
+        f"Scanned {len(r['messages'])} message(s), routed {len(routed)} new item(s) "
+        f"({sum(1 for c in counts if counts[c]) } categories touched). "
+        + ", ".join(f"{c}: {n}" for c, n in counts.items() if n)
+    )
+    return {"summary": summary, "configured": True, "counts": counts, "routed": routed}
+
+
+def _urgent_escalation_sweep_handler(task: "AgentTask") -> dict:
+    """2026-09-03 (Lee's autonomous-CEO spec, Section 16): the tick that
+    actually makes the notification-escalation state machine real, not
+    just a function nothing ever calls. actions/approval_notifier.py's
+    notify_urgent_event() sends the initial SMS for a level-3 urgent
+    event (called by whatever detected the event); this agent is the
+    recurring sweep that escalates to a real phone call once the
+    configured window passes with no acknowledgment — mirrors the exact
+    escalate-once pattern the pre-existing approval-notification path
+    already uses, just running frequently enough (5m) for the shorter
+    urgent-event window instead of the 4h approval one. A no-op, honestly
+    reported, whenever Twilio/Cartesia/JARVIS_OWNER_PHONE aren't
+    configured (true on this deployment today) or nothing is pending."""
+    from actions import approval_notifier
+    results = approval_notifier.sweep_urgent_escalations()
+    if not results:
+        return {"summary": "No urgent events pending escalation.", "escalated": []}
+    calls = [r for r in results if r["action"] == "call"]
+    return {
+        "summary": f"Checked pending urgent events: {len(calls)} escalation call(s) placed.",
+        "escalated": results,
+    }
+
+
 def _buildpro_email_responder_handler(task: "AgentTask") -> dict:
     """J4: the real EXECUTE-capable half of the BuildPro Email Monitor
     workflow. buildpro_email_monitor_handler (SUGGEST, above) only ever
@@ -900,6 +1037,34 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="buildpro", business="buildpro",
         permission_level=PermissionLevel.SUGGEST, schedule="60m",
         handler=_buildpro_client_intake_handler,
+    ),
+    "email_intelligence_router": AgentDefinition(
+        id="email_intelligence_router", name="Email Intelligence Router",
+        description=(
+            "Classifies every inbox message into 7 categories (BUILDPRO/DAILY_DEAL_FINDERS/"
+            "CAREERROCKET/JARVIS/PERSONAL/REVIEW_REQUIRED/IRRELEVANT) and routes everything "
+            "BuildPro's own candidate/client intake agents don't already own: DDF and "
+            "CareerRocket leads become real research entries, JARVIS infra alerts and "
+            "ambiguous mail become real risk entries. IRRELEVANT never creates a record. "
+            "Read-only against Gmail; only ever writes business-intelligence entries."
+        ),
+        nucleus_id="system", business="general",
+        permission_level=PermissionLevel.SUGGEST, schedule="30m",
+        handler=_email_intelligence_router_handler,
+        autonomous_ok=True,  # pure classification + logging — safe to run unattended
+    ),
+    "urgent_escalation_sweep": AgentDefinition(
+        id="urgent_escalation_sweep", name="Urgent Escalation Sweep",
+        description=(
+            "Checks every urgent event that's been texted but not acknowledged, and places a "
+            "real phone call (via Cartesia) once it's been waiting past the configured window — "
+            "the recurring half of the notification escalation system. Never sends a first "
+            "notification itself; only escalates one already sent by notify_urgent_event()."
+        ),
+        nucleus_id="system", business="general",
+        permission_level=PermissionLevel.OBSERVE, schedule="5m",
+        handler=_urgent_escalation_sweep_handler,
+        autonomous_ok=True,
     ),
     "buildpro_email_responder": AgentDefinition(
         id="buildpro_email_responder", name="BuildPro Email Responder",

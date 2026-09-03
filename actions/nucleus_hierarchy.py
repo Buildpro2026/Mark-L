@@ -13,6 +13,33 @@ DEFAULT_HIERARCHY = {
     "kind": "central",
     "children": [
         {
+            # 2026-09-03 (Lee's autonomous-CEO spec, Section 18): the
+            # Company Core Planet — every real infrastructure platform
+            # JARVIS runs on, as its own top-level Nucleus. Star status is
+            # computed live by dashboard/server.py's _module_company_core()
+            # from the same _integration_health() check the System module
+            # already uses — a disconnected star is labeled honestly, never
+            # hidden or shown as healthy.
+            "id": "company_core",
+            "name": "Company Core",
+            "kind": "domain",
+            "children": [
+                {"id": "star-render", "name": "Render (hosting)", "kind": "category"},
+                {"id": "star-database", "name": "Database", "kind": "category"},
+                {"id": "star-memory", "name": "Memory / Brain", "kind": "category"},
+                {"id": "star-knowledge", "name": "JARVIS Brain (Obsidian)", "kind": "category"},
+                {"id": "star-ollama", "name": "Ollama Cloud", "kind": "category"},
+                {"id": "star-groq", "name": "Groq", "kind": "category"},
+                {"id": "star-gemini", "name": "Gemini", "kind": "category"},
+                {"id": "star-cartesia", "name": "Cartesia (voice)", "kind": "category"},
+                {"id": "star-twilio", "name": "Twilio (SMS/calls)", "kind": "category"},
+                {"id": "star-hubspot", "name": "HubSpot (CRM)", "kind": "category"},
+                {"id": "star-gmail", "name": "Gmail", "kind": "category"},
+                {"id": "star-calendar", "name": "Google Calendar", "kind": "category"},
+                {"id": "star-buffer", "name": "Buffer (social)", "kind": "category"},
+            ],
+        },
+        {
             "id": "buildpro",
             "name": "BuildPro",
             "kind": "domain",
@@ -60,12 +87,35 @@ DEFAULT_HIERARCHY = {
             ],
         },
         {
+            # 2026-09-03 (Lee's autonomous-CEO spec, Section 9): a real
+            # Personal Planet — every child here is either live data
+            # (Email pulls real Gmail messages classified PERSONAL by
+            # actions/email_classification.py, with real deep links) or an
+            # honest "not connected yet" placeholder (Section 20's "real
+            # data only, NO DATA if none" rule) — never a fabricated
+            # personal task/document/alert. Calendar/Files/Communications
+            # reuse the exact same live modules the top-level Calendar/
+            # Files/Communications domains already use — same functions,
+            # a second navigable path to them, not a second implementation.
             "id": "personal",
             "name": "Personal",
             "kind": "domain",
+            # 2026-09-03: display names deliberately distinct from the
+            # top-level Calendar/Files/Communications domains (never bare
+            # "Calendar"/"Files"/"Communications") — find_node_by_name()
+            # is a global, first-match lookup used by voice command
+            # resolution (Section 15), so a duplicate display name would
+            # silently make "open calendar" ambiguous. See
+            # test_hierarchy_has_no_duplicate_ids_or_names.
             "children": [
-                {"id": "notes", "name": "Notes", "kind": "category"},
-                {"id": "reminders", "name": "Reminders", "kind": "category"},
+                {"id": "personal-email", "name": "Personal Email", "kind": "category"},
+                {"id": "personal-contacts", "name": "Personal Contacts", "kind": "category"},
+                {"id": "personal-calendar", "name": "Personal Calendar", "kind": "category"},
+                {"id": "personal-documents", "name": "Personal Documents", "kind": "category"},
+                {"id": "personal-tasks", "name": "Personal Tasks", "kind": "category"},
+                {"id": "personal-communications", "name": "Personal Communications", "kind": "category"},
+                {"id": "personal-files", "name": "Personal Files", "kind": "category"},
+                {"id": "personal-alerts", "name": "Personal Alerts", "kind": "category"},
             ],
         },
         {

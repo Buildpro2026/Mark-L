@@ -101,8 +101,40 @@ def test_extract_body_walks_multipart_payload():
     assert gmail._extract_body(payload) == "plain text body"
 
 
-def test_extract_body_returns_empty_string_when_no_plain_part():
+def test_extract_body_falls_back_to_html_when_no_plain_part():
+    # 2026-09-03 fix (Lee's autonomous-CEO spec, Section 3): an HTML-only
+    # message used to silently produce an empty body — JARVIS could see
+    # the subject/snippet but never the actual content. Real candidate/
+    # client replies sent from rich-text mail clients are routinely
+    # HTML-only, so this can't stay ''.
     payload = {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(b"<p>hi</p>").decode()}}
+    assert gmail._extract_body(payload) == "hi"
+
+
+def test_extract_body_prefers_plain_over_html_when_both_present():
+    payload = {
+        "mimeType": "multipart/alternative",
+        "parts": [
+            {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(b"<p>html version</p>").decode()}},
+            {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"plain version").decode()}},
+        ],
+    }
+    assert gmail._extract_body(payload) == "plain version"
+
+
+def test_extract_body_html_fallback_strips_tags_and_converts_breaks_to_newlines():
+    html = b"<html><body><p>Hi there,</p><p>Attached is my <b>resume</b>.<br>Thanks!</p></body></html>"
+    payload = {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(html).decode()}}
+    text = gmail._extract_body(payload)
+    assert "resume" in text
+    assert "<p>" not in text and "<b>" not in text
+
+
+def test_extract_body_returns_empty_string_when_neither_plain_nor_html():
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [{"mimeType": "application/pdf", "body": {"attachmentId": "att-1"}}],
+    }
     assert gmail._extract_body(payload) == ""
 
 

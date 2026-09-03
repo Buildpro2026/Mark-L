@@ -230,3 +230,53 @@ def test_dispatcher_defaults_confirmed_to_false_when_omitted(monkeypatch):
 
     bc.browser_control(parameters={"action": "click", "text": "Learn more"})
     assert captured["confirmed"] is False
+
+
+# ── headless-cloud honesty (2026-09-03, Lee's autonomous-CEO spec, Section 13) ──
+# JARVIS running on Render has no display and no browser app of its own —
+# the "native browser" path (_open_native) used to be able to claim
+# "Opened in your default browser: ..." off nothing more than a subprocess
+# call starting, which proves nothing actually rendered anywhere. These
+# pin the honest behavior: a URL is reported as GENERATED, never OPENED,
+# whenever JARVIS can tell it's running headless in the cloud.
+
+def test_is_headless_cloud_environment_true_on_linux_with_no_display(monkeypatch):
+    monkeypatch.setattr(bc, "_OS", "Linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    assert bc._is_headless_cloud_environment() is True
+
+
+def test_is_headless_cloud_environment_false_on_linux_with_a_display(monkeypatch):
+    monkeypatch.setattr(bc, "_OS", "Linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    assert bc._is_headless_cloud_environment() is False
+
+
+def test_is_headless_cloud_environment_false_on_desktop_os(monkeypatch):
+    monkeypatch.setattr(bc, "_OS", "Windows")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    assert bc._is_headless_cloud_environment() is False
+
+
+def test_open_native_reports_url_generated_not_opened_when_headless(monkeypatch):
+    monkeypatch.setattr(bc, "_OS", "Linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    result = bc._open_native("https://linkedin.com/in/someone", None)
+    assert result.startswith("URL GENERATED")
+    assert "not opened" in result
+    assert "https://linkedin.com/in/someone" in result
+
+
+def test_open_native_never_claims_opened_when_headless(monkeypatch):
+    monkeypatch.setattr(bc, "_OS", "Linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    result = bc._open_native("https://example.com", None)
+    assert not result.startswith("Opened")
+
+
+def test_browser_control_go_to_is_honest_when_headless_with_no_active_session(monkeypatch):
+    monkeypatch.setattr(bc, "_OS", "Linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(bc._registry, "has", lambda browser=None: False)
+    result = bc.browser_control(parameters={"action": "go_to", "url": "https://linkedin.com"})
+    assert result.startswith("URL GENERATED")

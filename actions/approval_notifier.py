@@ -42,6 +42,25 @@ def _connect() -> sqlite3.Connection:
             escalated   INTEGER NOT NULL DEFAULT 0
         )
     """)
+    # 2026-09-03 (Lee's autonomous-CEO spec, Section 16): generalizes this
+    # table beyond pending-APPROVAL tasks to any urgent event JARVIS needs
+    # to escalate about — reusing the exact dedup/escalate-once pattern
+    # notify_pending() already proved, not a second notification system.
+    # Additive-only migration (same _ensure_columns pattern buildpro_data.py
+    # uses) so an existing approval_notifications row keeps working
+    # unchanged; new columns default NULL/0 for it.
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(approval_notifications)").fetchall()}
+    for name, col_type, default in (
+        ("kind", "TEXT", "'approval'"),      # 'approval' (existing behavior) | 'urgent_event'
+        ("level", "INTEGER", "2"),           # 0=log 1=dashboard 2=SMS 3=SMS+call
+        ("title", "TEXT", "NULL"),
+        ("acknowledged_at", "REAL", "NULL"),
+        ("response_detected", "INTEGER", "0"),
+        ("escalated_at", "REAL", "NULL"),
+        ("escalation_status", "TEXT", "'pending'"),  # pending | sms_sent | escalated | acknowledged
+    ):
+        if name not in existing:
+            conn.execute(f"ALTER TABLE approval_notifications ADD COLUMN {name} {col_type} DEFAULT {default}")
     conn.commit()
     return conn
 
@@ -151,6 +170,140 @@ def notify_pending(dry_run: bool = False) -> list[dict[str, Any]]:
         conn.close()
 
     return actions_taken
+
+
+# ── Generic urgent-event escalation (Section 16) ───────────────────────────
+# Levels: 0=log only (no send — caller already logged it, e.g. as a
+# business-intelligence 'risks' entry), 1=dashboard (same, no send — the
+# entry being visible on the Command Center IS the level-1 notification),
+# 2=SMS, 3=SMS immediately + a phone call if still unacknowledged after
+# escalate_after_minutes. Reserved for genuinely urgent events — callers
+# decide urgency, this module only ever delivers what it's told to.
+_URGENT_ESCALATE_AFTER_MINUTES_DEFAULT = 5.0
+
+
+def notify_urgent_event(
+    event_id: str, title: str, detail: str = "", level: int = 2,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Sends (or dry-runs) the level-2/3 SMS for one urgent event, exactly
+    once per event_id (same dedup contract as notify_pending's approval
+    texts). Levels 0/1 are a deliberate no-op here — nothing to send, by
+    design; the caller's own log/dashboard entry already satisfies that
+    level. Honestly reports NOT_CONFIGURED rather than pretending to send
+    when JARVIS_OWNER_PHONE/Twilio aren't set up (true on this deployment
+    today) — never silently drops it without saying so."""
+    from actions import twilio_integration as twilio
+    from actions import audit_log
+    from core.headless import config
+
+    if level < 2:
+        return {"event_id": event_id, "action": "none", "level": level, "reason": "level < 2 — no send required"}
+
+    owner = config.JARVIS_OWNER_PHONE
+    if not owner:
+        return {"event_id": event_id, "action": "none", "level": level, "configured": False, "reason": "JARVIS_OWNER_PHONE isn't set"}
+    if not twilio.is_configured():
+        return {"event_id": event_id, "action": "none", "level": level, "configured": False, "reason": "Twilio isn't configured"}
+
+    conn = _connect()
+    try:
+        row = _already_notified(conn, event_id)
+        if row is not None:
+            return {"event_id": event_id, "action": "already_sent", "level": level, "configured": True}
+
+        body = f"JARVIS URGENT: {title}\n\n{detail}".strip()
+        now = time.time()
+        if dry_run:
+            return {"event_id": event_id, "action": "sms", "dry_run": True, "level": level, "body": body}
+        result = twilio.send_sms(owner, body)
+        conn.execute(
+            "INSERT OR REPLACE INTO approval_notifications "
+            "(task_id, first_sent, escalated, kind, level, title, escalation_status) "
+            "VALUES (?, ?, 0, 'urgent_event', ?, ?, 'sms_sent')",
+            (event_id, now, level, title),
+        )
+        conn.commit()
+        audit_log.record(
+            "urgent_event_notification", task=event_id,
+            execution_status="succeeded" if result.get("ok") else "failed",
+            result=result, error=None if result.get("ok") else result.get("detail"),
+            external_system="twilio", reference_id=result.get("sid"),
+        )
+        return {"event_id": event_id, "action": "sms", "ok": bool(result.get("ok")), "level": level, "configured": True}
+    finally:
+        conn.close()
+
+
+def sweep_urgent_escalations(
+    escalate_after_minutes: float = _URGENT_ESCALATE_AFTER_MINUTES_DEFAULT, dry_run: bool = False,
+) -> list[dict[str, Any]]:
+    """One pass over every level-3 urgent event that's been SMS'd but not
+    yet escalated and not yet acknowledged: if it's been at least
+    escalate_after_minutes, place one call (never more than one per
+    event — same escalate-once contract as the approval path). Honestly
+    reports when Cartesia calling isn't configured rather than silently
+    skipping without a reason."""
+    from actions import cartesia_calls
+    from actions import audit_log
+    from core.headless import config
+
+    owner = config.JARVIS_OWNER_PHONE
+    actions_taken: list[dict[str, Any]] = []
+    if not owner:
+        return actions_taken
+
+    conn = _connect()
+    try:
+        now = time.time()
+        rows = conn.execute(
+            "SELECT * FROM approval_notifications WHERE kind = 'urgent_event' AND level >= 3 "
+            "AND escalation_status = 'sms_sent' AND (response_detected IS NULL OR response_detected = 0)"
+        ).fetchall()
+        for row in rows:
+            waited_min = (now - float(row["first_sent"])) / 60.0
+            if waited_min < escalate_after_minutes:
+                continue
+            if not cartesia_calls.is_configured():
+                actions_taken.append({"event_id": row["task_id"], "action": "none", "configured": False, "reason": "Cartesia calling isn't configured"})
+                continue
+            reason = f"Urgent: {row['title'] or 'an event'} needs your attention — I texted you {waited_min:.0f} minutes ago with no response."
+            if dry_run:
+                actions_taken.append({"event_id": row["task_id"], "action": "call", "dry_run": True, "reason": reason})
+                continue
+            result = cartesia_calls.place_call(owner, reason)
+            conn.execute(
+                "UPDATE approval_notifications SET escalated = 1, escalated_at = ?, escalation_status = 'escalated' WHERE task_id = ?",
+                (now, row["task_id"]),
+            )
+            conn.commit()
+            audit_log.record(
+                "urgent_event_escalation_call", task=row["task_id"],
+                execution_status="succeeded" if result.get("ok") else "failed",
+                result=result, error=None if result.get("ok") else result.get("detail"),
+                external_system="cartesia", reference_id=result.get("agent_call_id"),
+            )
+            actions_taken.append({"event_id": row["task_id"], "action": "call", "ok": bool(result.get("ok"))})
+    finally:
+        conn.close()
+    return actions_taken
+
+
+def acknowledge_urgent_event(event_id: str) -> None:
+    """Marks an urgent event acknowledged — stops sweep_urgent_escalations
+    from ever calling about it. Never invents acknowledgment: only call
+    this from a real signal (Lee opening the item in the Command Center,
+    an inbound SMS reply, etc.)."""
+    try:
+        conn = _connect()
+        conn.execute(
+            "UPDATE approval_notifications SET response_detected = 1, acknowledged_at = ?, escalation_status = 'acknowledged' WHERE task_id = ?",
+            (time.time(), event_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        logger.debug("could not acknowledge urgent event %s", event_id, exc_info=True)
 
 
 def clear_notification(task_id: str) -> None:

@@ -609,14 +609,22 @@ TOOL_DECLARATIONS = [
             "and tell the user a draft is ready for them to review. "
             "'send_brief' emails the current executive brief to Lee's own "
             "authenticated Gmail address — only call it when he's actually "
-            "asked to have the brief emailed to him."
+            "asked to have the brief emailed to him. "
+            "'read' fetches ONE message's full content by id (sender, "
+            "sender_domain, subject, the actual message body — not just "
+            "the one-line snippet 'list' shows — attachments, and its "
+            "real classification/category/reason). Use 'read' whenever "
+            "you need to know what an email actually says, not just its "
+            "subject line; 'list' alone is not enough to answer 'what did "
+            "this email say' or 'why did you flag this one'."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "status | list | draft | send"},
+                "action":      {"type": "STRING", "description": "status | list | read | draft | send"},
                 "query":       {"type": "STRING", "description": "Gmail search query for 'list', e.g. 'is:unread', 'from:x@y.com' (optional)"},
                 "max_results": {"type": "INTEGER", "description": "Max messages to return for 'list' (default 10)"},
+                "message_id":  {"type": "STRING", "description": "Gmail message id, for 'read' (get it from a prior 'list' call's results)"},
                 "to":          {"type": "STRING", "description": "Recipient email address, for 'draft'/'send'"},
                 "subject":     {"type": "STRING", "description": "Email subject, for 'draft'/'send'"},
                 "body":        {"type": "STRING", "description": "Email body text, for 'draft'/'send'"},

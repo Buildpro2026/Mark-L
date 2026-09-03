@@ -15,6 +15,8 @@ than raising into caller code or fabricating a result.
 from __future__ import annotations
 
 import base64
+import html as _html
+import re
 from email.mime.text import MIMEText
 from typing import Any
 
@@ -59,35 +61,127 @@ def list_messages(query: str = "", max_results: int = 10) -> dict[str, Any]:
         return {"ok": False, "state": "ERROR", "detail": str(exc), "messages": []}
 
 
+_SENDER_ADDR_RE = re.compile(r'<([^>]+)>')
+_DOMAIN_RE = re.compile(r'@([\w.-]+)')
+
+
+def _sender_address(sender: str) -> str:
+    """'Jane Doe <jane@example.com>' -> 'jane@example.com'; a bare address
+    passes through unchanged."""
+    sender = (sender or "").strip()
+    m = _SENDER_ADDR_RE.search(sender)
+    return (m.group(1) if m else sender).strip().lower()
+
+
+def _sender_domain(sender: str) -> str:
+    """The domain half of the sender address, lowercased ('' if there's no
+    '@' to find one from) — used for JARVIS's-own-infra detection and for
+    company/domain provenance, never invented when absent."""
+    addr = _sender_address(sender)
+    m = _DOMAIN_RE.search(addr)
+    return m.group(1) if m else ""
+
+
+def build_message_url(thread_id: str | None, message_id: str | None = None) -> str:
+    """A real, clickable Gmail deep link for one message — the exact
+    permalink format Gmail itself uses (https://mail.google.com/mail/u/0/#all/<id>),
+    keyed on thread_id when available (Gmail's own URL scheme is
+    thread-keyed; message_id is a safe fallback for the rare case a
+    thread_id wasn't captured). '#all' rather than '#inbox' so the link
+    still resolves for a message that's been archived/labeled elsewhere.
+    Returns '' — never a fabricated URL — when neither id is available."""
+    target = thread_id or message_id
+    if not target:
+        return ""
+    return f"https://mail.google.com/mail/u/0/#all/{target}"
+
+
 def get_message(message_id: str) -> dict[str, Any]:
-    """Sender/recipient/subject/date/body/attachments for one message id."""
+    """Sender/recipient/subject/date/body/attachments for one message id.
+
+    2026-09-03 (Lee's autonomous-CEO spec): added sender_domain (own-infra
+    detection + provenance), to/cc (recipients — 'recipient' is kept as an
+    alias of 'to' so existing callers of that key don't break), and
+    permalink (a real Gmail deep link, never fabricated — '' when there's
+    no thread/message id to build one from, which practically never
+    happens for a message Gmail itself returned)."""
     service = _service()
     msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
     headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    thread_id = msg.get("threadId")
+    sender = headers.get("from")
     return {
         "id": message_id,
-        "thread_id": msg.get("threadId"),
-        "sender": headers.get("from"),
+        "thread_id": thread_id,
+        "sender": sender,
+        "sender_domain": _sender_domain(sender or ""),
         "recipient": headers.get("to"),
+        "to": headers.get("to"),
+        "cc": headers.get("cc"),
         "subject": headers.get("subject"),
         "date": headers.get("date"),
         "snippet": msg.get("snippet"),
         "body": _extract_body(msg.get("payload", {})),
         "attachments": _extract_attachments(msg.get("payload", {})),
         "labels": msg.get("labelIds", []),
+        "permalink": build_message_url(thread_id, message_id),
     }
 
 
+def _html_to_text(raw_html: str) -> str:
+    """Minimal, dependency-free HTML->text: drops script/style blocks,
+    turns <br>/<p>/block tags into line breaks so paragraphs don't run
+    together, strips remaining tags, and unescapes entities. Not a
+    real renderer — good enough to make an HTML-only email's actual
+    content (not just its subject) reach the classifier and JARVIS,
+    which is the point; not used for anything that needs to preserve
+    exact formatting."""
+    if not raw_html:
+        return ""
+    text = re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', ' ', raw_html)
+    text = re.sub(r'(?i)<(br|/p|/div|/tr|/li|/h[1-6])\s*/?>', '\n', text)
+    text = re.sub(r'(?s)<[^>]+>', '', text)
+    text = _html.unescape(text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    return text.strip()
+
+
 def _extract_body(payload: dict[str, Any]) -> str:
-    """Best-effort plain-text body extraction, walking multipart payloads.
-    Returns '' when Gmail didn't include a text/plain part — never invents
-    body content."""
-    if payload.get("mimeType") == "text/plain" and "data" in payload.get("body", {}):
-        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
-    for part in payload.get("parts") or []:
-        text = _extract_body(part)
-        if text:
-            return text
+    """Body extraction, walking multipart payloads. Prefers a real
+    text/plain part; when Gmail only gave an HTML body (common for
+    marketing/notification mail, and not rare for real candidate/client
+    replies sent from a rich-text mail client), falls back to that HTML
+    converted to plain text via _html_to_text() rather than returning ''.
+
+    2026-09-03 fix (Lee's autonomous-CEO spec, Section 3): before this,
+    an HTML-only message silently produced an empty body — JARVIS could
+    see the subject/snippet but never the actual content, which is
+    exactly the 'can see subject, not body' gap the spec called out.
+    Still returns '' — never invents content — when a message truly has
+    neither a text/plain nor a text/html part (e.g. an attachment-only
+    or calendar-invite-only message)."""
+    html_fallback = ""
+
+    def _walk(node: dict[str, Any]) -> str:
+        nonlocal html_fallback
+        mime = node.get("mimeType")
+        data = node.get("body", {}).get("data")
+        if mime == "text/plain" and data:
+            return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+        if mime == "text/html" and data and not html_fallback:
+            html_fallback = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+        for part in node.get("parts") or []:
+            text = _walk(part)
+            if text:
+                return text
+        return ""
+
+    plain = _walk(payload)
+    if plain:
+        return plain
+    if html_fallback:
+        return _html_to_text(html_fallback)
     return ""
 
 

@@ -167,6 +167,23 @@ def _connect() -> sqlite3.Connection:
     _ensure_columns(conn, "buildpro_clients", {
         "industry": "TEXT", "last_synced_ts": "REAL",
     })
+    # 2026-09-03 provenance columns (Lee's autonomous-CEO spec, Section 11:
+    # "NO ORPHAN RECORDS"). Additive-only, same _ensure_columns pattern as
+    # every migration above — existing installs pick these up with no
+    # manual step. company_id is the domain-isolation tag (Section 10);
+    # the rest trace exactly which email this record came from, so every
+    # candidate/client can be opened back to its real source message.
+    # A record with no real source (e.g. the HubSpot bulk sync) leaves
+    # these columns NULL rather than a fabricated value — display code
+    # must show "SOURCE UNAVAILABLE" for a NULL/blank source_url, never
+    # invent one.
+    _PROVENANCE_COLUMNS = {
+        "company_id": "TEXT", "source_system": "TEXT", "source_record_id": "TEXT",
+        "source_url": "TEXT", "gmail_message_id": "TEXT", "gmail_thread_id": "TEXT",
+        "captured_ts": "REAL",
+    }
+    _ensure_columns(conn, "buildpro_candidates", _PROVENANCE_COLUMNS)
+    _ensure_columns(conn, "buildpro_clients", _PROVENANCE_COLUMNS)
     _ensure_columns(conn, "buildpro_jobs", {
         "specialty": "TEXT", "min_years_experience": "INTEGER",
         "required_skills": "TEXT", "compensation": "TEXT", "employment_type": "TEXT",
@@ -223,6 +240,9 @@ def add_candidate(
     title: str = "", specialty: str = "", years_experience: int | None = None,
     skills: str = "", location: str = "", desired_compensation: str = "",
     availability: str = "", last_synced_ts: float | None = None,
+    company_id: str = "", source_system: str = "", source_record_id: str = "",
+    source_url: str = "", gmail_message_id: str = "", gmail_thread_id: str = "",
+    captured_ts: float | None = None,
 ) -> int:
     if status not in CANDIDATE_STATUSES:
         raise ValueError(f"Unknown candidate status: {status!r}. Valid: {sorted(CANDIDATE_STATUSES)}")
@@ -234,13 +254,19 @@ def add_candidate(
         "INSERT INTO buildpro_candidates "
         "(name, email, phone, source, status, hubspot_contact_id, notes, "
         " title, specialty, years_experience, skills, location, desired_compensation, "
-        " availability, last_synced_ts, created_ts, updated_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " availability, last_synced_ts, "
+        " company_id, source_system, source_record_id, source_url, gmail_message_id, gmail_thread_id, captured_ts, "
+        " created_ts, updated_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (name, email or None, phone or None, source or None, status,
          hubspot_contact_id or None, notes or None,
          title or None, specialty or None, years_experience, skills or None,
          location or None, desired_compensation or None, availability or None,
-         last_synced_ts, now, now),
+         last_synced_ts,
+         company_id or None, source_system or None, source_record_id or None,
+         source_url or None, gmail_message_id or None, gmail_thread_id or None,
+         captured_ts or (now if (gmail_message_id or source_system) else None),
+         now, now),
     )
     conn.commit()
     row_id = cur.lastrowid
@@ -369,6 +395,8 @@ def update_candidate(candidate_id: int, **fields: Any) -> bool:
         "name", "email", "phone", "source", "status", "hubspot_contact_id", "notes",
         "title", "specialty", "years_experience", "skills", "location",
         "desired_compensation", "availability", "last_synced_ts",
+        "company_id", "source_system", "source_record_id", "source_url",
+        "gmail_message_id", "gmail_thread_id", "captured_ts",
     }
     return _update("buildpro_candidates", candidate_id, {k: v for k, v in fields.items() if k in allowed})
 
@@ -379,6 +407,9 @@ def add_client(
     name: str, contact_name: str = "", email: str = "", phone: str = "",
     source: str = "", status: str = "active", hubspot_company_id: str = "", notes: str = "",
     industry: str = "", last_synced_ts: float | None = None,
+    company_id: str = "", source_system: str = "", source_record_id: str = "",
+    source_url: str = "", gmail_message_id: str = "", gmail_thread_id: str = "",
+    captured_ts: float | None = None,
 ) -> int:
     if status not in CLIENT_STATUSES:
         raise ValueError(f"Unknown client status: {status!r}. Valid: {sorted(CLIENT_STATUSES)}")
@@ -387,11 +418,17 @@ def add_client(
     cur = conn.execute(
         "INSERT INTO buildpro_clients "
         "(name, contact_name, email, phone, source, status, hubspot_company_id, notes, "
-        " industry, last_synced_ts, created_ts, updated_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " industry, last_synced_ts, "
+        " company_id, source_system, source_record_id, source_url, gmail_message_id, gmail_thread_id, captured_ts, "
+        " created_ts, updated_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (name, contact_name or None, email or None, phone or None, source or None,
          status, hubspot_company_id or None, notes or None, industry or None,
-         last_synced_ts, now, now),
+         last_synced_ts,
+         company_id or None, source_system or None, source_record_id or None,
+         source_url or None, gmail_message_id or None, gmail_thread_id or None,
+         captured_ts or (now if (gmail_message_id or source_system) else None),
+         now, now),
     )
     conn.commit()
     row_id = cur.lastrowid
@@ -479,6 +516,8 @@ def update_client(client_id: int, **fields: Any) -> bool:
     allowed = {
         "name", "contact_name", "email", "phone", "source", "status",
         "hubspot_company_id", "notes", "industry", "last_synced_ts",
+        "company_id", "source_system", "source_record_id", "source_url",
+        "gmail_message_id", "gmail_thread_id", "captured_ts",
     }
     return _update("buildpro_clients", client_id, {k: v for k, v in fields.items() if k in allowed})
 

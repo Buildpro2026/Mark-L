@@ -152,6 +152,10 @@ def process_client_email(message: dict[str, Any], auto_send: bool = False) -> di
     )
 
     # 1. Local BuildPro client table.
+    # 2026-09-03 (Lee's autonomous-CEO spec, Section 11 "NO ORPHAN
+    # RECORDS"): provenance fields so this client can always be traced
+    # back to the real inquiry email — see candidate_intake.py's matching
+    # comment for the same fields on the candidate side.
     display_name = name or email
     client_id, client_action = buildpro_data.upsert_client(
         display_name, email=email, phone=phone or "",
@@ -161,6 +165,9 @@ def process_client_email(message: dict[str, Any], auto_send: bool = False) -> di
             f"Contact by {deadline_str}"
             + ("" if tz_inferred else f" (time zone not determinable from message — assumed {_HOME_TZ})") + "."
         ),
+        company_id="buildpro", source_system="gmail",
+        source_record_id=message.get("id") or "", gmail_message_id=message.get("id") or "",
+        gmail_thread_id=message.get("thread_id") or "", source_url=message.get("permalink") or "",
     )
 
     # 2. HubSpot company — best-effort; the local record above already

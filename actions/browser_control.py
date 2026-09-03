@@ -21,6 +21,28 @@ from playwright.async_api import (
 )
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
+
+def _is_headless_cloud_environment() -> bool:
+    """True on a Linux server with no display of its own — this JARVIS
+    deployment (Render, no GUI) rather than a desktop machine running
+    main.py's PyQt6 app. Same detection core/headless_main.py already
+    uses for its pyautogui stub — kept in sync deliberately, not a
+    coincidence: both exist to stop code written for a real desktop from
+    silently pretending it has one.
+
+    2026-09-03 fix (Lee's autonomous-CEO spec, Section 13): before this,
+    the 'native browser' path below would call subprocess.Popen(['xdg-open',
+    url]) or webbrowser.open(url) on this exact environment. Popen only
+    reports whether a process STARTED, not whether anything ever rendered
+    on a screen no one is looking at — on a headless container that
+    genuinely has no display and no installed browser app, that could
+    return 'Opened in your default browser: ...' while nothing anyone can
+    see ever happened. This function exists so callers can tell 'a URL was
+    generated' apart from 'a browser was actually opened' honestly,
+    instead of assuming a subprocess call succeeding proves the second."""
+    return _OS == "Linux" and not os.environ.get("DISPLAY")
+
+
 def _normalize_url(url: str) -> str:
     """
     Bare words like "instagram" → "https://instagram.com"
@@ -379,6 +401,21 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
     url = _normalize_url(url) if url and url.strip() else ""
     if url == "about:blank":
         url = ""
+
+    # 2026-09-03 fix (Lee's spec, Section 13): this whole function opens
+    # the OPERATOR'S OWN installed browser app — meaningful on a desktop
+    # running main.py, meaningless on this headless cloud service, which
+    # has no display and no browser app of its own. Report that honestly
+    # up front rather than letting a subprocess call that merely *started*
+    # (Popen doesn't wait, and doesn't prove anything rendered) get
+    # reported as "Opened in your browser."
+    if _is_headless_cloud_environment():
+        if url:
+            return (
+                f"URL GENERATED (not opened — JARVIS is running headless in the cloud, "
+                f"with no browser/display of its own): {url}"
+            )
+        return "BROWSER NOT OPENED — JARVIS is running headless in the cloud, with no browser/display of its own."
 
     name = None
     if browser_name:

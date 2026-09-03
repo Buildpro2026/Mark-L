@@ -119,6 +119,7 @@ const NUCLEUS_COLORS = {
   email: 0x8fb8ff, calendar: 0xff8fd1, knowledge: 0xf5e6a8, files: 0xb98bff,
   reports: 0x9fe6ff, communications: 0x7d8fa6, system: 0xff6b7a,
   personal: 0x8fa8b8, hubspot: 0xff7ab8, social: 0x66d9ef,
+  company_core: 0xffe66d, // 2026-09-03: Company Core Planet (Section 18)
 };
 
 // Display order for the left rail — presentation only; every id below is a
@@ -126,9 +127,12 @@ const NUCLEUS_COLORS = {
 // into the System Nucleus's already-fetched agent_orchestrator data — there
 // is no separate Agents endpoint, so this never invents one). "knowledge" is
 // the real Obsidian JARVIS Brain vault — distinct from "files" below, which
-// is a general filesystem search, not vault-aware.
+// is a general filesystem search, not vault-aware. "company_core" added
+// 2026-09-03 (Section 18) — real infrastructure-platform health, not a
+// second copy of System's health check (see dashboard/server.py's
+// _module_company_core, which reuses _integration_health()).
 const RAIL_ORDER = [
-  "buildpro", "ddf", "careerrocket", "email", "calendar", "hubspot", "social",
+  "company_core", "buildpro", "ddf", "careerrocket", "email", "calendar", "hubspot", "social",
   "knowledge", "files", "reports", "communications", "system", "personal",
 ];
 
@@ -316,6 +320,7 @@ function updateOrbits(t) {
   for (const mesh of rootGroup.children) {
     const orbit = mesh.userData.orbit;
     if (!orbit) continue;
+    if (expandedRootId && mesh.userData.id === expandedRootId) continue; // frozen — see expandedRootId comment above
     const angle = t * ORBIT_SPEED_ROOT + orbit.phase;
     const cos = Math.cos(angle), sin = Math.sin(angle);
     const x = orbit.dir.x * cos - orbit.dir.z * sin;
@@ -366,11 +371,29 @@ const rootMeshes = new Map();     // id -> mesh (root sphere)
 let childMeshes = new Map();      // id -> mesh (currently expanded children)
 let infoObjects = [];             // spawned data objects (files/deals/etc.)
 
+// 2026-09-03 fix (Lee's autonomous-CEO spec, Section 19): the id of the
+// root nucleus whose children are currently shown, or null. showChildrenFor()
+// bakes each child mesh's position and every connector line in
+// childLineGroup from a ONE-TIME SNAPSHOT of the parent's world position
+// (see showChildrenFor below) — but updateOrbits() keeps moving every root
+// nucleus, including the one currently expanded, every single frame with
+// no exception. The parent sphere kept visibly drifting away from its own
+// (frozen) children and connector lines while its Nucleus was open, and
+// worse the longer you stayed on it — exactly the "connector lines
+// detach/float" symptom, most noticeable after Planet->Star->back->another
+// Star navigation because by then the drift had had time to accumulate.
+// Fix: freeze (skip re-positioning) the currently-expanded root nucleus in
+// updateOrbits() so it stays exactly where its children/connectors were
+// drawn relative to; every OTHER root nucleus keeps orbiting normally in
+// the background. Cleared on goHome()/focusing a different nucleus.
+let expandedRootId = null;
+
 function buildRootRing(hierarchy) {
   hierarchyRoot = hierarchy;
   clearGroup(rootGroup);
   clearGroup(lineGroup);
   rootMeshes.clear();
+  expandedRootId = null;
   const children = (hierarchy?.children || []).filter(c => c.id !== "jarvis");
   const dirs = sphereDirections(children.length);
   children.forEach((node, i) => {
@@ -541,6 +564,7 @@ async function focusNucleus(id, { fromServer = false, pushHistory = true } = {})
     backStack.push(currentNucleusId);
   }
   currentNucleusId = id;
+  expandedRootId = id;  // freeze this nucleus's orbit — see the comment by its declaration
 
   panelTitleEl.textContent = node.name;
   panelStatusEl.textContent = "Loading…";
@@ -585,6 +609,7 @@ function spawnDataObjects(id, data, pos) {
 
 async function goHome({ fromServer = false, notify = true } = {}) {
   currentNucleusId = "jarvis";
+  expandedRootId = null;  // resume normal orbiting for every root nucleus
   backStack = [];
   panelTitleEl.textContent = "Jarvis";
   updateBreadcrumb(["Jarvis"]);
@@ -798,7 +823,7 @@ function renderInfoPanel(id, node, data) {
   panelChildrenEl.innerHTML = "";
   statGridMount.innerHTML = "";
   gaugeMount.innerHTML = "";
-  filesSearchSection.style.display = id === "files" ? "" : "none";
+  filesSearchSection.style.display = (id === "files" || id === "personal-files" || id === "personal-documents") ? "" : "none";
   knowledgeSearchSection.style.display = id === "knowledge" ? "" : "none";
 
   const details = [];
@@ -866,7 +891,7 @@ function renderInfoPanel(id, node, data) {
     panelChildrenEl.innerHTML = `<div class="info-empty">No sub-branches — browse notes above.</div>`;
     panelDetailsEl.innerHTML = details.join("");
     return;
-  } else if (id === "files") {
+  } else if (id === "files" || id === "personal-files" || id === "personal-documents") {
     panelStatusEl.textContent = "Live filesystem search + recent files";
     const results = Array.isArray(data.results) ? data.results : [];
     const recent = Array.isArray(data.recent_files) ? data.recent_files : [];
@@ -878,11 +903,67 @@ function renderInfoPanel(id, node, data) {
     const sys = data.system_status || {};
     for (const [k, v] of Object.entries(sys)) details.push(item(`<span class="k">${escapeHtml(k)}</span>: ${escapeHtml(v)}`));
     for (const f of (data.report_files || [])) details.push(item(`<span class="k">Report</span> ${escapeHtml(typeof f === "string" ? f : f.name)}`));
-  } else if (id === "email" || id === "calendar") {
-    // Connection status only — no live inbox/event retrieval wired up yet.
+  } else if (id === "email" || id === "personal-email") {
+    // 2026-09-03 fix (Lee's autonomous-CEO spec, Sections 4 & 12): this
+    // used to say "Live content retrieval isn't wired into this view
+    // yet" even after dashboard/server.py's _module_email() was already
+    // fixed to return real messages — the backend had the data, this
+    // view just never rendered it. Every row here is real: sender,
+    // subject, the 7-category classification with WHY (category_reason),
+    // and a genuine "OPEN SOURCE EMAIL" deep link into Gmail (never a
+    // fabricated URL — shows "SOURCE UNAVAILABLE" honestly if the
+    // backend couldn't build one for a given message).
+    if (!data.configured) {
+      panelStatusEl.textContent = "Not connected";
+      details.push(item(data.note || "Not configured yet — connect via the standard JARVIS Google auth flow.", true));
+    } else {
+      const messages = Array.isArray(data.messages) ? data.messages : [];
+      panelStatusEl.textContent = data.summary || `${messages.length} message(s)`;
+      if (!messages.length) details.push(item(data.note || "No messages in view."));
+      for (const m of messages.slice(0, 25)) {
+        const openLink = m.permalink && m.permalink !== "SOURCE UNAVAILABLE"
+          ? ` <a href="${escapeHtml(m.permalink)}" target="_blank" rel="noopener" class="email-open-link">OPEN SOURCE EMAIL</a>`
+          : ` <span class="tag">SOURCE UNAVAILABLE</span>`;
+        details.push(item(
+          `<span class="k">${escapeHtml(m.category || m.classification || "uncategorized")}</span> ` +
+          `${escapeHtml(m.subject || "(no subject)")} — ${escapeHtml(m.sender || "unknown sender")}` +
+          `${m.unread ? " <span class=\"tag\">unread</span>" : ""}` +
+          `${m.has_attachments ? " <span class=\"tag\">attachment</span>" : ""}` +
+          openLink
+        ));
+      }
+    }
+  } else if (id === "calendar" || id === "personal-calendar") {
+    // Connection status only — no live event retrieval wired up yet
+    // (calendar_integration.py exists but this module never calls it;
+    // a genuine remaining gap, not glossed over).
     panelStatusEl.textContent = data.configured ? "Connected" : "Not connected";
-    details.push(item(data.status?.error || (data.configured ? `${node.name} is authorized. Live content retrieval isn't wired into this view yet.` : "Not configured yet — connect via the standard JARVIS Google auth flow."), !data.configured));
-  } else if (id === "communications") {
+    details.push(item(data.status?.error || (data.configured ? "Calendar is authorized. Live event retrieval isn't wired into this view yet." : "Not configured yet — connect via the standard JARVIS Google auth flow."), !data.configured));
+  } else if (id === "personal-contacts") {
+    panelStatusEl.textContent = data.configured ? (data.summary || "Connected") : "Not connected";
+    const contacts = Array.isArray(data.contacts) ? data.contacts : [];
+    if (!contacts.length) details.push(item(data.note || "No contact/call history yet.", !data.configured));
+    for (const c of contacts.slice(0, 20)) {
+      const who = c.direction === "outbound" ? c.to_number : c.from_number;
+      details.push(item(`${escapeHtml(c.direction || "")} ${escapeHtml(c.kind || "")} — ${escapeHtml(who || "unknown")} (${escapeHtml(c.status || "")})`));
+    }
+  } else if (id === "personal-tasks" || id === "personal-alerts") {
+    panelStatusEl.textContent = "No live data source";
+    panelDetailsEl.innerHTML = `<div class="unavailable-card"><span class="tag">No live data source</span><br/>${escapeHtml(data.note || "")}</div>`;
+    panelChildrenEl.innerHTML = `<div class="info-empty">No sub-branches.</div>`;
+    return;
+  } else if (id === "company_core") {
+    // 2026-09-03 (Lee's spec, Section 18): real, live-checked platform
+    // health (dashboard/server.py's _module_company_core, which reuses
+    // the same _integration_health() check System already uses) — a
+    // star is shown "NOT CONNECTED" honestly, never glossed as healthy.
+    const stars = Array.isArray(data.stars) ? data.stars : [];
+    panelStatusEl.textContent = data.summary || `${stars.length} platform(s)`;
+    statGridMount.innerHTML = `<div class="stat-grid">${statCard(stars.filter(s => s.connected).length, "Connected")}${statCard(stars.length, "Total platforms")}</div>`;
+    for (const s of stars) {
+      details.push(item(`<span class="k">${escapeHtml(s.name)}</span> — ${s.connected ? "CONNECTED" : "NOT CONNECTED"} (${escapeHtml(s.status)})`, !s.connected));
+    }
+  } else if (id === "communications" || id === "personal-communications") {
     panelStatusEl.textContent = data.status || "NOT_CONFIGURED";
     for (const [channel, info] of Object.entries(data.channels || {})) {
       const isPlaceholder = !info.status || info.status === "placeholder" || info.status === "NOT_CONFIGURED";

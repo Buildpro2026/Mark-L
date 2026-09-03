@@ -5,6 +5,14 @@ config/certs/
 config/preferences.json
 config/preferences.corrupt-*.json
 config/preferences.tmp-*
+# 2026-09-03 fix: this is actions/nucleus_hierarchy.py's runtime-generated
+# cache of DEFAULT_HIERARCHY (_ensure_config() only writes it when
+# missing) — it was accidentally committed once (c2c2f64), which meant
+# every DEFAULT_HIERARCHY edit since then silently had NO EFFECT in any
+# checkout/deploy that already had this file, because _ensure_config()
+# never overwrites an existing one. Same category as the other generated
+# config/*.json files above; never meant to be tracked.
+config/nucleus_config.json
 
 # Personal data, not source code — see docs/MEMORY_SCHEMA.md
 memory/long_term.json

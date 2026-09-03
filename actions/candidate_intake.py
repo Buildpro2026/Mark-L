@@ -118,10 +118,20 @@ def process_candidate_email(message: dict[str, Any], auto_send_welcome: bool = F
     # candidate" mechanism: upsert_candidate() sets/refreshes updated_ts,
     # and list_candidates_needing_followup() already surfaces anything
     # that goes FOLLOWUP_STALE_DAYS untouched.
+    #
+    # 2026-09-03 (Lee's autonomous-CEO spec, Section 11 "NO ORPHAN
+    # RECORDS"): every field this record can be traced back to its real
+    # source message with — company_id for domain isolation (Section 10),
+    # the rest so this candidate can always be opened back to the exact
+    # email it came from. Never fabricated: message.get(...) is either the
+    # real Gmail value or absent.
     display_name = name or email
     candidate_id, candidate_action = buildpro_data.upsert_candidate(
         display_name, email=email, source="gmail_intake",
         notes=f"Auto-intake from email: {message.get('subject') or '(no subject)'}",
+        company_id="buildpro", source_system="gmail",
+        source_record_id=message.get("id") or "", gmail_message_id=message.get("id") or "",
+        gmail_thread_id=message.get("thread_id") or "", source_url=message.get("permalink") or "",
     )
 
     # 3. HubSpot contact — best-effort; the local record above already
