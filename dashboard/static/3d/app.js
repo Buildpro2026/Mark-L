@@ -18,6 +18,16 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "/3d/assets/vendor/OrbitControls.js";
+// Visual-upgrade addons (see PR notes) — vendored from the exact three@0.160.0
+// npm package that matches vendor/three.module.js (md5-verified), so these
+// are guaranteed API-compatible with it. Pure rendering/post-processing;
+// none of this touches state, WebSocket, or navigation logic below.
+import { EffectComposer } from "/3d/assets/vendor/postprocessing/EffectComposer.js";
+import { RenderPass } from "/3d/assets/vendor/postprocessing/RenderPass.js";
+import { ShaderPass } from "/3d/assets/vendor/postprocessing/ShaderPass.js";
+import { UnrealBloomPass } from "/3d/assets/vendor/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "/3d/assets/vendor/postprocessing/OutputPass.js";
+import { RoomEnvironment } from "/3d/assets/vendor/environments/RoomEnvironment.js";
 
 // ── Auth — same three credentials dashboard/server.py's _3d_auth accepts:
 // JARVIS_API_TOKEN, the desktop pairing-key/PIN session, or the /ui cookie.
@@ -138,7 +148,13 @@ const RAIL_ORDER = [
 
 // ── Three.js setup ──────────────────────────────────────────────────────
 let renderer, scene, camera, controls, clock;
-let orbMesh, orbLight, orbGlow, orbRim, starField;
+let orbMesh, orbLight, orbGlow, orbRimShell, starField;
+// Selective bloom: only objects on this layer (the JARVIS orb + its rim
+// shell) go through the bloom pass, so real HDR glow stays exclusive to
+// the core and the knowledge nodes never compete with it. See
+// initPostFX()/renderFrame() below.
+const BLOOM_LAYER = 1;
+let bloomComposer, finalComposer;
 const rootGroup = new THREE.Group();
 const childGroup = new THREE.Group();
 const lineGroup = new THREE.Group();      // root nuclei's orbit connectors — geometry updated in place each frame, never cleared by navigation
@@ -155,9 +171,16 @@ function initThree() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(stageEl.clientWidth, stageEl.clientHeight);
   renderer.setClearColor(0x03070d, 1);
+  // Filmic contrast on the bright emissive/bloom highlights — the single
+  // biggest lever for a "cinematic" vs. "flat game UI" look.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(0x03070d, 0.026);
+  // Lower density than before — depth cueing at the edges, not a wash of
+  // haze over the whole scene.
+  scene.fog = new THREE.FogExp2(0x03070d, 0.015);
 
   camera = new THREE.PerspectiveCamera(52, stageEl.clientWidth / stageEl.clientHeight, 0.1, 500);
   camera.position.set(0, 6.5, 17);
@@ -177,21 +200,133 @@ function initThree() {
   const key = new THREE.PointLight(0x9fe6ff, 2.6, 60);
   key.position.set(10, 12, 8);
   scene.add(key);
-  const rim = new THREE.PointLight(0x4a3a6e, 1.1, 50);
+  const rim = new THREE.PointLight(0x4a3a6e, 1.6, 50);
   rim.position.set(-12, -4, -10);
   scene.add(rim);
 
+  // Cheap procedural environment map — gives every MeshStandardMaterial's
+  // `metalness` something real to reflect instead of flat lighting-only
+  // shading. One-time cost at boot, no ongoing render cost.
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+  pmremGenerator.dispose();
+
   scene.add(rootGroup, childGroup, lineGroup, childLineGroup);
 
+  createNebula();
   createStarfield();
   createOrb();
+  initPostFX();
   window.addEventListener("resize", onResize);
   clock = new THREE.Clock();
   return true;
 }
 
-function createStarfield() {
-  const count = 900;
+// ── Post-processing: selective bloom, JARVIS orb only ──────────────────
+// Real UnrealBloomPass glow, restricted to BLOOM_LAYER via camera.layers
+// toggling in renderFrame() — the orb (and its rim shell) are the only
+// objects on that layer, so bloom never touches the knowledge nodes,
+// connector lines, starfield, or labels. This replaces the old
+// oversized/blurry sprite-halo approach entirely for the orb; nodes keep
+// a small, sharp sprite glow (see makeGlowSprite/_getGlowTexture) with
+// no bloom contribution at all.
+function initPostFX() {
+  const w = stageEl.clientWidth, h = stageEl.clientHeight;
+  const renderScene = new RenderPass(scene, camera);
+
+  // Bloom is inherently low-frequency/blurry, so its source render doesn't
+  // need full canvas resolution — half-res cuts that pass's pixel cost
+  // roughly 4x with no visible quality loss (the final composite below
+  // still lands at full resolution). Matters most on lower-end/mobile GPUs.
+  const bw = Math.max(1, Math.round(w / 2)), bh = Math.max(1, Math.round(h / 2));
+  const bloomRT = new THREE.WebGLRenderTarget(bw, bh, { type: THREE.HalfFloatType });
+
+  // strength, radius, threshold — tuned so idle (dim, desaturated) still
+  // reads as "alive" while active states bloom noticeably harder.
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(bw, bh), 0.85, 0.4, 0.35);
+
+  bloomComposer = new EffectComposer(renderer, bloomRT);
+  bloomComposer.renderToScreen = false;
+  bloomComposer.addPass(renderScene);
+  bloomComposer.addPass(bloomPass);
+
+  // Standard selective-bloom compositor: base (full scene) + bloom
+  // (orb-only, blurred) texture, added together.
+  const mixPass = new ShaderPass(
+    new THREE.ShaderMaterial({
+      uniforms: {
+        baseTexture: { value: null },
+        bloomTexture: { value: bloomComposer.renderTarget2.texture },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D baseTexture;
+        uniform sampler2D bloomTexture;
+        varying vec2 vUv;
+        void main() {
+          gl_FragColor = texture2D(baseTexture, vUv) + texture2D(bloomTexture, vUv);
+        }
+      `,
+    }),
+    "baseTexture"
+  );
+  mixPass.needsSwap = true;
+
+  finalComposer = new EffectComposer(renderer);
+  finalComposer.addPass(renderScene);
+  finalComposer.addPass(mixPass);
+  finalComposer.addPass(new OutputPass());
+}
+
+function renderFrame() {
+  camera.layers.set(BLOOM_LAYER);
+  bloomComposer.render();
+  camera.layers.set(0);
+  finalComposer.render();
+}
+
+// Soft multi-blob procedural nebula backdrop — a large inverted sphere
+// behind the starfield. Cheap (one texture generated once, one extra
+// low-poly mesh) and purely decorative; never occludes anything.
+function createNebula() {
+  const size = 512;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = size; canvasEl.height = size;
+  const ctx = canvasEl.getContext("2d");
+  ctx.fillStyle = "#03070d";
+  ctx.fillRect(0, 0, size, size);
+  const blobs = [
+    { x: 0.26, y: 0.32, r: 0.32, c: "rgba(79,214,255,0.14)" },
+    { x: 0.70, y: 0.58, r: 0.36, c: "rgba(140,110,255,0.12)" },
+    { x: 0.48, y: 0.78, r: 0.28, c: "rgba(92,255,196,0.07)" },
+  ];
+  for (const b of blobs) {
+    const g = ctx.createRadialGradient(b.x * size, b.y * size, 0, b.x * size, b.y * size, b.r * size);
+    g.addColorStop(0, b.c);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+  }
+  const tex = new THREE.CanvasTexture(canvasEl);
+  const geo = new THREE.SphereGeometry(140, 32, 20);
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex, side: THREE.BackSide, transparent: true, opacity: 0.6, depthWrite: false, fog: false,
+  });
+  scene.add(new THREE.Mesh(geo, mat));
+}
+
+// Two star layers (many small/dim + few larger/brighter "hero" stars)
+// instead of one uniform layer — reads as more sophisticated depth for
+// the cost of one extra cheap Points object. starField stays a single
+// object animate() can rotate (it's a Group; Object3D.rotation works
+// the same on Group as on Points).
+function _starPositions(count) {
   const positions = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
     const r = 40 + Math.random() * 140;
@@ -201,10 +336,18 @@ function createStarfield() {
     positions[i * 3 + 1] = r * Math.cos(phi) * 0.5;
     positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
   }
+  return positions;
+}
+function _makeStarLayer(count, size, opacity, color) {
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  const mat = new THREE.PointsMaterial({ color: 0x6fa8c9, size: 0.32, transparent: true, opacity: 0.5 });
-  starField = new THREE.Points(geo, mat);
+  geo.setAttribute("position", new THREE.BufferAttribute(_starPositions(count), 3));
+  const mat = new THREE.PointsMaterial({ color, size, transparent: true, opacity, sizeAttenuation: true, fog: false });
+  return new THREE.Points(geo, mat);
+}
+function createStarfield() {
+  starField = new THREE.Group();
+  starField.add(_makeStarLayer(750, 0.22, 0.4, 0x6fa8c9));
+  starField.add(_makeStarLayer(110, 0.5, 0.65, 0xcfefff));
   scene.add(starField);
 }
 
@@ -214,21 +357,28 @@ function createOrb() {
   // focal point, not a game asset: restrained material, no cartoon shading.
   const geo = new THREE.SphereGeometry(ORB_RADIUS, 64, 40);
   const mat = new THREE.MeshStandardMaterial({
-    color: STATE_COLORS.idle, emissive: STATE_COLORS.idle, emissiveIntensity: 0.85,
-    roughness: 0.3, metalness: 0.25, flatShading: false,
+    color: STATE_COLORS.idle, emissive: STATE_COLORS.idle, emissiveIntensity: 0.7,
+    roughness: 0.28, metalness: 0.3, flatShading: false,
   });
   orbMesh = new THREE.Mesh(geo, mat);
   orbMesh.userData = { kind: "core", id: "jarvis", name: "Jarvis" };
+  orbMesh.layers.enable(BLOOM_LAYER); // the one object real bloom applies to
   scene.add(orbMesh);
 
-  orbGlow = makeGlowSprite(STATE_COLORS.idle, ORB_RADIUS * 5);
+  // Small, sharp near-field glow — colors instantly with state (see
+  // setOrbState) without waiting on the bloom pass. The dramatic outer
+  // glow now comes from real bloom (BLOOM_LAYER) instead of a big blurry
+  // sprite, so this only needs to cover the orb's immediate surroundings.
+  orbGlow = makeGlowSprite(STATE_COLORS.idle, ORB_RADIUS * 2.2);
   scene.add(orbGlow);
 
-  // Faint outer rim sprite — extra depth/polish, additive so it never
-  // competes with the primary glow's color.
-  orbRim = makeGlowSprite(0x1a2a3a, ORB_RADIUS * 7.5);
-  orbRim.material.opacity = 0.35;
-  scene.add(orbRim);
+  // Fresnel rim-glow shell: a slightly-larger back-facing sphere, additive,
+  // brightest at grazing angles — real dimensional rim light instead of
+  // the old flat blurry-sprite "outer rim" hack. Child of orbMesh so it
+  // inherits the idle-state breathing-scale pulse for free.
+  orbRimShell = makeRimShell(ORB_RADIUS * 1.12, STATE_COLORS.idle);
+  orbRimShell.layers.enable(BLOOM_LAYER);
+  orbMesh.add(orbRimShell);
 
   orbLight = new THREE.PointLight(STATE_COLORS.idle, 3.4, 14);
   orbLight.position.set(0, 0, 0);
@@ -237,6 +387,43 @@ function createOrb() {
   const label = makeLabelSprite("JARVIS", "#eafcff");
   label.position.set(0, ORB_RADIUS + 0.9, 0);
   orbMesh.add(label);
+}
+
+// Additive Fresnel shell — brightens toward the silhouette edge (grazing
+// viewing angle), the standard cheap technique for a "energy field" rim
+// glow with real depth, instead of a flat 2D sprite. depthWrite:false so
+// it never occludes anything; BackSide so it reads correctly from outside
+// the (slightly larger) shell without z-fighting the orb surface.
+function makeRimShell(radius, hexColor) {
+  const geo = new THREE.SphereGeometry(radius, 48, 32);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { glowColor: { value: new THREE.Color(hexColor) } },
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec3 vViewPos;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vViewPos = -mv.xyz;
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 glowColor;
+      varying vec3 vNormal;
+      varying vec3 vViewPos;
+      void main() {
+        float fresnel = pow(1.0 - clamp(dot(normalize(vNormal), normalize(vViewPos)), 0.0, 1.0), 2.4);
+        gl_FragColor = vec4(glowColor, fresnel * 0.95);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.BackSide,
+    blending: THREE.AdditiveBlending,
+    fog: false,
+  });
+  return new THREE.Mesh(geo, mat);
 }
 
 // ── Label sprites (canvas-texture text) ────────────────────────────────
@@ -279,14 +466,15 @@ function sphereDirections(count) {
   return out;
 }
 
-// Cheap fake-bloom: an additive-blended radial-gradient sprite behind a
-// mesh reads as a glow without a real postprocessing bloom pass (which
-// would need EffectComposer/RenderPass/UnrealBloomPass vendored — more
-// weight than this scene needs for the effect it buys).
+// Small additive-blended radial-gradient sprite — used for the orb's
+// near-field color glow and each node's small "controlled glow" ring.
+// Real dramatic bloom now comes from UnrealBloomPass (see initPostFX),
+// exclusive to the orb; this texture only needs to look right at modest
+// scale, so 512px (up from a blurry 128px) is plenty and cheap.
 let _glowTexture = null;
 function _getGlowTexture() {
   if (_glowTexture) return _glowTexture;
-  const size = 128;
+  const size = 512;
   const canvasEl = document.createElement("canvas");
   canvasEl.width = size; canvasEl.height = size;
   const ctx = canvasEl.getContext("2d");
@@ -297,6 +485,8 @@ function _getGlowTexture() {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, size, size);
   _glowTexture = new THREE.CanvasTexture(canvasEl);
+  _glowTexture.minFilter = THREE.LinearMipmapLinearFilter;
+  _glowTexture.generateMipmaps = true;
   return _glowTexture;
 }
 function makeGlowSprite(hexColor, scale = 1) {
@@ -335,11 +525,54 @@ function updateOrbits(t) {
 }
 
 // ── Nucleus meshes ──────────────────────────────────────────────────────
+// Deterministic 0..1 hash from a string — used to give each node id a
+// stable, repeatable-across-reload roughness/metalness variation so 13
+// nodes don't read as identical painted marbles, without needing a
+// per-node texture.
+function _hash01(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  return (h % 1000) / 1000;
+}
+
+// Shared, subtle procedural normal map (generated once, reused by every
+// nucleus) — enough grain to break up perfectly flat shading and read as
+// a real surface, not enough to look "bumpy" or draw attention to itself.
+let _nodeNormalMap = null;
+function _getNodeNormalMap() {
+  if (_nodeNormalMap) return _nodeNormalMap;
+  const size = 128;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = size; canvasEl.height = size;
+  const ctx = canvasEl.getContext("2d");
+  const img = ctx.createImageData(size, size);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n = (Math.random() - 0.5) * 14; // gentle grain around the flat normal (128,128,255)
+    img.data[i] = 128 + n;
+    img.data[i + 1] = 128 + n;
+    img.data[i + 2] = 255;
+    img.data[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  _nodeNormalMap = new THREE.CanvasTexture(canvasEl);
+  _nodeNormalMap.wrapS = _nodeNormalMap.wrapT = THREE.RepeatWrapping;
+  _nodeNormalMap.repeat.set(3, 3);
+  return _nodeNormalMap;
+}
+
 function makeNucleusMesh(node, radius, color, placeholder = false) {
   const geo = new THREE.SphereGeometry(radius, 28, 18);
+  // Small per-node variation (deterministic on node.id) plus a shared
+  // subtle normal map — dimensional material instead of a flat solid-
+  // color marble, while staying visually calmer than the JARVIS orb
+  // (lower emissiveIntensity, no bloom layer — see makeRimShell/BLOOM_LAYER).
   const mat = new THREE.MeshStandardMaterial({
     color, emissive: color, emissiveIntensity: placeholder ? 0.22 : 0.5,
-    roughness: 0.4, metalness: 0.18, wireframe: placeholder,
+    roughness: 0.32 + _hash01(node.id) * 0.28,
+    metalness: 0.12 + _hash01(node.id + "m") * 0.2,
+    normalMap: placeholder ? null : _getNodeNormalMap(),
+    normalScale: new THREE.Vector2(0.35, 0.35),
+    wireframe: placeholder,
     transparent: placeholder, opacity: placeholder ? 0.5 : 1,
   });
   const mesh = new THREE.Mesh(geo, mat);
@@ -401,7 +634,11 @@ function buildRootRing(hierarchy) {
     const mesh = makeNucleusMesh(node, NODE_RADIUS, color);
     const dir = dirs[i];
     mesh.position.set(dir.x * ROOT_RADIUS, dir.y * ROOT_RADIUS, dir.z * ROOT_RADIUS);
-    const glow = makeGlowSprite(color, NODE_RADIUS * 4.2);
+    // Small, controlled glow ring — NOT on BLOOM_LAYER, so it never
+    // competes with the orb's real bloom. Shrunk from the old *4.2 "giant
+    // halo" scale; the sharper 512px texture (see _getGlowTexture) holds
+    // up fine at this smaller size.
+    const glow = makeGlowSprite(color, NODE_RADIUS * 1.9);
     glow.position.copy(mesh.position);
     rootGroup.add(glow);
     const line = drawConnection(new THREE.Vector3(0, 0, 0), mesh.position, color);
@@ -515,6 +752,7 @@ function setOrbState(state, opts = {}) {
   orbMesh.material.emissive.setHex(color);
   orbLight.color.setHex(color);
   orbGlow.material.color.setHex(color);
+  orbRimShell.material.uniforms.glowColor.value.setHex(color);
   const hex = `#${color.toString(16).padStart(6, "0")}`;
   stateDotEl.style.background = hex;
   stateDotEl.style.boxShadow = `0 0 10px ${hex}`;
@@ -1505,6 +1743,8 @@ function onResize() {
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  bloomComposer?.setSize(Math.max(1, Math.round(w / 2)), Math.max(1, Math.round(h / 2)));
+  finalComposer?.setSize(w, h);
 }
 
 function animate() {
@@ -1520,7 +1760,7 @@ function animate() {
   updateOrbits(t);
   updateTween();
   controls.update();
-  renderer.render(scene, camera);
+  renderFrame();
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────
