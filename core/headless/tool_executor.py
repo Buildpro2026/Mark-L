@@ -729,6 +729,57 @@ class ToolExecutor:
                             result={"company_name": company_name, "action": r.get("action")}, error=None if r["ok"] else r.get("detail"),
                             external_system="hubspot", reference_id=r.get("id"),
                         )
+            elif haction in ("create_deal", "create_task"):
+                raw_props = args.get("properties")
+                try:
+                    properties = json.loads(raw_props) if isinstance(raw_props, str) and raw_props else (
+                        raw_props if isinstance(raw_props, dict) else {}
+                    )
+                except Exception:
+                    properties = None
+                if not properties or not isinstance(properties, dict):
+                    result = "I need the properties to set, as field name/value pairs."
+                else:
+                    fn = hubspot_integration.create_deal if haction == "create_deal" else hubspot_integration.create_task
+                    r = await loop.run_in_executor(None, lambda: fn(properties, approved=True))
+                    noun = "deal" if haction == "create_deal" else "task"
+                    result = (
+                        f"HubSpot {noun} created: {r['record'].get('id')}." if r["ok"]
+                        else f"Couldn't create the {noun} ({r.get('state')}): {r.get('detail')}"
+                    )
+                    audit_log.record(
+                        f"hubspot_{haction}", execution_status="succeeded" if r["ok"] else "failed",
+                        result={"properties": properties}, error=None if r["ok"] else r.get("detail"),
+                        external_system="hubspot", reference_id=(r.get("record") or {}).get("id") if r["ok"] else None,
+                    )
+            elif haction in (
+                "associate_contact_company", "associate_deal_contact", "associate_deal_company",
+                "associate_task_contact", "associate_task_deal",
+            ):
+                ids = {
+                    "contact_id": (args.get("contact_id") or "").strip(),
+                    "company_id": (args.get("company_id") or "").strip(),
+                    "deal_id": (args.get("deal_id") or "").strip(),
+                    "task_id": (args.get("task_id") or "").strip(),
+                }
+                assoc_fn = {
+                    "associate_contact_company": (hubspot_integration.associate_contact_with_company, ("contact_id", "company_id")),
+                    "associate_deal_contact": (hubspot_integration.associate_deal_with_contact, ("deal_id", "contact_id")),
+                    "associate_deal_company": (hubspot_integration.associate_deal_with_company, ("deal_id", "company_id")),
+                    "associate_task_contact": (hubspot_integration.associate_task_with_contact, ("task_id", "contact_id")),
+                    "associate_task_deal": (hubspot_integration.associate_task_with_deal, ("task_id", "deal_id")),
+                }[haction]
+                fn, (id_a, id_b) = assoc_fn
+                if not ids[id_a] or not ids[id_b]:
+                    result = f"I need both a real {id_a.replace('_', ' ')} and {id_b.replace('_', ' ')} to associate them."
+                else:
+                    r = await loop.run_in_executor(None, lambda: fn(ids[id_a], ids[id_b], approved=True))
+                    result = "Association created." if r["ok"] else f"Couldn't associate the records ({r.get('state')}): {r.get('detail')}"
+                    audit_log.record(
+                        f"hubspot_{haction}", execution_status="succeeded" if r["ok"] else "failed",
+                        result={id_a: ids[id_a], id_b: ids[id_b]}, error=None if r["ok"] else r.get("detail"),
+                        external_system="hubspot", reference_id=None,
+                    )
             elif haction == "sync":
                 # Manual on-demand trigger for actions/buildpro_sync.py —
                 # the same real bulk mirror the buildpro_hubspot_sync
