@@ -58,7 +58,63 @@ _STATUS_TRANSITIONS = {
 # layer, not just by convention. Add to this set (nowhere else) when
 # they're actually approved — the product schema already has the columns
 # (retailer, affiliate_source) to support it without a schema change.
-APPROVED_RETAILERS = {"amazon", "tiktok_shop"}
+# "clickbank" added 2026-09-05: a real ClickBank affiliate account/link is
+# already established (see CLICKBANK_AFFILIATE_LINKS below) — this is not
+# speculative like Target/Walmart, it's an already-approved source.
+APPROVED_RETAILERS = {"amazon", "tiktok_shop", "clickbank"}
+
+# The Amazon Associates tag this account actually publishes under. Used by
+# validate_amazon_affiliate_url() below to catch a wrong/foreign tracking
+# ID before it ever reaches save_product() — never used to fabricate or
+# auto-generate a link (Amazon's own Associates SiteStripe/Get Link tool,
+# used by a human in a logged-in Amazon session, is still the only source
+# of a real affiliate URL; PA-API is not currently available to this
+# account, see ddf_discovery.py's own docstring on why it isn't implemented).
+AMAZON_ASSOCIATES_TAG = "chandlers00-20"
+
+# ClickBank affiliate links actually supplied by the account owner, keyed
+# by a short offer name. This is the ONLY source of truth for a ClickBank
+# affiliate URL anywhere in this codebase — nothing here invents,
+# modifies, or substitutes a different link; get_clickbank_affiliate_url()
+# below can only ever return one of these exact, as-supplied values or
+# None. Add a new entry here (never edit an existing one) when another
+# real ClickBank link is supplied.
+CLICKBANK_AFFILIATE_LINKS: dict[str, str] = {
+    "spirituality_genius_song": "https://bit.ly/spiritualitygeniussong26",
+}
+
+
+def get_clickbank_affiliate_url(offer_name: str) -> str | None:
+    """Returns the exact, as-supplied ClickBank affiliate URL for a known
+    offer name, or None if that offer isn't registered — never fabricates
+    or guesses a link for an offer that isn't in CLICKBANK_AFFILIATE_LINKS."""
+    return CLICKBANK_AFFILIATE_LINKS.get(offer_name)
+
+
+def validate_amazon_affiliate_url(url: str | None) -> dict[str, Any]:
+    """Checks an Amazon affiliate URL actually carries this account's own
+    tracking tag (AMAZON_ASSOCIATES_TAG) rather than blindly trusting any
+    string called an "amazon affiliate url" — catches a copy-paste of the
+    wrong tag before it's ever saved/published.
+
+    Only a full, non-shortened Amazon URL exposes `tag=` in the querystring
+    (SiteStripe's own shortened `amzn.to/...` form does not, and following
+    the redirect to check would require a live network call this function
+    deliberately doesn't make) — for that shape this honestly reports
+    UNVERIFIABLE rather than fabricating a pass or a fail. VALID/
+    WRONG_TAG/MISSING_TAG are only ever returned when the tag is actually
+    checkable in the URL string itself."""
+    if not url:
+        return {"ok": False, "state": "MISSING_URL"}
+    match = re.search(r"[?&]tag=([^&]+)", url)
+    if match is None:
+        if "amzn.to" in url or "a.co" in url:
+            return {"ok": True, "state": "UNVERIFIABLE_SHORT_LINK", "url": url}
+        return {"ok": False, "state": "MISSING_TAG", "url": url}
+    tag = match.group(1)
+    if tag != AMAZON_ASSOCIATES_TAG:
+        return {"ok": False, "state": "WRONG_TAG", "found_tag": tag, "expected_tag": AMAZON_ASSOCIATES_TAG, "url": url}
+    return {"ok": True, "state": "VALID", "url": url}
 
 
 def _connect() -> sqlite3.Connection:
@@ -362,6 +418,21 @@ def save_product(product: dict[str, Any]) -> dict[str, Any]:
     near-identical second one (previously is_duplicate() existed and was
     unit-tested but nothing actually called it — this closes that gap)."""
     validate_retailer(product.get("retailer"))
+    retailer = (product.get("retailer") or "").strip().lower()
+    affiliate_url = product.get("affiliate_url")
+    if retailer == "amazon" and affiliate_url:
+        amz_check = validate_amazon_affiliate_url(affiliate_url)
+        if not amz_check["ok"]:
+            raise ValueError(
+                f"Amazon affiliate URL failed validation ({amz_check['state']}): {affiliate_url!r}. "
+                f"Expected the account's own tag ({AMAZON_ASSOCIATES_TAG!r})."
+            )
+    elif retailer == "clickbank" and affiliate_url:
+        if affiliate_url not in CLICKBANK_AFFILIATE_LINKS.values():
+            raise ValueError(
+                f"ClickBank affiliate URL {affiliate_url!r} is not one of the registered "
+                f"CLICKBANK_AFFILIATE_LINKS — never invent or substitute a ClickBank link."
+            )
 
     conn = _connect()
     product_id = str(product.get("product_id") or "").strip()
@@ -551,7 +622,7 @@ def get_top_products(limit: int = 5) -> list[dict[str, Any]]:
 
 
 # ── performance ranking — combines post-publish signals, not just the ──────
-# ── pre-publish discovery score() above ─────────────────────────────────────
+# ── pre-publish discovery score() above ────────────────────────────────
 
 def _recency_factor(iso_date: str | None, half_life_days: float = 5.0) -> float:
     """1.0 for something published/discovered right now, decaying by half
