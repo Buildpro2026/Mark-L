@@ -61,14 +61,15 @@ OLLAMA_MODEL = _env("OLLAMA_MODEL", "gpt-oss:120b-cloud")
 
 # Kept as read-but-unused config so an existing Render variable can stay
 # where it is without silently re-entering the provider chain: neither is
-# listed in ui.py's _configured_providers() any more. Groq specifically was
-# removed as primary because its SDK retried a 429 twice (17s then 44s)
-# before failing — a minute of dead air mid-conversation.
+# listed in ui.py's _configured_providers() any more (see that function's
+# own docstring — Ollama Cloud is THE provider now, not these). Groq
+# specifically was removed as primary because its SDK retried a 429 twice
+# (17s then 44s) before failing — a minute of dead air mid-conversation.
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
 GROQ_API_KEY = _env("GROQ_API_KEY")
 # Anthropic is intentionally disabled. This is kept as None so older fallback
 # code paths cannot activate even if an obsolete Render environment variable
-# remains behind. Gemini is the sole cloud chat provider.
+# remains behind.
 ANTHROPIC_TOKEN = None
 AIRTABLE_TOKEN = _env("AIRTABLE_TOKEN")
 HUBSPOT_TOKEN = _env("HUBSPOT_TOKEN")
