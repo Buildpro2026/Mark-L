@@ -17,7 +17,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 DB_PATH = DATA_DIR / "jarvis2.db"
 
-# Per-platform character limits, checked when a 'service' name is given —
+# Per-platform character limits, checked when a 'service' name is given --
 # refuses early with a clear reason rather than letting the platform
 # silently truncate or reject the post. Only checked when the caller
 # names a service directly (not resolved from a raw channel_id, to avoid
@@ -35,7 +35,7 @@ _PLATFORM_LIMITS = {
 }
 
 # Refuse to re-publish identical text to the same channel within this
-# window unless allow_duplicate=True — catches an accidental duplicate
+# window unless allow_duplicate=True -- catches an accidental duplicate
 # (e.g. a retried tool call) without blocking genuinely repeated content
 # posted days apart.
 _DUPLICATE_WINDOW_SECONDS = 24 * 60 * 60
@@ -65,7 +65,7 @@ def _text_hash(text: str) -> str:
 def _find_recent_duplicate(channel_id: str, text: str) -> dict[str, Any] | None:
     """Read-only: the most recent local record of this exact text having
     been published to this channel within the duplicate window, or None.
-    Never raises — a lookup failure degrades to 'no known duplicate'
+    Never raises -- a lookup failure degrades to 'no known duplicate'
     rather than blocking a publish that's otherwise valid."""
     try:
         conn = _connect()
@@ -85,7 +85,7 @@ def _find_recent_duplicate(channel_id: str, text: str) -> dict[str, Any] | None:
 
 def _record_published_post(channel_id: str, text: str, buffer_id: str | None) -> None:
     """Best-effort local publish history for future duplicate checks.
-    Never raises — this must not fail a publish that has already
+    Never raises -- this must not fail a publish that has already
     succeeded against the real Buffer API."""
     try:
         conn = _connect()
@@ -106,7 +106,7 @@ def _record_published_post(channel_id: str, text: str, buffer_id: str | None) ->
 # accepted for REST API access" (confirmed live). That token authenticates
 # fine against Buffer's current GraphQL API instead, so verification,
 # channel lookup, AND publishing (see publish_to_buffer below) all go
-# through GRAPHQL_URL — nothing in this module calls the REST API anymore.
+# through GRAPHQL_URL -- nothing in this module calls the REST API anymore.
 GRAPHQL_URL = "https://api.buffer.com/graphql"
 
 
@@ -122,6 +122,42 @@ def get_buffer_token() -> str | None:
         return None
     token = str(data.get("buffer_token") or "").strip()
     return token or None
+
+
+def _http_error_status(exc: "requests.HTTPError") -> tuple[str, str | None]:
+    """Classifies a Buffer GraphQL transport-level HTTPError into a status
+    string + optional actionable detail, shared by verify_buffer(),
+    get_channels(), and publish_to_buffer() so all three surfaces describe
+    the same failure the same way instead of three slightly different
+    generic 'UNAVAILABLE:<code>' strings that read identically whether the
+    token is merely rate-limited or genuinely dead.
+
+    401/403 specifically mean Buffer itself rejected this token/request --
+    not JARVIS's own gateway auth (which never returns 403, see
+    dashboard/server.py's _3d_auth()) and not a rate limit (429, handled
+    separately below). This is the one case worth telling a human to go
+    check Buffer's own token/channel-connection state rather than treating
+    it as a transient failure to retry."""
+    code = exc.response.status_code if exc.response is not None else None
+    if code in (401, 403):
+        detail = (
+            f"Buffer rejected this token with HTTP {code} -- the BUFFER_TOKEN is likely invalid, "
+            "expired, revoked, or missing the scope this operation needs. Verify/regenerate it at "
+            "https://publish.buffer.com/settings/api, or reconnect the channel in Buffer, then update "
+            "the BUFFER_TOKEN environment variable. This is not a JARVIS-side bug."
+        )
+        return f"AUTH_FAILED:{code}", detail
+    if code == 429:
+        retry_after = None
+        try:
+            retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else None
+        except Exception:
+            retry_after = None
+        detail = "Buffer's API is rate-limiting this token right now -- not an authentication problem."
+        if retry_after:
+            detail += f" Retry after {retry_after}s."
+        return "RATE_LIMITED:429", detail
+    return f"UNAVAILABLE:{code if code is not None else '?'}", None
 
 
 def _graphql(query: str, variables: dict[str, Any] | None = None, timeout: int = 20) -> dict[str, Any]:
@@ -144,12 +180,12 @@ def _graphql(query: str, variables: dict[str, Any] | None = None, timeout: int =
 
 def verify_buffer() -> dict[str, Any]:
     """2026-09-03 finding: a live /3d Buffer/Social module open was
-    returning "UNAVAILABLE:429" — lumped in with every other failure
+    returning "UNAVAILABLE:429" -- lumped in with every other failure
     under the generic UNAVAILABLE bucket, which reads exactly like a bad
     token even though it isn't one. A 429 here is Buffer's own GraphQL
     API rate-limiting this token (see get_channels()/
     discover_scheduling_capabilities() below, which each also call
-    _graphql() — three live calls can fire from a single module open,
+    _graphql() -- three live calls can fire from a single module open,
     with zero caching on the caller side; dashboard/server.py's
     _module_social() now caches this result briefly for exactly that
     reason). Labelled RATE_LIMITED so the UI/health surface can say so
@@ -168,28 +204,18 @@ def verify_buffer() -> dict[str, Any]:
             return {"configured": True, "authenticated": True, "verified": True, "functional": True, "status": "VERIFIED", "data": account}
         return {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": "UNAVAILABLE:empty response"}
     except requests.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else None
-        if code == 429:
-            retry_after = None
-            try:
-                retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else None
-            except Exception:
-                retry_after = None
-            detail = "Buffer's API is rate-limiting this token right now — not an authentication problem."
-            if retry_after:
-                detail += f" Retry after {retry_after}s."
-            return {
-                "configured": True, "authenticated": False, "verified": False, "functional": False,
-                "status": "RATE_LIMITED:429", "detail": detail,
-            }
-        return {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": f"UNAVAILABLE:{code if code is not None else '?'}"}
+        status, detail = _http_error_status(exc)
+        result = {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": status}
+        if detail:
+            result["detail"] = detail
+        return result
     except Exception as exc:
         return {"configured": True, "authenticated": False, "verified": False, "functional": False, "status": f"UNAVAILABLE:{exc}"}
 
 
 def get_channels() -> dict[str, Any]:
     """Retrieve the Buffer channels ("profiles" in the old REST API's
-    terms) this token can post to — needed to supply a channel/profile ID
+    terms) this token can post to -- needed to supply a channel/profile ID
     when publishing. Looks up the account's organization ID first since
     the channels query requires one."""
     token = get_buffer_token()
@@ -226,8 +252,11 @@ def get_channels() -> dict[str, Any]:
         channels = (channels_payload.get("data") or {}).get("channels") or []
         return {"configured": True, "channels": channels, "status": "VERIFIED", "organization_id": org_id}
     except requests.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else "?"
-        return {"configured": True, "channels": [], "status": f"UNAVAILABLE:{code}"}
+        status, detail = _http_error_status(exc)
+        result = {"configured": True, "channels": [], "status": status}
+        if detail:
+            result["detail"] = detail
+        return result
     except Exception as exc:
         return {"configured": True, "channels": [], "status": f"UNAVAILABLE:{exc}"}
 
@@ -235,7 +264,7 @@ def get_channels() -> dict[str, Any]:
 def discover_scheduling_capabilities() -> dict[str, Any]:
     """Introspects Buffer's LIVE GraphQL schema (via this account's own
     already-authenticated token) to honestly report which scheduled-post
-    operations are actually available — never guessed, never assumed from
+    operations are actually available -- never guessed, never assumed from
     Buffer's old REST-era docs. 'create' is already wired and working (see
     _CREATE_POST_MUTATION below, whose shape was itself discovered the same
     way). This answers the other half: can this token's schema retrieve,
@@ -243,7 +272,7 @@ def discover_scheduling_capabilities() -> dict[str, Any]:
 
     Every capability in the returned dict is derived strictly from field
     names __schema introspection actually reports for this account's
-    Query/Mutation types — a capability reads False if the matching field
+    Query/Mutation types -- a capability reads False if the matching field
     genuinely isn't there, not as a guess."""
     token = get_buffer_token()
     if not token:
@@ -286,7 +315,7 @@ def discover_scheduling_capabilities() -> dict[str, Any]:
 _VALID_MODES = {"addToQueue", "shareNow", "shareNext", "customScheduled"}
 
 # Schema discovered live via GraphQL introspection against this account's
-# token (see GRAPHQL_URL) — createPost's input/return shapes aren't
+# token (see GRAPHQL_URL) -- createPost's input/return shapes aren't
 # documented anywhere in this codebase otherwise, so this mutation mirrors
 # exactly what __schema introspection reported for CreatePostInput and the
 # PostActionPayload union, rather than guessing at Buffer's REST-era shape.
@@ -308,7 +337,7 @@ _CREATE_POST_MUTATION = """
 
 def resolve_channel_id(service: str) -> dict[str, Any]:
     """Looks up a connected channel's Buffer ID by service name (e.g.
-    'linkedin', 'instagram', 'facebook', 'tiktok') via get_channels() —
+    'linkedin', 'instagram', 'facebook', 'tiktok') via get_channels() --
     never hardcodes or guesses an ID. Skips disconnected channels."""
     result = get_channels()
     if result["status"] != "VERIFIED":
@@ -323,17 +352,17 @@ def resolve_channel_id(service: str) -> dict[str, Any]:
 
 
 def publish_to_buffer(post: dict[str, Any], approved: bool = False) -> dict[str, Any]:
-    """Publishes via Buffer's current GraphQL createPost mutation — the
+    """Publishes via Buffer's current GraphQL createPost mutation -- the
     legacy REST endpoint this used to call rejects this account's token
     entirely (see GRAPHQL_URL comment above), so there's no REST fallback.
 
     `post` must supply:
       - "text" or "caption": the post content (required, never fabricated)
       - "channel_id" (a real Buffer channel id), OR "service" (one of the
-        connected channel service names — resolved via resolve_channel_id());
+        connected channel service names -- resolved via resolve_channel_id());
         "service" also enables the platform character-limit check below.
     Optional: "link_url", "image_url" (attached as Buffer assets),
-    "mode" — defaults to "addToQueue" (adds to that channel's existing
+    "mode" -- defaults to "addToQueue" (adds to that channel's existing
     posting queue) rather than "shareNow", so calling this never posts
     immediately unless the caller explicitly asks for that. "allow_duplicate"
     bypasses the recent-duplicate check (see below) once a human has
@@ -341,14 +370,14 @@ def publish_to_buffer(post: dict[str, Any], approved: bool = False) -> dict[str,
 
     Input is validated (text/channel/mode/length/duplicate) BEFORE the
     configured/approved checks, so a caller always finds out what's wrong
-    with their post regardless of Buffer's config state — previously the
+    with their post regardless of Buffer's config state -- previously the
     NOT-CONFIGURED check ran first and masked every validation error.
 
-    Requires approved=True to actually publish — the same gate every
+    Requires approved=True to actually publish -- the same gate every
     other integration wired into JARVIS this session uses (Gmail send,
     Calendar create, Airtable/HubSpot writes). Calling with approved=False
     (the default) validates everything and returns a PREVIEW of exactly
-    what would be posted, without publishing anything — the
+    what would be posted, without publishing anything -- the
     preview-then-confirm workflow this function is designed around.
     """
     text = (post.get("text") or post.get("caption") or "").strip()
@@ -395,7 +424,7 @@ def publish_to_buffer(post: dict[str, Any], approved: bool = False) -> dict[str,
     if not approved:
         return {
             "status": "PREVIEW", "published": False,
-            "detail": "Validated — call again with approved=True to actually publish.",
+            "detail": "Validated -- call again with approved=True to actually publish.",
             "preview": {"channel_id": channel_id, "service": service, "text": text, "mode": mode},
         }
 
@@ -431,7 +460,10 @@ def publish_to_buffer(post: dict[str, Any], approved: bool = False) -> dict[str,
             }
         return {"status": f"ERROR:{typename}", "published": False, "detail": result.get("message")}
     except requests.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else "?"
-        return {"status": f"UNAVAILABLE:{code}", "published": False}
+        status, detail = _http_error_status(exc)
+        result = {"status": status, "published": False}
+        if detail:
+            result["detail"] = detail
+        return result
     except Exception as exc:
         return {"status": f"UNAVAILABLE:{exc}", "published": False}
