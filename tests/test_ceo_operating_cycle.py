@@ -46,11 +46,11 @@ def _restore_shared_orchestrator_state():
     would leak into a later test elsewhere in the suite (e.g. executive_
     brief._operational_risks() or priorities_engine picking up a stray
     failed task and no longer reporting 'nothing is wrong'). Snapshot
-    per-agent status/last_run_ts/last_error/last_success_ts plus the
-    _tasks/_events collections before each test, restore after."""
+    per-agent status/last_run_ts/last_error plus the _tasks/_events
+    collections before each test, restore after."""
     orch = cycle.agent_orchestrator
     agent_snapshot = {
-        aid: (a.status, a.last_run_ts, a.last_error, a.last_success_ts)
+        aid: (a.status, a.last_run_ts, a.last_error)
         for aid, a in orch._agents.items()
     }
     task_ids_before = set(orch._tasks.keys())
@@ -60,12 +60,12 @@ def _restore_shared_orchestrator_state():
         if task_id not in task_ids_before:
             del orch._tasks[task_id]
     del orch._events[events_len_before:]
-    for aid, (status, last_run_ts, last_error, last_success_ts) in agent_snapshot.items():
+    for aid, (status, last_run_ts, last_error) in agent_snapshot.items():
         agent = orch._agents.get(aid)
         if agent is None:
             continue
         agent.status, agent.last_run_ts = status, last_run_ts
-        agent.last_error, agent.last_success_ts = last_error, last_success_ts
+        agent.last_error = last_error
 
 
 def test_full_cycle_runs_end_to_end_without_error():
@@ -177,6 +177,39 @@ def test_failed_agent_task_produces_a_followup_risk_entry():
 def test_report_notification_is_skipped_but_recorded_in_dry_run():
     result = cycle.run_cycle(force=True, dry_run=True)
     assert result["notification"] == {"action": "skipped_dry_run"}
+
+
+def test_summary_surfaces_real_buildpro_candidate_job_match_counts(monkeypatch):
+    # Workstream 9 requires the morning report to actually name BuildPro's
+    # candidate/job/match state, not just risks/approvals/DDF — this was a
+    # real gap: generate_morning_report_data() already computes these real
+    # counts (buildpro_intelligence.py), but _format_report() never surfaced
+    # them in the text that actually gets sent. Fake the data source (never
+    # a live DB in this test file) with fixed, checkable numbers.
+    from actions import buildpro_intelligence
+
+    def _fake_report_data():
+        return {
+            "generated_ts": 0,
+            "counts": {
+                "candidate_count": 7, "client_count": 3, "prospect_count": 2,
+                "active_jobs": 4, "qualified_matches": 5,
+            },
+            "top_matches": [], "highest_priority_prospects": [],
+            "candidate_followups": [], "client_followups": [],
+            "new_jobs": [], "unmatched_open_jobs": [],
+            "recent_activity": [],
+            "recommended_actions": ["2 high-scoring match(es) (>= 70) are still 'proposed' and ready to submit."],
+            "last_hubspot_sync": {"candidates": None, "clients": None},
+        }
+    monkeypatch.setattr(buildpro_intelligence, "generate_morning_report_data", _fake_report_data)
+
+    result = cycle.run_cycle(force=True, dry_run=True)
+    summary = result["summary"]
+    assert "7 candidate(s)" in summary
+    assert "4 open job(s)" in summary
+    assert "5 qualified match(es)" in summary
+    assert "high-scoring match(es)" in summary
 
 
 def test_report_notification_is_sent_when_not_dry_run(monkeypatch):
