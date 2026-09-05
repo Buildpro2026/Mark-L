@@ -105,7 +105,7 @@ def _item_result(result: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "state": "OK", "record": result["data"]}
 
 
-# ── Contacts ─────────────────────────────────────────────────────────────
+# ── Contacts ────────────────────────────────────────────────────────
 
 def get_contacts(limit: int = 20, after: str | None = None) -> dict[str, Any]:
     params: dict[str, Any] = {"limit": limit}
@@ -174,7 +174,7 @@ def upsert_contact(email: str, properties: dict[str, Any], approved: bool = Fals
     return result
 
 
-# ── Companies ────────────────────────────────────────────────────────────
+# ── Companies ─────────────────────────────────────────────────
 
 def get_companies(limit: int = 20, after: str | None = None) -> dict[str, Any]:
     params: dict[str, Any] = {"limit": limit}
@@ -234,7 +234,91 @@ def upsert_company(name: str, properties: dict[str, Any], approved: bool = False
     return result
 
 
-# ── Files (resume attachments) ──────────────────────────────────────────
+# ── Associations ──────────────────────────────────────────────────
+# HubSpot's v4 default-association-type endpoint — same shape
+# attach_file_note() already uses for note<->contact, generalized so any
+# two CRM object types can be linked (contact<->company, deal<->contact,
+# deal<->company, task<->contact, task<->deal). "default" association
+# type works for every standard object pair HubSpot ships; a custom
+# pipeline's non-default association types aren't needed here.
+
+def _associate(from_type: str, from_id: str, to_type: str, to_id: str, approved: bool = False) -> dict[str, Any]:
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": f"Associating a HubSpot {from_type} with a {to_type} requires explicit approval."}
+    result = _request("PUT", f"/crm/v4/objects/{from_type}/{from_id}/associations/default/{to_type}/{to_id}")
+    if not result["ok"]:
+        return {"ok": False, "state": result["state"], "detail": result.get("detail")}
+    return {"ok": True, "state": "OK"}
+
+
+def associate_contact_with_company(contact_id: str, company_id: str, approved: bool = False) -> dict[str, Any]:
+    return _associate("contacts", contact_id, "companies", company_id, approved=approved)
+
+
+# ── Deals (recruiting opportunities) ────────────────────────
+
+def get_deal(deal_id: str) -> dict[str, Any]:
+    return _item_result(_request("GET", f"/crm/v3/objects/deals/{deal_id}"))
+
+
+def create_deal(properties: dict[str, Any], approved: bool = False) -> dict[str, Any]:
+    """Creates a HubSpot deal — the recruiting-opportunity record for an
+    employer identified as needing recruiting help (Section SIXTH: JOB ->
+    EMPLOYER -> ... -> RECRUITING OPPORTUNITY -> HUBSPOT). Same
+    approval-gated, never-fabricated contract as create_contact/
+    create_company: every property persisted is exactly what the caller
+    passed, nothing invented (a real dealname/pipeline/stage/amount must
+    come from the caller, not a guess)."""
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": "Creating a HubSpot deal requires explicit approval."}
+    return _item_result(_request("POST", "/crm/v3/objects/deals", json={"properties": properties}))
+
+
+def update_deal(deal_id: str, properties: dict[str, Any], approved: bool = False) -> dict[str, Any]:
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": "Updating a HubSpot deal requires explicit approval."}
+    return _item_result(_request("PATCH", f"/crm/v3/objects/deals/{deal_id}", json={"properties": properties}))
+
+
+def associate_deal_with_company(deal_id: str, company_id: str, approved: bool = False) -> dict[str, Any]:
+    return _associate("deals", deal_id, "companies", company_id, approved=approved)
+
+
+def associate_deal_with_contact(deal_id: str, contact_id: str, approved: bool = False) -> dict[str, Any]:
+    return _associate("deals", deal_id, "contacts", contact_id, approved=approved)
+
+
+# ── Tasks (follow-ups) ───────────────────────────────────────
+
+def get_task(task_id: str) -> dict[str, Any]:
+    return _item_result(_request("GET", f"/crm/v3/objects/tasks/{task_id}"))
+
+
+def create_task(properties: dict[str, Any], approved: bool = False) -> dict[str, Any]:
+    """Creates a HubSpot follow-up task. Expected properties (all real,
+    caller-supplied — e.g. hs_task_subject, hs_task_body, hs_timestamp,
+    hs_task_status, hs_task_priority) match HubSpot's own task property
+    names; nothing here renames or reinterprets them."""
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": "Creating a HubSpot task requires explicit approval."}
+    return _item_result(_request("POST", "/crm/v3/objects/tasks", json={"properties": properties}))
+
+
+def update_task(task_id: str, properties: dict[str, Any], approved: bool = False) -> dict[str, Any]:
+    if not approved:
+        return {"ok": False, "state": "NOT_APPROVED", "detail": "Updating a HubSpot task requires explicit approval."}
+    return _item_result(_request("PATCH", f"/crm/v3/objects/tasks/{task_id}", json={"properties": properties}))
+
+
+def associate_task_with_contact(task_id: str, contact_id: str, approved: bool = False) -> dict[str, Any]:
+    return _associate("tasks", task_id, "contacts", contact_id, approved=approved)
+
+
+def associate_task_with_deal(task_id: str, deal_id: str, approved: bool = False) -> dict[str, Any]:
+    return _associate("tasks", task_id, "deals", deal_id, approved=approved)
+
+
+# ── Files (resume attachments) ───────────────────────────
 # Separate from _request() above because file upload is multipart/form-data,
 # not JSON — reusing _request()'s hardcoded Content-Type: application/json
 # header would corrupt the multipart boundary. Everything else (token
