@@ -30,7 +30,8 @@ TOOL ROUTING:
 - system_status: CPU, RAM, GPU, temperature, computer performance.
 - web_search: current facts, news, research, prices, and external information.
 - obsidian: JARVIS Brain and operating knowledge. Read freely. Writes require the existing approval gates and explicit user authorization.
-- Gmail/Calendar/Airtable/HubSpot/Buffer/Twilio tools: use real integration tools when configured. Never simulate results.
+- Gmail/Calendar/HubSpot/Buffer/Twilio tools: use real integration tools when configured. Never simulate results.
+- HubSpot is the CRM of record for BuildPro (candidates, clients, prospects). Do not use Airtable for BuildPro recruiting data — it is not part of that workflow.
 
 LANGUAGE: Respond in the user's language and extract tool parameters in English.
 
