@@ -699,32 +699,43 @@ TOOL_DECLARATIONS = [
     {
         "name": "hubspot",
         "description": (
-            "Reads and manages HubSpot CRM contacts/companies. Actions: "
-            "'status' (is HubSpot connected?), 'list_contacts'/"
+            "Reads and manages HubSpot CRM contacts/companies/deals/tasks. "
+            "Actions: 'status' (is HubSpot connected?), 'list_contacts'/"
             "'list_companies' (recent records, read-only, always safe), "
             "'search_contacts'/'search_companies' (find by a search term "
             "— property defaults to email for contacts, name for "
             "companies), 'upsert_contact'/'upsert_company' (creates a REAL "
             "record if none matches, or updates the existing one if a "
             "match is found by email/name — never creates a duplicate), "
+            "'create_deal' (a REAL recruiting-opportunity/deal record — "
+            "e.g. an employer identified as needing recruiting help), "
+            "'create_task' (a REAL follow-up task), 'associate_contact_"
+            "company'/'associate_deal_contact'/'associate_deal_company'/"
+            "'associate_task_contact'/'associate_task_deal' (links two "
+            "already-existing real records by id — never invents an id), "
             "'sync' (pulls ALL real HubSpot contacts/companies into "
             "BuildPro's own candidate/client tables right now, deduped by "
             "HubSpot id — safe and idempotent, always safe to call; this "
             "also runs automatically every hour, so 'sync' is only needed "
             "to force it immediately, e.g. right after connecting HubSpot "
             "or when the user asks to refresh BuildPro from HubSpot now). "
-            "Only call 'upsert_contact'/'upsert_company' when the user has "
-            "EXPLICITLY stated what to add/change — never invent property "
-            "values or guess at a contact/company the user didn't name."
+            "Only call 'upsert_contact'/'upsert_company'/'create_deal'/"
+            "'create_task' when the user has EXPLICITLY stated what to "
+            "add/change — never invent property values, ids, or guess at "
+            "a contact/company/deal/task the user didn't name."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":        {"type": "STRING", "description": "status | list_contacts | list_companies | search_contacts | search_companies | upsert_contact | upsert_company | sync"},
+                "action":        {"type": "STRING", "description": "status | list_contacts | list_companies | search_contacts | search_companies | upsert_contact | upsert_company | create_deal | create_task | associate_contact_company | associate_deal_contact | associate_deal_company | associate_task_contact | associate_task_deal | sync"},
                 "query":         {"type": "STRING", "description": "Search term, for 'search_contacts'/'search_companies'"},
                 "email":         {"type": "STRING", "description": "Contact email — the dedup key for 'upsert_contact'"},
                 "company_name":  {"type": "STRING", "description": "Company name — the dedup key for 'upsert_company'"},
-                "properties":    {"type": "STRING", "description": "JSON object of HubSpot property name/value pairs as a string, e.g. '{\"firstname\": \"Jane\", \"phone\": \"555-1234\"}' — for 'upsert_contact'/'upsert_company'"},
+                "properties":    {"type": "STRING", "description": "JSON object of HubSpot property name/value pairs as a string, e.g. '{\"firstname\": \"Jane\", \"phone\": \"555-1234\"}' for 'upsert_contact'/'upsert_company', '{\"dealname\": \"...\", \"pipeline\": \"...\", \"dealstage\": \"...\"}' for 'create_deal', or '{\"hs_task_subject\": \"...\", \"hs_task_body\": \"...\", \"hs_task_status\": \"NOT_STARTED\"}' for 'create_task'"},
+                "contact_id":    {"type": "STRING", "description": "Real HubSpot contact id — for 'associate_contact_company'/'associate_deal_contact'/'associate_task_contact'"},
+                "company_id":    {"type": "STRING", "description": "Real HubSpot company id — for 'associate_contact_company'/'associate_deal_company'"},
+                "deal_id":       {"type": "STRING", "description": "Real HubSpot deal id — for 'associate_deal_contact'/'associate_deal_company'/'associate_task_deal'"},
+                "task_id":       {"type": "STRING", "description": "Real HubSpot task id — for 'associate_task_contact'/'associate_task_deal'"},
                 "limit":         {"type": "INTEGER", "description": "Max results to return (default 20)"},
             },
             "required": ["action"],
