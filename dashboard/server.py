@@ -403,7 +403,7 @@ def _verify_to_health_status(verify: dict) -> str:
     if not verify.get("configured"):
         return "NOT_CONFIGURED"
     status = str(verify.get("status") or "")
-    if status.startswith("UNAVAILABLE:401") or status.startswith("UNAVAILABLE:403"):
+    if status.startswith("AUTH_FAILED") or status.startswith("UNAVAILABLE:401") or status.startswith("UNAVAILABLE:403"):
         return "AUTH_FAILED"
     if status.startswith("RATE_LIMITED"):
         return "RATE_LIMITED"
@@ -1068,8 +1068,11 @@ class DashboardServer:
         if not verify.get("verified"):
             data["channels"] = []
             data["scheduling_capabilities"] = {"configured": verify.get("configured", False), "status": verify.get("status"), "capabilities": {}}
-            if str(verify.get("status", "")).startswith("RATE_LIMITED"):
+            status_str = str(verify.get("status", ""))
+            if status_str.startswith("RATE_LIMITED"):
                 data["note"] = verify.get("detail") or "RATE LIMITED — Buffer is throttling this token right now; try again shortly."
+            elif status_str.startswith("AUTH_FAILED"):
+                data["note"] = verify.get("detail") or "AUTH FAILED — Buffer rejected this token; check BUFFER_TOKEN and the connected channel."
             else:
                 data["note"] = "NOT AVAILABLE" if not verify.get("configured") else "NOT AVAILABLE — Buffer check failed."
             self._buffer_module_cache = {"ts": time.time(), "data": data}
