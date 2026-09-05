@@ -64,5 +64,31 @@ services:
         sync: false   # E.164, e.g. +13125550142 — where "call me" rings
       - key: JARVIS_HEADLESS_HOST
         value: "0.0.0.0"
+      # Business integrations — actions/{buffer,hubspot,airtable,twilio}_integration.py,
+      # actions/elevenlabs_tts.py all read these via core/headless/config.py.
+      # Every one degrades to NOT_CONFIGURED if unset (never a fabricated
+      # success) — none are required for JARVIS to start. Previously set
+      # manually in the Render dashboard outside this blueprint (so a
+      # from-scratch redeploy via "New Blueprint Instance" would silently
+      # miss them); declared here now so the blueprint matches what the
+      # running code actually reads.
+      - key: BUFFER_TOKEN
+        sync: false   # a Buffer "Public API" access token from
+                       # https://publish.buffer.com/settings/api — Buffer's
+                       # legacy REST API rejects this token type; only the
+                       # GraphQL API (api.buffer.com/graphql) is used, see
+                       # actions/buffer_integration.py
+      - key: HUBSPOT_TOKEN
+        sync: false   # HubSpot private-app access token
+      - key: AIRTABLE_TOKEN
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false   # E.164, the Twilio number JARVIS sends SMS from
+      - key: ELEVENLABS_API_KEY
+        sync: false
       # No JARVIS_HEADLESS_PORT here — core/headless/config.py falls back
       # to Render's own $PORT automatically when that's unset.

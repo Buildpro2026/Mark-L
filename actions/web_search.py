@@ -1,6 +1,8 @@
 #web_search.py
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 def _get_base_dir() -> Path:
@@ -19,9 +21,9 @@ def _get_api_key() -> str:
 
 
 def _gemini_search(query: str) -> str:
-    from google import genai
+    from core.headless.gemini_client import get_client
 
-    client   = genai.Client(api_key=_get_api_key())
+    client   = get_client(_get_api_key())
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=query,
@@ -120,9 +122,9 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
     Returns (headline_list, raw_text_for_display).
     """
     import re
-    from google import genai
+    from core.headless.gemini_client import get_client
 
-    client = genai.Client(api_key=_get_api_key())
+    client = get_client(_get_api_key())
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=f"Current world news: {n} headlines. Numbered list, titles only.",
@@ -150,16 +152,87 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
     return headlines[:n], raw.strip()
 
 
+# ── Reliability primitive ───────────────────────────────────────────────────
+
+def _log_search_error(source: str, exc: Exception) -> None:
+    """Distinguishes a quota/rate-limit failure (expected, recoverable via
+    fallback, not actionable by the user) from any other error, so logs
+    don't cry wolf on the routine case."""
+    text = str(exc)
+    if "429" in text or "RESOURCE_EXHAUSTED" in text.upper():
+        print(f"[WebSearch] {source} quota exhausted: {text}")
+    else:
+        print(f"[WebSearch] {source} error: {text}")
+
+
+def _race(primary, fallback, timeout: float = 10.0, min_len: int = 40):
+    """Runs `primary` and `fallback` concurrently and returns whichever
+    produces a valid (>= min_len chars) string result first.
+
+    This is the actual fix for a hung/slow primary (e.g. Gemini stuck in
+    an internal retry loop on a 429): a plain try/except fallback only
+    helps once the primary actually raises — if it just hangs, the user
+    waits for it regardless. Racing means a fast, healthy fallback is
+    never held hostage by a slow primary. Primary still wins any genuine
+    tie (both resolve within the short grace window) so a working Gemini
+    is preferred over DDG whenever it isn't actually the bottleneck."""
+    box: dict = {}
+
+    def _valid(r) -> bool:
+        return isinstance(r, str) and len(r) >= min_len
+
+    def _run(fn, key: str) -> None:
+        try:
+            box[key] = fn()
+        except Exception as e:
+            _log_search_error(key, e)
+            box[key] = None
+
+    threading.Thread(target=_run, args=(primary, "primary"), daemon=True).start()
+    threading.Thread(target=_run, args=(fallback, "fallback"), daemon=True).start()
+
+    grace_deadline = time.monotonic() + min(0.3, timeout)
+    while time.monotonic() < grace_deadline:
+        if "primary" in box:
+            if _valid(box["primary"]):
+                return box["primary"]
+            break
+        time.sleep(0.01)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if "primary" in box and _valid(box["primary"]):
+            return box["primary"]
+        if "fallback" in box:
+            if _valid(box["fallback"]):
+                return box["fallback"]
+            break
+        time.sleep(0.01)
+
+    if _valid(box.get("primary")):
+        return box["primary"]
+    if _valid(box.get("fallback")):
+        return box["fallback"]
+    return None
+
+
 # ── Modes ──────────────────────────────────────────────────────────────────────
 
 def _search(query: str) -> str:
-    """Default search — Gemini grounded, DDG fallback."""
-    try:
-        return _gemini_search(query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Gemini failed ({e}) — trying DDG...")
-        results = _ddg_search(query)
-        return _format_ddg(query, results)
+    """Default search — Gemini grounded, DDG fallback, raced so a slow/
+    hung Gemini call never delays a healthy DDG result. min_len=1 here
+    (not the _race default): DDG's own formatter always returns a
+    meaningful, non-empty string even for a legitimate "no results"
+    answer, which should still win over a hung Gemini call rather than
+    being discarded as "too short" and re-fetched a second time."""
+    result = _race(
+        lambda: _gemini_search(query),
+        lambda: _format_ddg(query, _ddg_search(query)),
+        min_len=1,
+    )
+    if result is not None:
+        return result
+    return _format_ddg(query, _ddg_search(query))
 
 
 def _news(query: str) -> str:
@@ -220,23 +293,27 @@ def _research(query: str) -> str:
         f"Comprehensive, detailed explanation of: {query}. "
         "Include background context, key facts, current state, and important nuances."
     )
-    try:
-        return _gemini_search(research_query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Research Gemini failed ({e}) — DDG fallback...")
-        results = _ddg_search(query, max_results=10)
-        return _format_ddg(query, results)
+    result = _race(
+        lambda: _gemini_search(research_query),
+        lambda: _format_ddg(query, _ddg_search(query, max_results=10)),
+        min_len=1,
+    )
+    if result is not None:
+        return result
+    return _format_ddg(query, _ddg_search(query, max_results=10))
 
 
 def _price(query: str) -> str:
     """Product price lookup — searches for current market prices."""
     price_query = f"current price of {query} — how much does it cost today"
-    try:
-        return _gemini_search(price_query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Price Gemini failed ({e}) — DDG fallback...")
-        results = _ddg_search(f"{query} price buy", max_results=6)
-        return _format_ddg(query, results)
+    result = _race(
+        lambda: _gemini_search(price_query),
+        lambda: _format_ddg(query, _ddg_search(f"{query} price buy", max_results=6)),
+        min_len=1,
+    )
+    if result is not None:
+        return result
+    return _format_ddg(query, _ddg_search(f"{query} price buy", max_results=6))
 
 
 def _compare(items: list[str], aspect: str) -> str:

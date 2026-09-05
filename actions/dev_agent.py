@@ -25,8 +25,8 @@ def _get_api_key() -> str:
 
 
 def _get_model(model_name: str):
-    from google import genai
-    _c = genai.Client(api_key=_get_api_key())
+    from core.headless.gemini_client import get_client
+    _c = get_client(_get_api_key())
 
     class _W:
         def generate_content(self, contents):
