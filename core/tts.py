@@ -26,6 +26,12 @@ os.environ.setdefault("USE_TF",                 "0")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
+def _stopped(event: Optional[threading.Event]) -> bool:
+    """True only when a real, set stop_event was passed — never raises on
+    None (the common case: no barge-in requested for this utterance)."""
+    return bool(event and event.is_set())
+
+
 # ---------------------------------------------------------------------------
 # Audio playback helpers
 # ---------------------------------------------------------------------------
@@ -108,13 +114,13 @@ class EdgeTTSEngine:
     def __init__(self, voice: str = "en-US-GuyNeural"):
         self.voice = voice
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, stop_event: Optional[threading.Event] = None) -> None:
         loop = asyncio.new_event_loop()
         try:
             audio_bytes = loop.run_until_complete(self._synth(text))
         finally:
             loop.close()
-        if audio_bytes:
+        if audio_bytes and not _stopped(stop_event):
             _play_audio_bytes(audio_bytes)
 
     async def _synth(self, text: str) -> bytes:
@@ -307,7 +313,7 @@ class KokoroTTSEngine:
         except Exception as e:
             print(f"[TTS] Kokoro warmup warning: {e}")
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, stop_event: Optional[threading.Event] = None) -> None:
         with self._lock:
             if self._pipeline is None:
                 self._init()
@@ -324,6 +330,8 @@ class KokoroTTSEngine:
         def _synth():
             try:
                 for _, _, audio in self._pipeline(text, voice=self.voice, speed=self.speed):
+                    if _stopped(stop_event):
+                        break
                     if audio is not None:
                         arr = _to_numpy(audio)
                         arr = _compress_silence(arr)
@@ -340,7 +348,7 @@ class KokoroTTSEngine:
         # Player runs in this thread so sd.wait() doesn't block the synth thread.
         while True:
             arr = audio_q.get()
-            if arr is None:
+            if arr is None or _stopped(stop_event):
                 break
             _play_np(arr, 24000)
 
@@ -357,7 +365,7 @@ class ElevenLabsTTSEngine:
         self.api_key  = api_key
         self.voice_id = voice_id
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, stop_event: Optional[threading.Event] = None) -> None:
         import requests
         headers = {
             "xi-api-key":   self.api_key,
@@ -373,7 +381,10 @@ class ElevenLabsTTSEngine:
             json=payload, headers=headers, timeout=30,
         )
         resp.raise_for_status()
-        _play_audio_bytes(resp.content)
+        # A barge-in during the network round trip means the audio would
+        # start playing after the user already spoke over/cancelled it.
+        if not _stopped(stop_event):
+            _play_audio_bytes(resp.content)
 
 
 # ---------------------------------------------------------------------------
@@ -387,9 +398,10 @@ class TTSPlayer:
     """
 
     def __init__(self, engine):
-        self._engine  = engine
-        self._playing = False
-        self._lock    = threading.Lock()
+        self._engine     = engine
+        self._playing    = False
+        self._lock       = threading.Lock()
+        self._stop_event = threading.Event()
 
     @property
     def is_playing(self) -> bool:
@@ -402,12 +414,13 @@ class TTSPlayer:
         on_done:  Optional[Callable] = None,
     ) -> None:
         """Synthesise and play text. BLOCKING – call from a dedicated thread."""
+        self._stop_event.clear()
         try:
             with self._lock:
                 self._playing = True
             if on_start:
                 on_start()
-            self._engine.speak(text)
+            self._engine.speak(text, stop_event=self._stop_event)
         except Exception as e:
             print(f"[TTS] Error: {e}")
         finally:
@@ -417,7 +430,15 @@ class TTSPlayer:
                 on_done()
 
     def stop(self) -> None:
-        sd.stop()
+        """Signals the in-flight engine.speak() to stop producing/queuing
+        more audio, and aborts (discards in-flight audio) rather than
+        sd.stop() (which waits for buffered audio to finish draining) —
+        the actual latency fix for barge-in feeling instant."""
+        self._stop_event.set()
+        try:
+            sd.get_stream().abort()
+        except Exception:
+            pass
         with self._lock:
             self._playing = False
 

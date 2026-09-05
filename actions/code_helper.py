@@ -24,8 +24,8 @@ def _get_api_key() -> str:
 
 
 def _get_gemini(model: str = GEMINI_MODEL):
-    from google import genai
-    _c = genai.Client(api_key=_get_api_key())
+    from core.headless.gemini_client import get_client
+    _c = get_client(_get_api_key())
 
     class _W:
         def generate_content(self, contents):
@@ -456,10 +456,10 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
             print(f"[Code] ⚠️ Could not read file: {err}")
 
     try:
-        from google import genai
         from google.genai import types
+        from core.headless.gemini_client import get_client
 
-        client = genai.Client(api_key=_get_api_key())
+        client = get_client(_get_api_key())
 
         image_bytes  = screenshot_path.read_bytes()
         image_base64 = _image_to_base64(screenshot_path)

@@ -1,5 +1,6 @@
 PyQt6
 sounddevice
+miniaudio
 google-genai
 google-generativeai
 pillow

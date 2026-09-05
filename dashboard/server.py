@@ -53,12 +53,43 @@ BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000
 # Plain-HTTP fallback alias for /3d when SSL is enabled (mirrors the
-# PORT + 1 HTTPS alias pattern in get_manual_url() below). Defined here so
-# it's a single source of truth; the plain-HTTP listener itself is not yet
-# implemented — see test_dashboard_plain_http.py, which exercises the port
-# math and will keep failing past collection until that listener exists.
+# PORT + 1 HTTPS alias pattern in get_manual_url() below) — a client that
+# connects with plain HTTP to the HTTPS-only main port gets an empty
+# reply/connection reset (it isn't speaking TLS), so this gives it a real
+# answer instead.
 HTTP_PORT   = PORT + 2
 MAX_UPLOAD_MB = 500
+
+
+def is_port_free(port: int, host: str = "0.0.0.0") -> bool:
+    """Best-effort pre-flight check: can a new listener actually bind this
+    port right now? uvicorn's own bind-failure path calls sys.exit(),
+    which — raised inside a never-awaited asyncio Task — propagates
+    through Task.__step's special-cased SystemExit handling and kills the
+    WHOLE JARVIS process, not just the dashboard. Checking first lets
+    serve()/_serve_alias()/_serve_http_plain() skip cleanly instead."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _report_port_conflict(port: int, label: str, exit_code: int = 1) -> None:
+    """Never raises. A busy port degrades to 'this one listener is
+    skipped, logged clearly' instead of the process dying."""
+    message = (
+        f"[Dashboard] Port {port} is already in use ({label}) — skipping "
+        f"(uvicorn would exit with exit code {exit_code})."
+    )
+    print(message)
+    try:
+        from core.startup import get_logger
+        get_logger().warning(message)
+    except Exception:
+        pass
 
 
 def _make_uploads_dir() -> Path:
@@ -1949,6 +1980,9 @@ class DashboardServer:
         """Second HTTPS server on PORT+1 sharing the same app and in-memory state.
         Chrome HTTPS-upgrades any bare IP:PORT the user types, so this port also needs TLS.
         User types IP:8001 → Chrome tries https → self-signed cert warning → accept once → done."""
+        if not is_port_free(PORT + 1):
+            _report_port_conflict(PORT + 1, "dashboard alias")
+            return
         ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"
         ssl_cert = BASE_DIR / "config" / "certs" / "jarvis.crt"
         asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
@@ -1959,10 +1993,28 @@ class DashboardServer:
         print(f"[Dashboard] Manual entry:  {self._ip}:{PORT + 1}  (type in browser, accept cert once)")
         await uvicorn.Server(cfg).serve()
 
+    async def _serve_http_plain(self) -> None:
+        """Plain-HTTP server on HTTP_PORT sharing the same app and in-memory
+        state, only ever started when the main PORT is HTTPS-only. Without
+        this, a client (a health checker, a plain `curl`, an older device)
+        that connects with plain HTTP to the TLS-only main port gets an
+        empty reply/connection reset rather than a real answer."""
+        if not is_port_free(HTTP_PORT):
+            _report_port_conflict(HTTP_PORT, "dashboard plain-HTTP")
+            return
+        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, HTTP_PORT)
+        cfg = uvicorn.Config(self.app, host="0.0.0.0", port=HTTP_PORT, log_level="warning")
+        print(f"[Dashboard] Plain HTTP also available: http://{self._ip}:{HTTP_PORT}")
+        await uvicorn.Server(cfg).serve()
+
     async def serve(self) -> None:
         if not _DEPS_OK:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
             print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
+            return
+
+        if not is_port_free(PORT):
+            _report_port_conflict(PORT, "dashboard main")
             return
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
@@ -1975,6 +2027,7 @@ class DashboardServer:
 
         if use_ssl:
             asyncio.create_task(self._serve_alias())
+            asyncio.create_task(self._serve_http_plain())
 
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0", port=PORT, log_level="warning",

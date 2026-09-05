@@ -109,6 +109,7 @@ class AgentDefinition:
     status: AgentStatus = AgentStatus.REGISTERED
     schedule: Optional[str] = None         # e.g. "60m" — see Phase 7's scheduler; None = on-demand only
     last_run_ts: Optional[float] = None
+    last_success_ts: Optional[float] = None  # set by run_task only when a run completes with no error
     last_error: Optional[str] = None       # error state — set by run_task on failure, cleared on success
     handler: Optional[Callable[["AgentTask"], dict]] = field(default=None, repr=False)
     # Explicit, auditable opt-in for the autonomous objective loop (below) —
@@ -194,6 +195,10 @@ def _connect() -> sqlite3.Connection:
             last_error TEXT
         )
     """)
+    try:
+        conn.execute("ALTER TABLE agent_state ADD COLUMN last_success_ts REAL")
+    except sqlite3.OperationalError:
+        pass  # column already exists on a pre-existing DB file
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_tasks (
             id TEXT PRIMARY KEY,
@@ -223,10 +228,12 @@ def _save_agent_state(agent: "AgentDefinition") -> None:
         conn = _connect()
         try:
             conn.execute(
-                "INSERT INTO agent_state (agent_id, status, last_run_ts, last_error) VALUES (?, ?, ?, ?) "
+                "INSERT INTO agent_state (agent_id, status, last_run_ts, last_error, last_success_ts) "
+                "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(agent_id) DO UPDATE SET status=excluded.status, "
-                "last_run_ts=excluded.last_run_ts, last_error=excluded.last_error",
-                (agent.id, agent.status.value, agent.last_run_ts, agent.last_error),
+                "last_run_ts=excluded.last_run_ts, last_error=excluded.last_error, "
+                "last_success_ts=excluded.last_success_ts",
+                (agent.id, agent.status.value, agent.last_run_ts, agent.last_error, agent.last_success_ts),
             )
             conn.commit()
         finally:
@@ -1320,6 +1327,7 @@ class AgentOrchestrator:
                 pass
             agent.last_run_ts = state["last_run_ts"]
             agent.last_error = state["last_error"]
+            agent.last_success_ts = state.get("last_success_ts")
 
             # Crash recovery: a persisted status of RUNNING means the
             # process was killed (crash, redeploy, Render free-tier sleep)
@@ -1480,6 +1488,8 @@ class AgentOrchestrator:
         finally:
             task.updated_ts = time.time()
             agent.last_run_ts = task.updated_ts
+            if agent.last_error is None:
+                agent.last_success_ts = task.updated_ts
             agent.status = AgentStatus.IDLE
             _save_task(task)
             _save_agent_state(agent)
