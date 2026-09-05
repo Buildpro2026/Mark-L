@@ -8,12 +8,12 @@ def _isolate(monkeypatch, tmp_path, token=""):
     cfg_path = tmp_path / "api_keys.json"
     cfg_path.write_text(json.dumps({"buffer_token": token}), encoding="utf-8")
     monkeypatch.setattr(buf, "CONFIG_PATH", cfg_path)
-    # Isolate the local publish-history DB too — several tests reuse the
+    # Isolate the local publish-history DB too -- several tests reuse the
     # same channel_id/text ("c1"/"hello"), and without this they'd trip
     # each other's duplicate-post detection via the real shared database.
     monkeypatch.setattr(buf, "DB_PATH", tmp_path / "test_buffer.db")
     # get_token() checks core.headless.config.BUFFER_TOKEN (the real env
-    # var) FIRST, before ever reading CONFIG_PATH — on a dev machine with
+    # var) FIRST, before ever reading CONFIG_PATH -- on a dev machine with
     # a real .env this silently ignored the token=... arg above.
     monkeypatch.setattr(_hc, "BUFFER_TOKEN", token or None)
 
@@ -98,6 +98,38 @@ def test_verify_buffer_handles_http_error(monkeypatch, tmp_path):
     assert "401" in r["status"]
 
 
+def test_verify_buffer_401_and_403_are_classified_auth_failed_with_actionable_detail(monkeypatch, tmp_path):
+    """A real Buffer-side token rejection must read distinctly from a
+    generic transport failure -- this is what lets a human (or the /3d
+    health panel) tell 'your BUFFER_TOKEN is bad' apart from 'something
+    else broke', instead of both showing an identical UNAVAILABLE:<code>."""
+    _isolate(monkeypatch, tmp_path, token="secret-token")
+    for code in (401, 403):
+        monkeypatch.setattr(buf.requests, "post", lambda *a, code=code, **k: _Resp(code, {}))
+        r = buf.verify_buffer()
+        assert r["verified"] is False
+        assert r["status"] == f"AUTH_FAILED:{code}"
+        assert "BUFFER_TOKEN" in r["detail"]
+
+
+def test_get_channels_403_is_classified_auth_failed(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="secret-token")
+    monkeypatch.setattr(buf.requests, "post", lambda *a, **k: _Resp(403, {}))
+    r = buf.get_channels()
+    assert r["channels"] == []
+    assert r["status"] == "AUTH_FAILED:403"
+    assert "BUFFER_TOKEN" in r["detail"]
+
+
+def test_publish_to_buffer_403_is_classified_auth_failed(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="secret-token")
+    monkeypatch.setattr(buf.requests, "post", lambda *a, **k: _Resp(403, {}))
+    r = buf.publish_to_buffer({"text": "hello", "channel_id": "c1"}, approved=True)
+    assert r["published"] is False
+    assert r["status"] == "AUTH_FAILED:403"
+    assert "BUFFER_TOKEN" in r["detail"]
+
+
 def test_get_channels_not_configured_without_token(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="")
     r = buf.get_channels()
@@ -145,7 +177,7 @@ def test_publish_to_buffer_not_configured_without_token(monkeypatch, tmp_path):
     assert r == {"status": "NOT CONFIGURED", "published": False}
 
 
-# ── resolve_channel_id ────────────────────────────────────────────────────
+# -- resolve_channel_id --------------------------------------------------
 
 def test_resolve_channel_id_finds_connected_channel(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="secret-token")
@@ -192,7 +224,7 @@ def test_resolve_channel_id_propagates_channel_fetch_failure(monkeypatch, tmp_pa
     assert r["detail"] == "UNAVAILABLE:401"
 
 
-# ── publish_to_buffer — GraphQL createPost migration ──────────────────────
+# -- publish_to_buffer -- GraphQL createPost migration -------------------
 
 def _post_success_payload(post_id="p1", due_at=None, external_link=None):
     return {"data": {"createPost": {
@@ -237,7 +269,7 @@ def test_publish_to_buffer_succeeds_with_explicit_channel_id(monkeypatch, tmp_pa
     variables = captured["variables"]["input"]
     assert variables["channelId"] == "c1"
     assert variables["text"] == "New deal alert!"
-    assert variables["mode"] == "addToQueue"   # safe default — never shareNow unless asked
+    assert variables["mode"] == "addToQueue"   # safe default -- never shareNow unless asked
     assert variables["needsApproval"] is False
     assert variables["assets"] == []
 
@@ -350,7 +382,7 @@ def test_publish_to_buffer_never_fabricates_success_on_graphql_errors(monkeypatc
     assert "rate limited" in r["status"]
 
 
-# ── preview / approval gate ──────────────────────────────────────────────
+# -- preview / approval gate ----------------------------------------------
 
 def test_publish_without_approval_returns_a_preview_and_never_calls_graphql(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="secret-token")
@@ -382,7 +414,7 @@ def test_approved_true_actually_publishes(monkeypatch, tmp_path):
     assert r["status"] == "PUBLISHED"
 
 
-# ── platform character limits ────────────────────────────────────────────
+# -- platform character limits --------------------------------------------
 
 def test_text_within_platform_limit_is_allowed(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="secret-token")
@@ -404,7 +436,7 @@ def test_text_exceeding_twitter_limit_is_refused(monkeypatch, tmp_path):
 
 def test_text_exceeding_linkedin_limit_is_refused_at_its_own_higher_threshold(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="secret-token")
-    # Longer than Twitter's 280 but under LinkedIn's 3000 — must NOT be refused.
+    # Longer than Twitter's 280 but under LinkedIn's 3000 -- must NOT be refused.
     text_1000 = "x" * 1000
     r = buf.publish_to_buffer({"text": text_1000, "channel_id": "c1", "service": "linkedin"})
     assert r["status"] == "PREVIEW"
@@ -413,7 +445,7 @@ def test_text_exceeding_linkedin_limit_is_refused_at_its_own_higher_threshold(mo
 def test_unknown_service_skips_the_length_check(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="secret-token")
     r = buf.publish_to_buffer({"text": "x" * 5000, "channel_id": "c1", "service": "some_future_platform"})
-    assert r["status"] == "PREVIEW"   # no known limit for this service — not refused
+    assert r["status"] == "PREVIEW"   # no known limit for this service -- not refused
 
 
 def test_no_service_given_skips_the_length_check(monkeypatch, tmp_path):
@@ -422,7 +454,7 @@ def test_no_service_given_skips_the_length_check(monkeypatch, tmp_path):
     assert r["status"] == "PREVIEW"   # raw channel_id, no service to check a limit against
 
 
-# ── duplicate-post prevention ────────────────────────────────────────────
+# -- duplicate-post prevention ---------------------------------------------
 
 def test_publishing_the_same_text_twice_to_the_same_channel_is_refused(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="secret-token")
@@ -453,7 +485,7 @@ def test_same_text_to_a_different_channel_is_not_a_duplicate(monkeypatch, tmp_pa
 
     buf.publish_to_buffer({"text": "Same text", "channel_id": "c1"}, approved=True)
     second = buf.publish_to_buffer({"text": "Same text", "channel_id": "c2"}, approved=True)
-    assert second["published"] is True   # different channel — not a duplicate
+    assert second["published"] is True   # different channel -- not a duplicate
 
 
 def test_allow_duplicate_bypasses_the_check(monkeypatch, tmp_path):
@@ -466,7 +498,7 @@ def test_allow_duplicate_bypasses_the_check(monkeypatch, tmp_path):
 
 
 def test_duplicate_check_failure_degrades_to_no_known_duplicate(monkeypatch, tmp_path):
-    # A genuinely inaccessible DB path (a directory, not a file — sqlite3
+    # A genuinely inaccessible DB path (a directory, not a file -- sqlite3
     # can't open it) must not block an otherwise-valid publish. This
     # exercises _find_recent_duplicate's own internal try/except for
     # real, rather than assuming it works.
