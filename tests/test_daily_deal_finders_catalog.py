@@ -22,8 +22,8 @@ def _sample(**overrides):
 
 # ── retailer enforcement — Target/Walmart never allowed ───────────────────
 
-def test_approved_retailers_are_amazon_and_tiktok_shop_only():
-    assert ddf.APPROVED_RETAILERS == {"amazon", "tiktok_shop"}
+def test_approved_retailers_are_amazon_tiktok_shop_and_clickbank_only():
+    assert ddf.APPROVED_RETAILERS == {"amazon", "tiktok_shop", "clickbank"}
 
 
 def test_save_product_accepts_amazon():
@@ -59,7 +59,77 @@ def test_validate_retailer_allows_none():
     ddf.validate_retailer("")
 
 
-# ── never fabricate: unset fields stay unset ───────────────────────────────
+# ── ClickBank: the one supplied link, never invented/substituted ──────────
+
+def test_clickbank_affiliate_link_is_the_exact_supplied_url():
+    assert ddf.get_clickbank_affiliate_url("spirituality_genius_song") == "https://bit.ly/spiritualitygeniussong26"
+
+
+def test_clickbank_unknown_offer_returns_none_not_a_guess():
+    assert ddf.get_clickbank_affiliate_url("some_offer_nobody_supplied") is None
+
+
+def test_save_product_accepts_clickbank_with_the_registered_link():
+    p = ddf.save_product(_sample(
+        retailer="clickbank", product_id="cb-001", source="clickbank",
+        affiliate_url=ddf.get_clickbank_affiliate_url("spirituality_genius_song"),
+    ))
+    assert p["retailer"] == "clickbank"
+    assert p["affiliate_url"] == "https://bit.ly/spiritualitygeniussong26"
+
+
+def test_save_product_rejects_clickbank_with_an_invented_link():
+    with pytest.raises(ValueError, match="not one of the registered"):
+        ddf.save_product(_sample(
+            retailer="clickbank", product_id="cb-002", source="clickbank",
+            affiliate_url="https://bit.ly/some-other-link-nobody-supplied",
+        ))
+
+
+# ── Amazon affiliate tag validation ──────────────────────────────
+
+def test_validate_amazon_affiliate_url_accepts_the_real_tag():
+    r = ddf.validate_amazon_affiliate_url("https://www.amazon.com/dp/B000TEST?tag=chandlers00-20")
+    assert r["ok"] is True and r["state"] == "VALID"
+
+
+def test_validate_amazon_affiliate_url_rejects_a_wrong_tag():
+    r = ddf.validate_amazon_affiliate_url("https://www.amazon.com/dp/B000TEST?tag=someoneelse-20")
+    assert r["ok"] is False and r["state"] == "WRONG_TAG"
+
+
+def test_validate_amazon_affiliate_url_flags_missing_tag():
+    r = ddf.validate_amazon_affiliate_url("https://www.amazon.com/dp/B000TEST")
+    assert r["ok"] is False and r["state"] == "MISSING_TAG"
+
+
+def test_validate_amazon_affiliate_url_short_link_is_unverifiable_not_rejected():
+    r = ddf.validate_amazon_affiliate_url("https://amzn.to/abc123")
+    assert r["ok"] is True and r["state"] == "UNVERIFIABLE_SHORT_LINK"
+
+
+def test_validate_amazon_affiliate_url_handles_missing_url():
+    r = ddf.validate_amazon_affiliate_url(None)
+    assert r["ok"] is False and r["state"] == "MISSING_URL"
+
+
+def test_save_product_rejects_amazon_product_with_wrong_tag():
+    with pytest.raises(ValueError, match="WRONG_TAG"):
+        ddf.save_product(_sample(
+            retailer="amazon", product_id="amz-wrong-tag",
+            affiliate_url="https://www.amazon.com/dp/B000TEST?tag=someoneelse-20",
+        ))
+
+
+def test_save_product_accepts_amazon_product_with_correct_tag():
+    p = ddf.save_product(_sample(
+        retailer="amazon", product_id="amz-right-tag",
+        affiliate_url="https://www.amazon.com/dp/B000TEST?tag=chandlers00-20",
+    ))
+    assert p["affiliate_url"] == "https://www.amazon.com/dp/B000TEST?tag=chandlers00-20"
+
+
+# ── never fabricate: unset fields stay unset ───────────────────────
 
 def test_save_product_never_fabricates_missing_fields():
     p = ddf.save_product({"name": "Bare Minimum Product", "source": "amazon", "product_id": "bare-1"})
@@ -81,7 +151,7 @@ def test_save_product_computes_real_discount_from_both_prices():
     assert p["discount_pct"] == 25.0
 
 
-# ── slugs ───────────────────────────────────────────────────────────────
+# ── slugs ─────────────────────────────────────────────────────
 
 def test_save_product_auto_generates_slug():
     p = ddf.save_product(_sample(product_id="slug-test-1"))
@@ -104,7 +174,7 @@ def test_get_product_by_slug_returns_none_for_unknown_slug():
     assert ddf.get_product_by_slug("does-not-exist") is None
 
 
-# ── catalog queries ────────────────────────────────────────────────────────
+# ── catalog queries ────────────────────────────────────────────
 
 def test_list_products_filters_by_category():
     ddf.save_product(_sample(product_id="p1", category="electronics"))
@@ -177,7 +247,7 @@ def test_list_categories_returns_distinct_approved_categories():
     assert sorted(cats) == ["electronics", "kitchen"]
 
 
-# ── revenue-chain tracking ─────────────────────────────────────────────────
+# ── revenue-chain tracking ────────────────────────────────
 
 def test_record_view_increments_and_is_idempotent_per_call():
     ddf.save_product(_sample(product_id="v1"))
@@ -212,7 +282,7 @@ def test_record_conversion_never_fabricated_only_records_what_is_passed():
     assert row["revenue"] == 42.50
 
 
-# ── connected data model: product <-> post ─────────────────────────────────
+# ── connected data model: product <-> post ───────────────────────
 
 def test_create_post_syncs_social_platforms_posted_onto_product():
     ddf.save_product(_sample(product_id="social1"))
@@ -239,7 +309,7 @@ def test_get_product_posts_returns_all_posts_for_product():
     assert len(posts) == 2
 
 
-# ── pre-existing behavior preserved (backward compatibility) ──────────────
+# ── pre-existing behavior preserved (backward compatibility) ──────────
 
 def test_get_top_products_still_works_unchanged():
     ddf.save_product(_sample(product_id="top1"))
