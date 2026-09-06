@@ -693,9 +693,9 @@ async def _run_chat_turn_groq(
     instead of function_calls/FunctionResponse or tool_use/tool_result)."""
     import json as _json
     from core.headless.tool_executor import UnknownToolError
-    from core.headless.groq_client import get_client, gemini_tools_to_openai, CHAT_MODEL as GROQ_CHAT_MODEL
 
     try:
+        from core.headless.groq_client import get_client, gemini_tools_to_openai, CHAT_MODEL as GROQ_CHAT_MODEL
         client = get_client(config.GROQ_API_KEY)
     except Exception as e:
         if remaining_providers:
@@ -804,11 +804,14 @@ async def _run_chat_turn_anthropic(
     "here's what already happened, don't repeat it" note) rather than
     re-executed — see run_chat_turn's docstring for why."""
     from core.headless.tool_executor import UnknownToolError
-    from core.headless.anthropic_client import get_client, gemini_tools_to_anthropic, CHAT_MODEL as ANTHROPIC_CHAT_MODEL
 
     try:
+        from core.headless.anthropic_client import get_client, gemini_tools_to_anthropic, CHAT_MODEL as ANTHROPIC_CHAT_MODEL
         client = get_client(config.ANTHROPIC_TOKEN)
     except Exception as e:
+        # A missing `anthropic` package (not in requirements-headless.txt —
+        # this provider is opt-in) must degrade like any other provider
+        # failure and fall through the chain, not crash the whole turn.
         if remaining_providers:
             return await _run_provider_chain(remaining_providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
         raise HTTPException(status_code=502, detail=f"All configured AI providers failed. Last attempted: Anthropic. Error: {e}")
