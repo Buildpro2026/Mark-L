@@ -471,6 +471,60 @@ def _verify_twilio_signature(req, form: dict) -> bool:
         return False
 
 
+# Everything _serve_http_plain() below actually exists to serve: a real
+# answer for a client that hits the TLS-only main port with plain HTTP,
+# specifically the /3d page and its static assets (see
+# tests/test_dashboard_plain_http.py's real end-to-end check). Nothing
+# else belongs on that cleartext listener.
+_HTTP_PLAIN_ALLOWED = {("GET", "/3d"), ("GET", "/3d/sw.js")}
+_HTTP_PLAIN_ALLOWED_PREFIX = "/3d/assets/"
+
+
+class _PlainHttpGuard:
+    """Wraps self.app so the plain-HTTP listener (HTTP_PORT, PORT+2) can
+    only ever reach the small allowlist above, while PORT and PORT+1 (both
+    HTTPS, or PORT when SSL genuinely isn't configured at all) keep full
+    access to everything, completely unaffected.
+
+    2026-09-06 security fix: _serve_http_plain() binds this exact self.app
+    — every route, no restriction — to a plain HTTP socket whenever SSL is
+    enabled. That includes /login, /auto-login, and /api/device-login
+    (which hand back a bearer token and the raw AES session_key in the
+    response body), /api/command (accepts that token to run arbitrary
+    JARVIS commands), and /ws /3d/ws (accept the token as a query param and
+    stream live commands/audio) — a fully cleartext channel for the exact
+    credentials and command surface the self-signed HTTPS cert on PORT/
+    PORT+1 exists to protect. An attacker on the same LAN/Wi-Fi segment
+    (the network _ensure_network_access opens a firewall hole for) could
+    intercept a login or replay a captured token against /api/command in
+    plaintext. Wrapping the raw ASGI app (not @app.middleware("http"),
+    which never sees "websocket" scope type at all) so /ws and /3d/ws are
+    guarded here too, not left as an unguarded gap next to the HTTP fix.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        server = scope.get("server") if scope.get("type") in ("http", "websocket") else None
+        if server and server[1] == HTTP_PORT:
+            allowed = (
+                scope["type"] == "http"
+                and (
+                    (scope.get("method", ""), scope.get("path", "")) in _HTTP_PLAIN_ALLOWED
+                    or scope.get("path", "").startswith(_HTTP_PLAIN_ALLOWED_PREFIX)
+                )
+            )
+            if not allowed:
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 4003})
+                else:
+                    response = JSONResponse({"error": "Not available over plain HTTP — use HTTPS."}, status_code=403)
+                    await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 # ── DashboardServer ────────────────────────────────────────────────────────────────────
 
 class DashboardServer:
@@ -1972,7 +2026,7 @@ class DashboardServer:
                 twilio.update_by_sid(sid, transcription=form.get("TranscriptionText"))
             return JSONResponse({"ok": True})
 
-        return app
+        return _PlainHttpGuard(app)
 
     # ── serve ────────────────────────────────────────────────────────────────────
 
