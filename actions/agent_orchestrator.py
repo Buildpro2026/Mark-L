@@ -109,6 +109,7 @@ class AgentDefinition:
     status: AgentStatus = AgentStatus.REGISTERED
     schedule: Optional[str] = None         # e.g. "60m" — see Phase 7's scheduler; None = on-demand only
     last_run_ts: Optional[float] = None
+    last_success_ts: Optional[float] = None  # set by run_task only when a run completes with no error
     last_error: Optional[str] = None       # error state — set by run_task on failure, cleared on success
     handler: Optional[Callable[["AgentTask"], dict]] = field(default=None, repr=False)
     # Explicit, auditable opt-in for the autonomous objective loop (below) —
@@ -194,6 +195,10 @@ def _connect() -> sqlite3.Connection:
             last_error TEXT
         )
     """)
+    try:
+        conn.execute("ALTER TABLE agent_state ADD COLUMN last_success_ts REAL")
+    except sqlite3.OperationalError:
+        pass  # column already exists on a pre-existing DB file
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_tasks (
             id TEXT PRIMARY KEY,
@@ -223,10 +228,12 @@ def _save_agent_state(agent: "AgentDefinition") -> None:
         conn = _connect()
         try:
             conn.execute(
-                "INSERT INTO agent_state (agent_id, status, last_run_ts, last_error) VALUES (?, ?, ?, ?) "
+                "INSERT INTO agent_state (agent_id, status, last_run_ts, last_error, last_success_ts) "
+                "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(agent_id) DO UPDATE SET status=excluded.status, "
-                "last_run_ts=excluded.last_run_ts, last_error=excluded.last_error",
-                (agent.id, agent.status.value, agent.last_run_ts, agent.last_error),
+                "last_run_ts=excluded.last_run_ts, last_error=excluded.last_error, "
+                "last_success_ts=excluded.last_success_ts",
+                (agent.id, agent.status.value, agent.last_run_ts, agent.last_error, agent.last_success_ts),
             )
             conn.commit()
         finally:
@@ -739,7 +746,7 @@ def _buildpro_email_responder_handler(task: "AgentTask") -> dict:
     return {"summary": f"Sent draft {draft_id}.", "sent": True, "message_id": r.get("message_id")}
 
 
-# ── Agent handlers built on real, already-existing infrastructure ────────
+# ── Agent handlers built on real, already-existing infrastructure ────
 # Each one uses a genuinely working backend where one exists (web_search,
 # daily_deal_finders, twilio_integration, strategic_objective, business_
 # intelligence, opportunity_engine, system_monitor, buffer_integration) and
@@ -1188,7 +1195,7 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
 }
 
 
-# ── Single-instance scheduler lock ──────────────────────────────────────
+# ── Single-instance scheduler lock ───────────────────────────
 # Guards against two JARVIS processes (e.g. launched twice by accident)
 # both independently deciding the same due agent should run and running
 # it twice. File-based rather than in-process, since the risk is across
@@ -1320,6 +1327,7 @@ class AgentOrchestrator:
                 pass
             agent.last_run_ts = state["last_run_ts"]
             agent.last_error = state["last_error"]
+            agent.last_success_ts = state.get("last_success_ts")
 
             # Crash recovery: a persisted status of RUNNING means the
             # process was killed (crash, redeploy, Render free-tier sleep)
@@ -1351,7 +1359,7 @@ class AgentOrchestrator:
 
 
 
-    # ── registration / status (hooks) ───────────────────────────────────
+    # ── registration / status (hooks) ───────────────────────────
     def list_agents(self) -> list[AgentDefinition]:
         return list(self._agents.values())
 
@@ -1362,7 +1370,7 @@ class AgentOrchestrator:
         agent = self._agents.get(agent_id)
         return agent.status if agent else None
 
-    # ── start/stop (hooks) ──────────────────────────────────────────────
+    # ── start/stop (hooks) ──────────────────────────────────────
     def start_agent(self, agent_id: str) -> AgentDefinition:
         agent = self._require_agent(agent_id)
         agent.status = AgentStatus.IDLE
@@ -1377,7 +1385,7 @@ class AgentOrchestrator:
         self._log_event(agent_id, "status_change", f"{agent.name} stopped.")
         return agent
 
-    # ── task assignment + execution ─────────────────────────────────────
+    # ── task assignment + execution ────────────────────────────
     def assign_task(self, agent_id: str, description: str) -> AgentTask:
         """Queue a task for `agent_id`. OBSERVE/SUGGEST tasks run immediately
         (see class docstring); EXECUTE tasks stay PENDING_APPROVAL until
@@ -1480,12 +1488,14 @@ class AgentOrchestrator:
         finally:
             task.updated_ts = time.time()
             agent.last_run_ts = task.updated_ts
+            if agent.last_error is None:
+                agent.last_success_ts = task.updated_ts
             agent.status = AgentStatus.IDLE
             _save_task(task)
             _save_agent_state(agent)
         return task
 
-    # ── results / events (hooks, real) ──────────────────────────────────
+    # ── results / events (hooks, real) ──────────────────────────
     def get_task(self, task_id: str) -> Optional[AgentTask]:
         return self._tasks.get(task_id)
 
@@ -1517,7 +1527,7 @@ class AgentOrchestrator:
             "recent_events": [e.to_public_dict() for e in self.list_events(limit=10)],
         }
 
-    # ── background autonomy (Phase 7) ───────────────────────────────────
+    # ── background autonomy (Phase 7) ───────────────────────────
     # Safety gates, both required for an agent to ever auto-run:
     #   1. status must be IDLE — i.e. Lee/Jarvis explicitly called
     #      start_agent() at some point. A freshly-registered or stopped
@@ -1599,7 +1609,7 @@ class AgentOrchestrator:
             results.append(self.assign_task(agent.id, description))
         return results
 
-    # ── internal ─────────────────────────────────────────────────────────
+    # ── internal ───────────────────────────────────────────
     def _require_agent(self, agent_id: str) -> AgentDefinition:
         agent = self._agents.get(agent_id)
         if agent is None:
