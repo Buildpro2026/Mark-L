@@ -83,7 +83,7 @@ const approvalsCloseEl = document.getElementById("approvals-close");
 
 // ── Layout constants ────────────────────────────────────────────────────
 const ROOT_RADIUS  = 7.5;
-const CHILD_RADIUS = 2.6;
+const CHILD_RADIUS = 3.2;   // 2026-09-06: was 2.6 — too tight, child spheres and their labels visibly overlapped each other and the parent's own title at the camera distance focusNucleus() flies to
 const ORB_RADIUS   = 1.1;
 const NODE_RADIUS  = 0.55;
 const CHILD_NODE_RADIUS = 0.34;
@@ -388,6 +388,30 @@ let infoObjects = [];             // spawned data objects (files/deals/etc.)
 // the background. Cleared on goHome()/focusing a different nucleus.
 let expandedRootId = null;
 
+// 2026-09-06 fix: drilling into one domain's children left every sibling
+// domain fully lit, at full opacity, still in frame — no amount of camera
+// distance tuning fixes that cleanly (closer crowds the focused domain's
+// own children together; further just drags the siblings back into view).
+// The actual fix is dimming everything that ISN'T the focused domain —
+// its sphere, its glow, its connector line, and its label — so the child
+// view reads as one clear subject instead of a cluttered field of
+// unrelated spheres and overlapping text.
+const _SIBLING_DIM_OPACITY = 0.12;
+
+function _setSiblingsDimmed(focusedId) {
+  for (const [id, mesh] of rootMeshes) {
+    const dim = focusedId && id !== focusedId;
+    const opacity = dim ? _SIBLING_DIM_OPACITY : 1;
+    mesh.material.transparent = true;
+    mesh.material.opacity = opacity;
+    const label = mesh.children[0];
+    if (label && label.material) label.material.opacity = opacity;
+    const orbit = mesh.userData.orbit;
+    if (orbit?.glow) orbit.glow.material.opacity = opacity;
+    if (orbit?.line) orbit.line.material.opacity = dim ? _SIBLING_DIM_OPACITY * 0.8 : 0.5;
+  }
+}
+
 function buildRootRing(hierarchy) {
   hierarchyRoot = hierarchy;
   clearGroup(rootGroup);
@@ -564,13 +588,21 @@ async function focusNucleus(id, { fromServer = false, pushHistory = true } = {})
     backStack.push(currentNucleusId);
   }
   currentNucleusId = id;
+  _setSiblingsDimmed(id);
   expandedRootId = id;  // freeze this nucleus's orbit — see the comment by its declaration
 
   panelTitleEl.textContent = node.name;
   panelStatusEl.textContent = "Loading…";
   updateBreadcrumb(["Jarvis", node.name]);
   updateRailActive(id);
-  flyTo(mesh.position.clone(), 5.5);
+  // 2026-09-06: was 5.5 — a child positioned toward the camera could sit
+  // close enough that its own label clipped past the viewport edge. Safe
+  // to pull back further now that _setSiblingsDimmed() (above) fades
+  // every other root nucleus to near-invisible — this used to be exactly
+  // why pulling the camera back wasn't a real fix on its own: it dragged
+  // neighboring domains back into frame just as much as it gave the
+  // focused one room to breathe.
+  flyTo(mesh.position.clone(), 9);
 
   try {
     const payload = await fetchModule(id);
@@ -610,6 +642,7 @@ function spawnDataObjects(id, data, pos) {
 async function goHome({ fromServer = false, notify = true } = {}) {
   currentNucleusId = "jarvis";
   expandedRootId = null;  // resume normal orbiting for every root nucleus
+  _setSiblingsDimmed(null);  // every root nucleus back to full brightness
   backStack = [];
   panelTitleEl.textContent = "Jarvis";
   updateBreadcrumb(["Jarvis"]);
@@ -1082,8 +1115,23 @@ function renderInfoPanel(id, node, data) {
 }
 
 function renderOverviewPanel(payload) {
+  // 2026-09-06 fix: this used to render one row per module as
+  // "<m.title> — <m.status || 'Ready'>" — but _overview_payload() (see
+  // dashboard/server.py) only ever gives each module an `id`/`name`, never
+  // a `title` or `status` field, so every row silently rendered as a blank
+  // label plus a permanently-fabricated "Ready" — a fake status indicator
+  // with no real state behind it, duplicating the (correctly-named) list
+  // already below it in panelChildrenEl. There is no real per-module
+  // status available without a live fetch per domain (13 network calls
+  // just to populate a summary list), so rather than inventing one, this
+  // now shows the one real, already-fetched fact — how many systems
+  // exist — and points at the real place to see live status: clicking
+  // into each one below.
   const modules = payload.modules || [];
-  panelDetailsEl.innerHTML = modules.map(m => item(`<span class="k">${escapeHtml(m.title)}</span> — ${escapeHtml(m.status || "Ready")}`)).join("");
+  const count = payload.summary?.module_count ?? modules.length;
+  panelDetailsEl.innerHTML = count
+    ? item(`${count} system${count === 1 ? "" : "s"} available — select one below to view its live status.`)
+    : item("No systems available yet.");
   panelChildrenEl.innerHTML = (payload.hierarchy?.children || [])
     .filter(c => c.id !== "jarvis")
     .map(c => item(escapeHtml(c.name)))
