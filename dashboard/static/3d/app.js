@@ -905,6 +905,7 @@ function setOrbState(state, opts = {}) {
 let currentNucleusId = "jarvis";
 let backStack = [];
 let currentModuleData = null;
+let currentChildId = null;  // set while deep-focused on a child ("star") of currentNucleusId — see focusChild()
 
 function findRootNode(id) {
   return (hierarchyRoot?.children || []).find(c => c.id === id) || null;
@@ -928,6 +929,7 @@ async function focusNucleus(id, { fromServer = false, pushHistory = true } = {})
   const mesh = rootMeshes.get(id);
   if (!mesh || !node) return;
 
+  currentChildId = null;  // any deep-focused child no longer applies once a (possibly different) root is opened
   if (pushHistory && currentNucleusId && currentNucleusId !== id) {
     backStack.push(currentNucleusId);
   }
@@ -984,6 +986,7 @@ function spawnDataObjects(id, data, pos) {
 }
 
 async function goHome({ fromServer = false, notify = true } = {}) {
+  currentChildId = null;
   currentNucleusId = "jarvis";
   expandedRootId = null;  // resume normal orbiting for every root nucleus
   _setSiblingsDimmed(null);  // every root nucleus back to full brightness
@@ -1013,6 +1016,13 @@ async function goHome({ fromServer = false, notify = true } = {}) {
 }
 
 async function goBack({ fromServer = false } = {}) {
+  if (currentChildId) {
+    // Deep-focused on a child — "Back" returns to the parent root's own
+    // view, not to whatever root was open before that (there is no
+    // further-back state to pop for a one-level child focus).
+    currentChildId = null;
+    return focusNucleus(currentNucleusId, { fromServer, pushHistory: false });
+  }
   const prev = backStack.pop();
   if (!prev) return goHome({ fromServer, notify: !fromServer });
   await focusNucleus(prev, { fromServer, pushHistory: false });
@@ -1446,6 +1456,26 @@ function renderInfoPanel(id, node, data) {
     } else if (data.scheduling_capabilities?.status) {
       details.push(item(`Scheduling capabilities: ${escapeHtml(data.scheduling_capabilities.status)}`, true));
     }
+  } else if (Array.isArray(data.results)) {
+    // 2026-09-06 fix: generic module ids (candidates/clients/prospects/
+    // jobs/matches — see dashboard/server.py's _module_data, which already
+    // returns real {results, summary} for every one of these) fell through
+    // to this branch, which set the status text from data.summary but
+    // never actually rendered data.results anywhere — every branch's real
+    // record list was fetched and then silently discarded. Field names
+    // vary by record type, so this reads the same reasonable fallbacks the
+    // "ddf"/"buildpro" branches above already use rather than assuming one
+    // fixed shape.
+    panelStatusEl.textContent = data.summary || `${node.name} nucleus`;
+    if (!data.results.length) {
+      details.push(item("No records yet."));
+    } else {
+      for (const r of data.results) {
+        const primary = r.name || r.title || r.company_name || r.candidate_name || r.job_title || "Record";
+        const secondary = r.status || r.email || r.match_score || r.stage || "";
+        details.push(item(`<span class="k">${escapeHtml(primary)}</span>${secondary ? " — " + escapeHtml(String(secondary)) : ""}`));
+      }
+    }
   } else {
     panelStatusEl.textContent = data.summary || `${node.name} nucleus`;
   }
@@ -1656,7 +1686,57 @@ function onPointerClick() {
   if (!hovered) return;
   const { kind, id } = hovered.userData;
   if (kind === "core") goHome();
-  else if (kind === "nucleus") focusNucleus(id);
+  else if (kind === "nucleus") {
+    // 2026-09-06 fix: a child ("star") mesh has kind === "nucleus" too (see
+    // makeNucleusMesh) and was already a raycast target/hover target, but
+    // focusNucleus() only ever looks it up in rootMeshes — for any child id
+    // that silently returned early and did nothing. Screenshot-verified: no
+    // panel change, no camera move, not even a console error. The backend
+    // (/3d/api/module/{id}) already serves real per-child data for every
+    // one of these ids (dashboard/server.py's _module_data), so this was a
+    // frontend gap, not a missing capability.
+    if (rootMeshes.has(id)) focusNucleus(id);
+    else if (childMeshes.has(id)) focusChild(id);
+  }
+}
+
+// Deep focus into a child ("star") of the currently-open root nucleus —
+// reuses the exact same /3d/api/module/{id} endpoint every root nucleus
+// already fetches through, since the backend has no notion of "root vs
+// child," only a flat module id. Deliberately does NOT build a further
+// ring of grandchildren (a bigger 3D layout change than this fix
+// warrants) — it shows the branch's real data in the info panel and lets
+// "Back" return to the parent root, which is the actual gap that made
+// every child a dead click.
+function focusChild(id) {
+  const mesh = childMeshes.get(id);
+  if (!mesh) return;
+  currentChildId = id;
+  const childName = mesh.userData?.name || id;
+  const parentNode = findRootNode(currentNucleusId);
+  updateBreadcrumb(["Jarvis", parentNode?.name || currentNucleusId, childName]);
+  panelTitleEl.textContent = childName;
+  panelStatusEl.textContent = "Loading…";
+  updateRailActive(null);
+  // Deliberately no flyTo() here — tried an aggressive zoom in first and
+  // screenshot-verified it was a real regression: at this distance the
+  // camera sits inside the parent root's own label sprite (rendered as a
+  // giant blurred billboard filling the frame) since children sit close
+  // together right next to that label. The parent-level framing from
+  // focusNucleus() already shows every child clearly; the panel update
+  // below is the actual fix needed here.
+  fetchModule(id)
+    .then((payload) => {
+      if (currentChildId !== id) return; // navigated away while this was in flight
+      renderInfoPanel(id, { name: childName }, payload.data || {});
+    })
+    .catch((e) => {
+      if (e.message !== "unauthorized" && currentChildId === id) {
+        console.error("[3D] child module fetch error", e);
+        panelStatusEl.textContent = "This branch's data couldn't be loaded right now.";
+      }
+    });
+  logActivity(`Opened ${childName}`);
 }
 
 // ── Bottom command dock: text + nav parsing + free-text relay ──────────
