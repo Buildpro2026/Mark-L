@@ -197,31 +197,6 @@ def is_duplicate(candidate: dict[str, Any], existing: dict[str, Any]) -> bool:
     return False
 
 
-def discover_product(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload = payload or {}
-    product = {
-        "name": payload.get("name", "Example Daily Deal"),
-        "source": payload.get("source", "manual"),
-        "category": payload.get("category", "gadgets"),
-        "price": float(payload.get("price", 24.99) or 24.99),
-        "url": payload.get("url", "https://example.com/deal"),
-        "image_url": payload.get("image_url", ""),
-        "product_id": payload.get("product_id", "manual-001"),
-        "sales_signal": float(payload.get("sales_signal", 80) or 80),
-        "demand": float(payload.get("demand", 75) or 75),
-        "margin": float(payload.get("margin", 0.18) or 0.18),
-        "trend_strength": float(payload.get("trend_strength", 0.7) or 0.7),
-        "competition": float(payload.get("competition", 0.25) or 0.25),
-        "content_potential": float(payload.get("content_potential", 0.8) or 0.8),
-        "repeatability": float(payload.get("repeatability", 0.7) or 0.7),
-        "historical_performance": float(payload.get("historical_performance", 0.6) or 0.6),
-        "affiliate_url": payload.get("affiliate_url") or payload.get("url"),
-        "discovery_date": payload.get("discovery_date") or datetime.now(timezone.utc).isoformat(),
-    }
-    product["score"] = score_product(product)
-    return product
-
-
 def set_product_status(product_id: str, new_status: str) -> dict[str, Any]:
     """Moves a product to a new lifecycle status. Refuses an invalid status
     name and a transition that isn't in _STATUS_TRANSITIONS (e.g. jumping

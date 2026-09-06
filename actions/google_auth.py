@@ -1,4 +1,4 @@
-"""Google OAuth 2.0 — shared authorization for Gmail + Calendar.
+"""Google OAuth 2.0 — shared authorization for Gmail + Calendar + Tasks.
 
 Config: config/google/client_secret_*.json (a Desktop App OAuth credential
 downloaded from Google Cloud Console — never hardcoded, never printed,
@@ -6,19 +6,30 @@ never committed; config/google/ is gitignored, see .gitignore). Token
 cache: config/google/token.json, created only after the one-time
 interactive consent flow completes; also gitignored.
 
-Both actions/gmail_integration.py and actions/calendar_integration.py go
-through get_credentials() here rather than each running their own OAuth
-flow — one credential file, one consent screen, one cached token, matching
-how every other integration in this codebase (Twilio/HubSpot/Buffer) has
-exactly one auth entry point per external account. This is deliberately
-NOT a second/parallel credential system.
+Both actions/gmail_integration.py and actions/calendar_integration.py (and
+now actions/google_tasks_integration.py) go through get_credentials() here
+rather than each running their own OAuth flow — one credential file, one
+consent screen, one cached token, matching how every other integration in
+this codebase (Twilio/HubSpot/Buffer) has exactly one auth entry point per
+external account. This is deliberately NOT a second/parallel credential
+system.
 
 Least-privilege scopes: gmail.readonly (read only) + gmail.compose (drafts
 AND send — Gmail API's own scope semantics bundle those two; there is no
 narrower scope that allows drafting without also permitting send) +
 calendar.events (read/write events specifically, not full calendar
-settings/sharing). Nothing broader (gmail.modify, full Calendar scope) is
-requested.
+settings/sharing) + tasks (read/write task lists and tasks — there is no
+narrower Tasks scope). Nothing broader (gmail.modify, full Calendar scope)
+is requested.
+
+The `tasks` scope was added after Gmail/Calendar were already in
+production use, so an already-cached token.json from before this change
+was consented for the OLD scope set only — Google does not retroactively
+grant a newly-added scope to an existing refresh token. Every Tasks API
+call through this token will honestly fail (insufficient-scope error,
+surfaced as state=ERROR, never fabricated) until authorize_interactively()
+is re-run once to re-consent with the new scope list. This is expected,
+not a bug — the same one-time human step every scope addition here needs.
 
 CRITICAL: authorize_interactively() is the ONLY function in this module
 that ever launches the interactive browser consent flow, and it must be
@@ -58,6 +69,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/tasks",
 ]
 
 

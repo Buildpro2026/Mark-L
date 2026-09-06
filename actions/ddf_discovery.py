@@ -20,9 +20,13 @@ that doesn't exist). It activates the moment PRODUCT_DATA_API_KEY is set
 (core/headless/config.py) — until then, discover_new_products() honestly
 reports NOT_CONFIGURED. It never fabricates a product, price, or rating;
 every field either comes straight from the provider's response or is left
-out entirely (never defaulted to a plausible-looking placeholder the way
-daily_deal_finders.discover_product()'s old manual-entry stub does — that
-function is untouched and still exists as the explicit manual/CSV path).
+out entirely, never defaulted to a plausible-looking placeholder. (An
+earlier daily_deal_finders.discover_product() manual-entry stub used to do
+exactly that — silently invent a fake "$24.99 Example Daily Deal" with
+made-up scoring metrics whenever called without a full payload — but it
+had zero callers anywhere in the codebase and was removed entirely rather
+than repaired; the real manual path is daily_deal_finders.save_product(),
+which only ever persists exactly what the caller passed in.)
 
 Discovered candidates are saved via daily_deal_finders.save_product() at
 whatever status they already have (default: DISCOVERED — see that

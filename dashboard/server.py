@@ -53,12 +53,43 @@ BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000
 # Plain-HTTP fallback alias for /3d when SSL is enabled (mirrors the
-# PORT + 1 HTTPS alias pattern in get_manual_url() below). Defined here so
-# it's a single source of truth; the plain-HTTP listener itself is not yet
-# implemented — see test_dashboard_plain_http.py, which exercises the port
-# math and will keep failing past collection until that listener exists.
+# PORT + 1 HTTPS alias pattern in get_manual_url() below) — a client that
+# connects with plain HTTP to the HTTPS-only main port gets an empty
+# reply/connection reset (it isn't speaking TLS), so this gives it a real
+# answer instead.
 HTTP_PORT   = PORT + 2
 MAX_UPLOAD_MB = 500
+
+
+def is_port_free(port: int, host: str = "0.0.0.0") -> bool:
+    """Best-effort pre-flight check: can a new listener actually bind this
+    port right now? uvicorn's own bind-failure path calls sys.exit(),
+    which — raised inside a never-awaited asyncio Task — propagates
+    through Task.__step's special-cased SystemExit handling and kills the
+    WHOLE JARVIS process, not just the dashboard. Checking first lets
+    serve()/_serve_alias()/_serve_http_plain() skip cleanly instead."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _report_port_conflict(port: int, label: str, exit_code: int = 1) -> None:
+    """Never raises. A busy port degrades to 'this one listener is
+    skipped, logged clearly' instead of the process dying."""
+    message = (
+        f"[Dashboard] Port {port} is already in use ({label}) — skipping "
+        f"(uvicorn would exit with exit code {exit_code})."
+    )
+    print(message)
+    try:
+        from core.startup import get_logger
+        get_logger().warning(message)
+    except Exception:
+        pass
 
 
 def _make_uploads_dir() -> Path:
@@ -89,7 +120,7 @@ def _get_gemini_key() -> str | None:
 _KEY_CHARS = [c for c in (string.ascii_uppercase + string.digits)
               if c not in ('O', 'I', 'L', '0', '1')]
 
-# ── AES-256-CBC ───────────────────────────────────────────────────────────────
+# ── AES-256-CBC ─────────────────────────────────────────────────────────────────────────────────
 _AES_SALT = b'JARVIS-DASHBOARD-v1'
 
 
@@ -110,7 +141,7 @@ def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
     return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
 
 
-# ── CryptoJS (auto-download once, served locally) ─────────────────────────────
+# ── CryptoJS (auto-download once, served locally) ───────────────────────────────────────────────
 _CRYPTOJS_CDN  = ("https://cdnjs.cloudflare.com/ajax/libs/"
                   "crypto-js/4.2.0/crypto-js.min.js")
 _CRYPTOJS_FILE = STATIC_DIR / "crypto-js.min.js"
@@ -128,7 +159,7 @@ def _ensure_network_access(port: int) -> None:
     """
     import sys, subprocess, os, tempfile, threading
 
-    # ── Windows ──────────────────────────────────────────────────────────────
+    # ── Windows ─────────────────────────────────────────────────────────────
     if sys.platform == "win32":
         import ctypes, time
 
@@ -251,7 +282,7 @@ def _ensure_network_access(port: int) -> None:
             threading.Thread(target=_cleanup, args=(bat_path,), daemon=True).start()
         return
 
-    # ── macOS ─────────────────────────────────────────────────────────────────
+    # ── macOS ────────────────────────────────────────────────────────────────
     if sys.platform == "darwin":
         fw_ctl = "/usr/libexec/ApplicationFirewall/socketfilterfw"
         try:
@@ -279,7 +310,7 @@ def _ensure_network_access(port: int) -> None:
             pass  # macOS firewall is off by default — silent failure is fine
         return
 
-    # ── Linux ─────────────────────────────────────────────────────────────────
+    # ── Linux ────────────────────────────────────────────────────────────────────────────
     def _privileged(cmd: list[str]) -> bool:
         for prefix in (["pkexec"], ["sudo", "-n"]):
             try:
@@ -343,7 +374,7 @@ def _ensure_crypto_js() -> None:
 _ensure_crypto_js()
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────────────────
 
 def _local_ip() -> str:
     """Return the best LAN-facing IPv4 address, no internet required."""
@@ -440,7 +471,61 @@ def _verify_twilio_signature(req, form: dict) -> bool:
         return False
 
 
-# ── DashboardServer ───────────────────────────────────────────────────────────
+# Everything _serve_http_plain() below actually exists to serve: a real
+# answer for a client that hits the TLS-only main port with plain HTTP,
+# specifically the /3d page and its static assets (see
+# tests/test_dashboard_plain_http.py's real end-to-end check). Nothing
+# else belongs on that cleartext listener.
+_HTTP_PLAIN_ALLOWED = {("GET", "/3d"), ("GET", "/3d/sw.js")}
+_HTTP_PLAIN_ALLOWED_PREFIX = "/3d/assets/"
+
+
+class _PlainHttpGuard:
+    """Wraps self.app so the plain-HTTP listener (HTTP_PORT, PORT+2) can
+    only ever reach the small allowlist above, while PORT and PORT+1 (both
+    HTTPS, or PORT when SSL genuinely isn't configured at all) keep full
+    access to everything, completely unaffected.
+
+    2026-09-06 security fix: _serve_http_plain() binds this exact self.app
+    — every route, no restriction — to a plain HTTP socket whenever SSL is
+    enabled. That includes /login, /auto-login, and /api/device-login
+    (which hand back a bearer token and the raw AES session_key in the
+    response body), /api/command (accepts that token to run arbitrary
+    JARVIS commands), and /ws /3d/ws (accept the token as a query param and
+    stream live commands/audio) — a fully cleartext channel for the exact
+    credentials and command surface the self-signed HTTPS cert on PORT/
+    PORT+1 exists to protect. An attacker on the same LAN/Wi-Fi segment
+    (the network _ensure_network_access opens a firewall hole for) could
+    intercept a login or replay a captured token against /api/command in
+    plaintext. Wrapping the raw ASGI app (not @app.middleware("http"),
+    which never sees "websocket" scope type at all) so /ws and /3d/ws are
+    guarded here too, not left as an unguarded gap next to the HTTP fix.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        server = scope.get("server") if scope.get("type") in ("http", "websocket") else None
+        if server and server[1] == HTTP_PORT:
+            allowed = (
+                scope["type"] == "http"
+                and (
+                    (scope.get("method", ""), scope.get("path", "")) in _HTTP_PLAIN_ALLOWED
+                    or scope.get("path", "").startswith(_HTTP_PLAIN_ALLOWED_PREFIX)
+                )
+            )
+            if not allowed:
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 4003})
+                else:
+                    response = JSONResponse({"error": "Not available over plain HTTP — use HTTPS."}, status_code=403)
+                    await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+# ── DashboardServer ────────────────────────────────────────────────────────────────────
 
 class DashboardServer:
 
@@ -457,7 +542,7 @@ class DashboardServer:
         self._pending_keys: dict[str, float] = {}
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
-        # ── /3d spatial command center state ────────────────────────────
+        # ── /3d spatial command center state ──────────────────
         self._nucleus_id = "jarvis"           # current focused Nucleus
         self._nucleus_back_stack: list[str] = []  # for the "back" nav action
         self._3d_ws_clients: set[WebSocket] = set()  # separate channel from the phone command center's _clients
@@ -477,7 +562,7 @@ class DashboardServer:
         self._hubspot_portal_id = None  # cached once verify_hubspot() succeeds; portal id never changes
         self.app                          = self._build_app()
 
-    # ── one-time key management ───────────────────────────────────────────
+    # ── one-time key management ────────────────────────────────
 
     def new_key(self, expiry_secs: int = 600) -> str:
         now = time.time()
@@ -501,7 +586,7 @@ class DashboardServer:
             return f"{self._ip}:{PORT + 1}"
         return f"{self._ip}:{PORT}"
 
-    # ── /3d spatial command center — navigation state ───────────────────
+    # ── /3d spatial command center — navigation state ───────────
 
     def apply_navigation(self, action: str, nucleus_id: str = "") -> dict:
         """The single place server-side navigation state actually changes —
@@ -550,7 +635,7 @@ class DashboardServer:
         event to the spatial scene."""
         await self._broadcast_3d(payload)
 
-    # ── /3d spatial command center — the real chat bridge ────────────────
+    # ── /3d spatial command center — the real chat bridge ──────────
     # Root-cause fix (Phase 2, priority 1): dashboard_bridge.py drains
     # _command_queue into run_chat_turn() but only ever broadcasts to the
     # PHONE _clients pool via self.broadcast() — never to _3d_ws_clients —
@@ -627,7 +712,7 @@ class DashboardServer:
 
         return {"reply": reply, "tool_calls": tool_calls, "error": error, "pending_approval_count": after_pending}
 
-    # ── /3d spatial command center — per-module live data ───────────────
+    # ── /3d spatial command center — per-module live data ─────────
     # Each of these honestly reports NOT_CONFIGURED/empty rather than
     # fabricating data — matching the same standard as every tool in
     # core/headless/tool_executor.py. Wraps real, already-tested modules;
@@ -1336,7 +1421,7 @@ class DashboardServer:
         except Exception:
             return None
 
-    # ── callbacks ────────────────────────────────────────────────────────
+    # ── callbacks ────────────────────────────────────────────
 
     def set_wake_callback(self, fn) -> None:
         self._wake_callback = fn
@@ -1344,7 +1429,7 @@ class DashboardServer:
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
 
-    # ── broadcast ────────────────────────────────────────────────────────
+    # ── broadcast ──────────────────────────────────────────────
 
     async def broadcast(self, msg: dict) -> None:
         self._history.append(msg)
@@ -1358,7 +1443,7 @@ class DashboardServer:
                 dead.add(ws)
         self._clients -= dead
 
-    # ── FastAPI app ───────────────────────────────────────────────────────
+    # ── FastAPI app ────────────────────────────────────────────────
 
     def _build_app(self) -> "FastAPI":
         app = FastAPI(docs_url=None, redoc_url=None)
@@ -1516,7 +1601,7 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
-        # ── Phone mic real-time audio → Gemini Live ──────────────────────────
+        # ── Phone mic real-time audio → Gemini Live ───────────────────
 
         @app.websocket("/ws/phone-audio")
         async def phone_audio_ws(websocket: WebSocket, token: str = ""):
@@ -1544,7 +1629,7 @@ class DashboardServer:
                     {"type": "sys", "text": "Phone microphone stopped."}
                 ))
 
-        # ── File sharing ──────────────────────────────────────────────────────
+        # ── File sharing ──────────────────────────────────────────────
 
         def _safe_filename(raw: str) -> str:
             name = Path(raw).name                          # strip path components
@@ -1660,7 +1745,7 @@ class DashboardServer:
             finally:
                 self._clients.discard(websocket)
 
-        # ── /3d spatial command center ───────────────────────────────────
+        # ── /3d spatial command center ─────────────────────────
         # /3d/api/* and /3d/ws accept three credentials — see .env.example's
         # JARVIS_API_TOKEN comment, which already documented the pairing-key
         # acceptance below as intended but it was never actually wired in:
@@ -1873,7 +1958,7 @@ class DashboardServer:
             finally:
                 self._3d_ws_clients.discard(websocket)
 
-        # ── Twilio webhooks ───────────────────────────────────────────────
+        # ── Twilio webhooks ────────────────────────────────────
         # The only routes in this file meant to receive traffic from the
         # open internet (a real Twilio number's webhooks) — every one is
         # signature-verified before anything is recorded or broadcast.
@@ -1941,14 +2026,17 @@ class DashboardServer:
                 twilio.update_by_sid(sid, transcription=form.get("TranscriptionText"))
             return JSONResponse({"ok": True})
 
-        return app
+        return _PlainHttpGuard(app)
 
-    # ── serve ─────────────────────────────────────────────────────────────
+    # ── serve ────────────────────────────────────────────────────────────────────
 
     async def _serve_alias(self) -> None:
         """Second HTTPS server on PORT+1 sharing the same app and in-memory state.
         Chrome HTTPS-upgrades any bare IP:PORT the user types, so this port also needs TLS.
         User types IP:8001 → Chrome tries https → self-signed cert warning → accept once → done."""
+        if not is_port_free(PORT + 1):
+            _report_port_conflict(PORT + 1, "dashboard alias")
+            return
         ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"
         ssl_cert = BASE_DIR / "config" / "certs" / "jarvis.crt"
         asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
@@ -1959,10 +2047,28 @@ class DashboardServer:
         print(f"[Dashboard] Manual entry:  {self._ip}:{PORT + 1}  (type in browser, accept cert once)")
         await uvicorn.Server(cfg).serve()
 
+    async def _serve_http_plain(self) -> None:
+        """Plain-HTTP server on HTTP_PORT sharing the same app and in-memory
+        state, only ever started when the main PORT is HTTPS-only. Without
+        this, a client (a health checker, a plain `curl`, an older device)
+        that connects with plain HTTP to the TLS-only main port gets an
+        empty reply/connection reset rather than a real answer."""
+        if not is_port_free(HTTP_PORT):
+            _report_port_conflict(HTTP_PORT, "dashboard plain-HTTP")
+            return
+        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, HTTP_PORT)
+        cfg = uvicorn.Config(self.app, host="0.0.0.0", port=HTTP_PORT, log_level="warning")
+        print(f"[Dashboard] Plain HTTP also available: http://{self._ip}:{HTTP_PORT}")
+        await uvicorn.Server(cfg).serve()
+
     async def serve(self) -> None:
         if not _DEPS_OK:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
             print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
+            return
+
+        if not is_port_free(PORT):
+            _report_port_conflict(PORT, "dashboard main")
             return
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
@@ -1975,6 +2081,7 @@ class DashboardServer:
 
         if use_ssl:
             asyncio.create_task(self._serve_alias())
+            asyncio.create_task(self._serve_http_plain())
 
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0", port=PORT, log_level="warning",

@@ -212,6 +212,17 @@ def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], e
     failed_verifications = [v for v in verifications if not v["success"] and v.get("follow_up_required")]
 
     lines = [f"Morning cycle — {len(priorities)} item(s) need attention."]
+    buildpro = brief.get("buildpro", {})
+    bp_counts = buildpro.get("counts", {})
+    if bp_counts:
+        lines.append(
+            f"BuildPro: {bp_counts.get('candidate_count', 0)} candidate(s), "
+            f"{bp_counts.get('active_jobs', 0)} open job(s), "
+            f"{bp_counts.get('qualified_matches', 0)} qualified match(es)."
+        )
+    bp_actions = [a for a in buildpro.get("recommended_actions", []) if a != "No urgent recruiting follow-ups identified."]
+    if bp_actions:
+        lines.append("BuildPro follow-up: " + " ".join(bp_actions[:3]))
     if risks:
         lines.append(f"RISKS: {len(risks)} — top: {risks[0]['detail'][:140]}")
     if approvals:

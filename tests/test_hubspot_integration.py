@@ -32,7 +32,7 @@ def _fake_request(payload=None, status_code=200):
     return _f
 
 
-# ── configuration / auth ────────────────────────────────────────────────
+# ── configuration / auth ─────────────────────────────
 
 def test_is_configured_false_without_token(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="")
@@ -91,7 +91,7 @@ def test_request_wrapper_captures_network_exception(monkeypatch, tmp_path):
     assert r["results"] == []
 
 
-# ── contacts ─────────────────────────────────────────────────────────────
+# ── contacts ──────────────────────────────────────────────
 
 def test_get_contacts_not_configured(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="")
@@ -174,7 +174,7 @@ def test_get_contact_not_found_reports_error_not_fabricated_record(monkeypatch, 
     assert "record" not in r
 
 
-# ── companies ────────────────────────────────────────────────────────────
+# ── companies ────────────────────────────────────────────
 
 def test_get_companies_success(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
@@ -212,7 +212,7 @@ def test_update_company_uses_patch(monkeypatch, tmp_path):
     assert captured["method"] == "PATCH"
 
 
-# ── write safeguards: nothing writes without approved=True ──────────────
+# ── write safeguards: nothing writes without approved=True ──────────
 
 def test_create_contact_refuses_without_approval_and_never_touches_the_api(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
@@ -361,7 +361,7 @@ def test_upsert_contact_propagates_search_failure_without_writing(monkeypatch, t
     assert calls == ["POST"]   # only the search — never attempted a write after a failed search
 
 
-# ── upsert_company — same idempotent pattern, deduplicated by name ──────
+# ── upsert_company — same idempotent pattern, deduplicated by name ────
 
 def test_upsert_company_creates_when_no_existing_match(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
@@ -414,7 +414,208 @@ def test_search_companies_not_configured(monkeypatch, tmp_path):
     assert r["state"] == "NOT_CONFIGURED"
 
 
-# ── Files (resume attachments) ───────────────────────────────────────────
+# ── Associations ────────────────────────────────────────
+
+def test_associate_contact_with_company_refuses_without_approval(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    calls = []
+    monkeypatch.setattr(hs.requests, "request", lambda *a, **k: calls.append(1))
+
+    r = hs.associate_contact_with_company("contact-1", "company-1")
+    assert r["ok"] is False
+    assert r["state"] == "NOT_APPROVED"
+    assert calls == []
+
+
+def test_associate_contact_with_company_sends_expected_v4_url(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        return _Resp(200, {})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    r = hs.associate_contact_with_company("contact-1", "company-1", approved=True)
+    assert r["ok"] is True
+    assert captured["method"] == "PUT"
+    assert captured["url"].endswith("/crm/v4/objects/contacts/contact-1/associations/default/companies/company-1")
+
+
+def test_associate_reports_failure_honestly(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    monkeypatch.setattr(hs.requests, "request", lambda *a, **k: _Resp(404, {"message": "not found"}))
+    r = hs.associate_contact_with_company("bad-contact", "company-1", approved=True)
+    assert r["ok"] is False
+    assert r["state"] == "ERROR"
+
+
+# ── Deals (recruiting opportunities) ───────────────────────
+
+def test_create_deal_refuses_without_approval(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    calls = []
+    monkeypatch.setattr(hs.requests, "request", lambda *a, **k: calls.append(1))
+
+    r = hs.create_deal({"dealname": "BuildPro <> Acme Construction"})
+    assert r["ok"] is False
+    assert r["state"] == "NOT_APPROVED"
+    assert calls == []
+
+
+def test_create_deal_wraps_properties_and_never_fabricates(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = kwargs.get("json")
+        return _Resp(200, {"id": "deal-1", "properties": kwargs.get("json", {}).get("properties")})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    props = {"dealname": "BuildPro <> Acme Construction", "pipeline": "default", "dealstage": "appointmentscheduled"}
+    r = hs.create_deal(props, approved=True)
+    assert r["ok"] is True
+    assert r["record"]["id"] == "deal-1"
+    assert captured["url"].endswith("/crm/v3/objects/deals")
+    assert captured["json"] == {"properties": props}
+
+
+def test_get_deal_not_found_reports_error_not_fabricated_record(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    monkeypatch.setattr(hs.requests, "request", lambda *a, **k: _Resp(404, {"message": "deal not found"}))
+    r = hs.get_deal("does-not-exist")
+    assert r["ok"] is False
+    assert r["state"] == "ERROR"
+
+
+def test_update_deal_uses_patch(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["method"] = method
+        return _Resp(200, {"id": "deal-1"})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    r = hs.update_deal("deal-1", {"dealstage": "closedwon"}, approved=True)
+    assert r["ok"] is True
+    assert captured["method"] == "PATCH"
+
+
+def test_update_deal_refuses_without_approval(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    calls = []
+    monkeypatch.setattr(hs.requests, "request", lambda *a, **k: calls.append(1))
+    r = hs.update_deal("deal-1", {"dealstage": "closedwon"})
+    assert r["ok"] is False
+    assert r["state"] == "NOT_APPROVED"
+    assert calls == []
+
+
+def test_associate_deal_with_company_sends_expected_url(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["url"] = url
+        return _Resp(200, {})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    r = hs.associate_deal_with_company("deal-1", "company-1", approved=True)
+    assert r["ok"] is True
+    assert captured["url"].endswith("/crm/v4/objects/deals/deal-1/associations/default/companies/company-1")
+
+
+def test_associate_deal_with_contact_sends_expected_url(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["url"] = url
+        return _Resp(200, {})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    r = hs.associate_deal_with_contact("deal-1", "contact-1", approved=True)
+    assert r["ok"] is True
+    assert captured["url"].endswith("/crm/v4/objects/deals/deal-1/associations/default/contacts/contact-1")
+
+
+# ── Tasks (follow-ups) ────────────────────────────────
+
+def test_create_task_refuses_without_approval(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    calls = []
+    monkeypatch.setattr(hs.requests, "request", lambda *a, **k: calls.append(1))
+    r = hs.create_task({"hs_task_subject": "Follow up with candidate"})
+    assert r["ok"] is False
+    assert r["state"] == "NOT_APPROVED"
+    assert calls == []
+
+
+def test_create_task_wraps_properties(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["url"] = url
+        captured["json"] = kwargs.get("json")
+        return _Resp(200, {"id": "task-1"})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    props = {"hs_task_subject": "Follow up with candidate", "hs_task_status": "NOT_STARTED"}
+    r = hs.create_task(props, approved=True)
+    assert r["ok"] is True
+    assert r["record"]["id"] == "task-1"
+    assert captured["url"].endswith("/crm/v3/objects/tasks")
+    assert captured["json"] == {"properties": props}
+
+
+def test_update_task_uses_patch(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["method"] = method
+        return _Resp(200, {"id": "task-1"})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    r = hs.update_task("task-1", {"hs_task_status": "COMPLETED"}, approved=True)
+    assert r["ok"] is True
+    assert captured["method"] == "PATCH"
+
+
+def test_associate_task_with_contact_sends_expected_url(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["url"] = url
+        return _Resp(200, {})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    r = hs.associate_task_with_contact("task-1", "contact-1", approved=True)
+    assert r["ok"] is True
+    assert captured["url"].endswith("/crm/v4/objects/tasks/task-1/associations/default/contacts/contact-1")
+
+
+def test_associate_task_with_deal_sends_expected_url(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
+    captured = {}
+
+    def fake_request(method, url, headers=None, timeout=None, **kwargs):
+        captured["url"] = url
+        return _Resp(200, {})
+
+    monkeypatch.setattr(hs.requests, "request", fake_request)
+    r = hs.associate_task_with_deal("task-1", "deal-1", approved=True)
+    assert r["ok"] is True
+    assert captured["url"].endswith("/crm/v4/objects/tasks/task-1/associations/default/deals/deal-1")
+
+
+# ── Files (resume attachments) ────────────────────────
 
 def test_upload_file_refuses_without_approval(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path, token="pat-na2-secret")
