@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sS -o /dev/null -w \"HTTP_STATUS:%{http_code}\\\\n\" --max-time 8 https://unpkg.com/three@0.160.0/build/three.min.js)",
+      "Bash(curl -sS --max-time 10 https://unpkg.com/three@0.160.0/build/three.min.js -o /tmp/three_check.js)",
+      "Read(//tmp/**)",
+      "Bash(curl -sS -o /dev/null -w \"MODULE_STATUS:%{http_code}\\\\n\" --max-time 8 https://unpkg.com/three@0.160.0/build/three.module.js)",
+      "Bash(curl -sS -o /dev/null -w \"ORBIT_STATUS:%{http_code}\\\\n\" --max-time 8 https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js)",
+      "Bash(curl -sS --max-time 10 https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js -o /tmp/orbit_check.js)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_voice_navigation.py -q)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\Leech\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Leech-Mark-L\\\\04ac7c15-fb1d-4cc9-ba45-694967a5c4f1\\\\scratchpad\\\\run_dashboard_smoke.py\")",
+      "Bash(echo \"started, pid=$!\")",
+      "Bash(curl -sS -o /dev/null -w \"STATUS:%{http_code}\\\\n\" http://127.0.0.1:8123/3d)",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\Leech\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Leech-Mark-L\\\\04ac7c15-fb1d-4cc9-ba45-694967a5c4f1\\\\scratchpad\\\\smoke_test.py\")",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\Leech\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Leech-Mark-L\\\\04ac7c15-fb1d-4cc9-ba45-694967a5c4f1\\\\scratchpad\\\\smoke_test_voice_nav.py\")",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\Leech\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Leech-Mark-L\\\\04ac7c15-fb1d-4cc9-ba45-694967a5c4f1\\\\scratchpad\\\\smoke_test_click.py\")",
+      "Bash(netstat -ano)"
+    ]
+  }
+}

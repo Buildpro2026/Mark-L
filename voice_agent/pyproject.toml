@@ -1,0 +1,15 @@
+[project]
+name = "jarvis-voice-agent"
+version = "0.1.0"
+description = "JARVIS phone line — a Cartesia Line voice agent fronting jarvis-headless-core."
+# Cartesia builds deployments against the Python declared here (3.9-3.13
+# supported). Pinned to match the Render service's runtime so the two ends
+# of the phone line never diverge on syntax.
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "cartesia-line",
+    "httpx>=0.27",
+]
+
+[tool.uv]
+package = false

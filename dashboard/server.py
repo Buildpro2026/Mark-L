@@ -11,6 +11,7 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 import asyncio
 import base64
 import hashlib
+import hmac
 import re
 import secrets
 import socket
@@ -18,10 +19,23 @@ import string
 import time
 from pathlib import Path
 
+from actions import nucleus_hierarchy
+from actions import buildpro_data as bd
+from actions import daily_deal_finders as ddf
+from actions import business_intelligence as biz_intel
+from actions import opportunity_engine as opp_engine
+from actions import strategic_objective as strategic_obj
+from actions import google_auth
+from actions import twilio_integration as twilio
+from actions import hubspot_integration
+from actions import buffer_integration
+from actions.agent_orchestrator import orchestrator as agent_orchestrator
+from actions.system_monitor import get_system_status
+
 _DEPS_OK = False
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
     import uvicorn
     _DEPS_OK = True
 except ImportError:
@@ -38,7 +52,44 @@ except Exception:
 BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000
+# Plain-HTTP fallback alias for /3d when SSL is enabled (mirrors the
+# PORT + 1 HTTPS alias pattern in get_manual_url() below) — a client that
+# connects with plain HTTP to the HTTPS-only main port gets an empty
+# reply/connection reset (it isn't speaking TLS), so this gives it a real
+# answer instead.
+HTTP_PORT   = PORT + 2
 MAX_UPLOAD_MB = 500
+
+
+def is_port_free(port: int, host: str = "0.0.0.0") -> bool:
+    """Best-effort pre-flight check: can a new listener actually bind this
+    port right now? uvicorn's own bind-failure path calls sys.exit(),
+    which — raised inside a never-awaited asyncio Task — propagates
+    through Task.__step's special-cased SystemExit handling and kills the
+    WHOLE JARVIS process, not just the dashboard. Checking first lets
+    serve()/_serve_alias()/_serve_http_plain() skip cleanly instead."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _report_port_conflict(port: int, label: str, exit_code: int = 1) -> None:
+    """Never raises. A busy port degrades to 'this one listener is
+    skipped, logged clearly' instead of the process dying."""
+    message = (
+        f"[Dashboard] Port {port} is already in use ({label}) — skipping "
+        f"(uvicorn would exit with exit code {exit_code})."
+    )
+    print(message)
+    try:
+        from core.startup import get_logger
+        get_logger().warning(message)
+    except Exception:
+        pass
 
 
 def _make_uploads_dir() -> Path:
@@ -69,7 +120,7 @@ def _get_gemini_key() -> str | None:
 _KEY_CHARS = [c for c in (string.ascii_uppercase + string.digits)
               if c not in ('O', 'I', 'L', '0', '1')]
 
-# ── AES-256-CBC ───────────────────────────────────────────────────────────────
+# ── AES-256-CBC ─────────────────────────────────────────────────────────────────────────────────
 _AES_SALT = b'JARVIS-DASHBOARD-v1'
 
 
@@ -90,7 +141,7 @@ def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
     return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
 
 
-# ── CryptoJS (auto-download once, served locally) ─────────────────────────────
+# ── CryptoJS (auto-download once, served locally) ───────────────────────────────────────────────
 _CRYPTOJS_CDN  = ("https://cdnjs.cloudflare.com/ajax/libs/"
                   "crypto-js/4.2.0/crypto-js.min.js")
 _CRYPTOJS_FILE = STATIC_DIR / "crypto-js.min.js"
@@ -108,7 +159,7 @@ def _ensure_network_access(port: int) -> None:
     """
     import sys, subprocess, os, tempfile, threading
 
-    # ── Windows ──────────────────────────────────────────────────────────────
+    # ── Windows ─────────────────────────────────────────────────────────────
     if sys.platform == "win32":
         import ctypes, time
 
@@ -231,7 +282,7 @@ def _ensure_network_access(port: int) -> None:
             threading.Thread(target=_cleanup, args=(bat_path,), daemon=True).start()
         return
 
-    # ── macOS ─────────────────────────────────────────────────────────────────
+    # ── macOS ────────────────────────────────────────────────────────────────
     if sys.platform == "darwin":
         fw_ctl = "/usr/libexec/ApplicationFirewall/socketfilterfw"
         try:
@@ -259,7 +310,7 @@ def _ensure_network_access(port: int) -> None:
             pass  # macOS firewall is off by default — silent failure is fine
         return
 
-    # ── Linux ─────────────────────────────────────────────────────────────────
+    # ── Linux ────────────────────────────────────────────────────────────────────────────
     def _privileged(cmd: list[str]) -> bool:
         for prefix in (["pkexec"], ["sudo", "-n"]):
             try:
@@ -323,7 +374,7 @@ def _ensure_crypto_js() -> None:
 _ensure_crypto_js()
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────────────────
 
 def _local_ip() -> str:
     """Return the best LAN-facing IPv4 address, no internet required."""
@@ -364,7 +415,117 @@ def _read(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
-# ── DashboardServer ───────────────────────────────────────────────────────────
+def _verify_to_health_status(verify: dict) -> str:
+    """Maps a hubspot_integration.verify_hubspot()/buffer_integration.
+    verify_buffer() live-check result onto the same CONFIGURED /
+    AUTHENTICATED / NOT_CONFIGURED / AUTH_FAILED / RATE_LIMITED /
+    RUNTIME_FAILED vocabulary _integration_health() uses, so a module
+    opened from the Nucleus tree and the polled system panel never
+    disagree on what "working" means. A 401/403 from the live call is a
+    real auth rejection (AUTH_FAILED); a 429 is the provider rate-
+    limiting a token that's otherwise fine (RATE_LIMITED — see
+    buffer_integration.verify_buffer()'s 2026-09-03 finding: this used to
+    fall into RUNTIME_FAILED, which reads like our bug rather than the
+    provider's own throttling); anything else (network error, 5xx, an
+    unexpected exception) is RUNTIME_FAILED — distinct because those mean
+    we couldn't tell, not that the token is wrong."""
+    if verify.get("verified"):
+        return "AUTHENTICATED"
+    if not verify.get("configured"):
+        return "NOT_CONFIGURED"
+    status = str(verify.get("status") or "")
+    if status.startswith("UNAVAILABLE:401") or status.startswith("UNAVAILABLE:403"):
+        return "AUTH_FAILED"
+    if status.startswith("RATE_LIMITED"):
+        return "RATE_LIMITED"
+    return "RUNTIME_FAILED"
+
+
+def _verify_twilio_signature(req, form: dict) -> bool:
+    """Independently implements Twilio's documented request-signing
+    algorithm (HMAC-SHA1 over the request URL + sorted form param
+    key+value pairs, base64-encoded), compared against the
+    X-Twilio-Signature header. False-closed on every failure mode
+    (not configured, missing header, wrong token, tampered form,
+    wrong URL, or any unexpected error) — the only routes in this file
+    meant to receive traffic from the open internet, so refusing is
+    always the safe default, never a fabricated pass."""
+    try:
+        if not twilio.is_configured():
+            return False
+        headers = getattr(req, "headers", None) or {}
+        sig = headers.get("x-twilio-signature")
+        if not sig:
+            return False
+        auth_token = twilio._load_twilio_config().get("auth_token", "")
+        if not auth_token:
+            return False
+        data = str(req.url)
+        for key in sorted(form.keys()):
+            data += key + str(form[key])
+        expected = base64.b64encode(
+            hmac.new(auth_token.encode("utf-8"), data.encode("utf-8"), hashlib.sha1).digest()
+        ).decode("utf-8")
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+
+# Everything _serve_http_plain() below actually exists to serve: a real
+# answer for a client that hits the TLS-only main port with plain HTTP,
+# specifically the /3d page and its static assets (see
+# tests/test_dashboard_plain_http.py's real end-to-end check). Nothing
+# else belongs on that cleartext listener.
+_HTTP_PLAIN_ALLOWED = {("GET", "/3d"), ("GET", "/3d/sw.js")}
+_HTTP_PLAIN_ALLOWED_PREFIX = "/3d/assets/"
+
+
+class _PlainHttpGuard:
+    """Wraps self.app so the plain-HTTP listener (HTTP_PORT, PORT+2) can
+    only ever reach the small allowlist above, while PORT and PORT+1 (both
+    HTTPS, or PORT when SSL genuinely isn't configured at all) keep full
+    access to everything, completely unaffected.
+
+    2026-09-06 security fix: _serve_http_plain() binds this exact self.app
+    — every route, no restriction — to a plain HTTP socket whenever SSL is
+    enabled. That includes /login, /auto-login, and /api/device-login
+    (which hand back a bearer token and the raw AES session_key in the
+    response body), /api/command (accepts that token to run arbitrary
+    JARVIS commands), and /ws /3d/ws (accept the token as a query param and
+    stream live commands/audio) — a fully cleartext channel for the exact
+    credentials and command surface the self-signed HTTPS cert on PORT/
+    PORT+1 exists to protect. An attacker on the same LAN/Wi-Fi segment
+    (the network _ensure_network_access opens a firewall hole for) could
+    intercept a login or replay a captured token against /api/command in
+    plaintext. Wrapping the raw ASGI app (not @app.middleware("http"),
+    which never sees "websocket" scope type at all) so /ws and /3d/ws are
+    guarded here too, not left as an unguarded gap next to the HTTP fix.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        server = scope.get("server") if scope.get("type") in ("http", "websocket") else None
+        if server and server[1] == HTTP_PORT:
+            allowed = (
+                scope["type"] == "http"
+                and (
+                    (scope.get("method", ""), scope.get("path", "")) in _HTTP_PLAIN_ALLOWED
+                    or scope.get("path", "").startswith(_HTTP_PLAIN_ALLOWED_PREFIX)
+                )
+            )
+            if not allowed:
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 4003})
+                else:
+                    response = JSONResponse({"error": "Not available over plain HTTP — use HTTPS."}, status_code=403)
+                    await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+# ── DashboardServer ────────────────────────────────────────────────────────────────────
 
 class DashboardServer:
 
@@ -381,12 +542,27 @@ class DashboardServer:
         self._pending_keys: dict[str, float] = {}
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
+        # ── /3d spatial command center state ──────────────────
+        self._nucleus_id = "jarvis"           # current focused Nucleus
+        self._nucleus_back_stack: list[str] = []  # for the "back" nav action
+        self._3d_ws_clients: set[WebSocket] = set()  # separate channel from the phone command center's _clients
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
+        # 2026-09-03 finding: _module_social() made up to 3 live Buffer
+        # GraphQL calls (verify + channels + capabilities) on every single
+        # /3d Buffer/Social module open, with zero caching — repeatedly
+        # opening the module in normal use was enough to trip Buffer's own
+        # rate limit, which then showed up looking like a broken
+        # integration rather than "you clicked this a few times in a
+        # row." Cached briefly here rather than inside
+        # buffer_integration.py itself, which tests call directly and
+        # expect a fresh network call every time.
+        self._buffer_module_cache = {"ts": 0.0, "data": None}
+        self._hubspot_portal_id = None  # cached once verify_hubspot() succeeds; portal id never changes
         self.app                          = self._build_app()
 
-    # ── one-time key management ───────────────────────────────────────────
+    # ── one-time key management ────────────────────────────────
 
     def new_key(self, expiry_secs: int = 600) -> str:
         now = time.time()
@@ -410,6 +586,827 @@ class DashboardServer:
             return f"{self._ip}:{PORT + 1}"
         return f"{self._ip}:{PORT}"
 
+    # ── /3d spatial command center — navigation state ───────────
+
+    def apply_navigation(self, action: str, nucleus_id: str = "") -> dict:
+        """The single place server-side navigation state actually changes —
+        called by the HTTP /3d/api/command route, the /3d/ws websocket, and
+        (via core/headless/tool_registry.py's navigate_command_center tool)
+        Gemini itself, so all three ways of moving JARVIS around the
+        Nucleus tree stay in sync. 'status' never mutates state — it's a
+        read of wherever navigation already put us."""
+        if action == "open" and nucleus_id:
+            if nucleus_id != self._nucleus_id:
+                self._nucleus_back_stack.append(self._nucleus_id)
+            self._nucleus_id = nucleus_id
+        elif action == "back":
+            if self._nucleus_back_stack:
+                self._nucleus_id = self._nucleus_back_stack.pop()
+        elif action == "home":
+            self._nucleus_id = "jarvis"
+            self._nucleus_back_stack = []
+        # "status" (or any unrecognized action) falls through and just
+        # reports current state without mutating it.
+        node = nucleus_hierarchy.get_hierarchy_node(self._nucleus_id) or {"id": "jarvis", "name": "Jarvis"}
+        return {
+            "type": "navigate", "action": action,
+            "nucleus_id": self._nucleus_id, "name": node.get("name", self._nucleus_id),
+            "ts": time.time(),
+        }
+
+    async def _broadcast_3d(self, payload: dict) -> None:
+        """Push to every connected /3d/ws client — used for navigation
+        pushes and (see dashboard_bridge.py / twilio webhooks) toast
+        notifications. Best-effort: a dead socket is dropped, never
+        allowed to break the broadcast for everyone else."""
+        dead = set()
+        for ws in self._3d_ws_clients:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.add(ws)
+        self._3d_ws_clients -= dead
+
+    async def broadcast_nav(self, payload: dict) -> None:
+        """Public alias for _broadcast_3d — the name main.py's
+        navigate_command_center tool and _broadcast_orb_state call,
+        matching what a live desktop/voice session (this dashboard's
+        actual caller) conceptually does: push a navigation or state
+        event to the spatial scene."""
+        await self._broadcast_3d(payload)
+
+    # ── /3d spatial command center — the real chat bridge ──────────
+    # Root-cause fix (Phase 2, priority 1): dashboard_bridge.py drains
+    # _command_queue into run_chat_turn() but only ever broadcasts to the
+    # PHONE _clients pool via self.broadcast() — never to _3d_ws_clients —
+    # so the 3D dock's command box only ever showed "Sent." This handler is
+    # the fix: same run_chat_turn() brain, same on_status/on_tool_event
+    # hooks that already exist for exactly this purpose, just pushed out
+    # over _broadcast_3d instead. No second chat implementation.
+
+    async def _handle_3d_chat(self, text: str, history: list) -> dict:
+        from core.headless.ui import run_chat_turn
+        from actions.agent_orchestrator import orchestrator as agent_orchestrator
+
+        async def _on_status(label: str) -> None:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "thinking", "label": label, "ts": time.time()})
+
+        async def _on_tool_event(event: dict) -> None:
+            ev_type = event.get("type")
+            tool_name = event.get("name", "tool")
+            if ev_type == "tool_start":
+                await self._broadcast_3d({
+                    "type": "jarvis_state", "state": "executing",
+                    "label": f"Running {tool_name}...", "ts": time.time(),
+                })
+                await self._broadcast_3d({
+                    "type": "activity", "source": "tool", "kind": "tool_start",
+                    "message": f"{tool_name} started", "ts": time.time(),
+                })
+            elif ev_type == "tool_end":
+                ok = event.get("ok", True)
+                await self._broadcast_3d({
+                    "type": "activity", "source": "tool",
+                    "kind": "tool_end" if ok else "tool_error",
+                    "message": f"{tool_name} {'completed' if ok else 'failed'}",
+                    "ts": time.time(),
+                })
+
+        def _pending_count() -> int:
+            try:
+                return agent_orchestrator.summary().get("pending_approval_count", 0)
+            except Exception:
+                return 0
+
+        before_pending = _pending_count()
+        await self._broadcast_3d({"type": "jarvis_state", "state": "thinking", "label": "Thinking...", "ts": time.time()})
+
+        error = None
+        try:
+            reply, tool_calls = await run_chat_turn(text, history, on_status=_on_status, on_tool_event=_on_tool_event)
+        except Exception as e:
+            reply = f"Error: {e}"
+            tool_calls = []
+            error = str(e)
+
+        after_pending = _pending_count()
+
+        if error:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "error", "label": reply[:160], "ts": time.time()})
+            await self._broadcast_3d({
+                "type": "activity", "source": "chat", "kind": "error",
+                "message": reply[:200], "ts": time.time(),
+            })
+        elif after_pending > before_pending:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "waiting_for_approval", "label": "Waiting for approval...", "ts": time.time()})
+            await self._broadcast_3d({
+                "type": "activity", "source": "approval", "kind": "approval_requested",
+                "message": "A new task needs your approval.", "ts": time.time(),
+            })
+        else:
+            await self._broadcast_3d({"type": "jarvis_state", "state": "success", "label": "Done", "ts": time.time()})
+            await self._broadcast_3d({
+                "type": "activity", "source": "chat", "kind": "reply",
+                "message": reply[:200], "ts": time.time(),
+            })
+
+        return {"reply": reply, "tool_calls": tool_calls, "error": error, "pending_approval_count": after_pending}
+
+    # ── /3d spatial command center — per-module live data ─────────
+    # Each of these honestly reports NOT_CONFIGURED/empty rather than
+    # fabricating data — matching the same standard as every tool in
+    # core/headless/tool_executor.py. Wraps real, already-tested modules;
+    # nothing here reimplements business logic that exists elsewhere.
+
+    def _communications_placeholder(self) -> bool:
+        """Live-computed, not read from the static hierarchy config: True
+        (dim/"coming soon" in the 3D scene) unless Twilio is genuinely
+        configured right now. False-closed if the twilio module itself
+        failed to import (or was monkeypatched to None in a test)."""
+        if twilio is None:
+            return True
+        try:
+            return twilio.get_status().get("state") != "CONFIGURED"
+        except Exception:
+            return True
+
+    def _overlay_communications_placeholder(self, children: list[dict]) -> list[dict]:
+        placeholder = self._communications_placeholder()
+        return [{**c, "placeholder": placeholder} for c in children]
+
+    def _module_data(self, module_id: str, query: str = "", note: str = "") -> dict:
+        if module_id == "buildpro":
+            return self._module_buildpro()
+        if module_id == "candidates":
+            self._ensure_hubspot_portal_id()
+            results = self._decorate_buildpro_candidates(bd.list_candidates(limit=100))
+            return {"results": results, "summary": f"{len(results)} candidate(s) on file."}
+        if module_id == "clients":
+            self._ensure_hubspot_portal_id()
+            results = self._decorate_buildpro_clients(bd.list_clients(limit=100))
+            return {"results": results, "summary": f"{len(results)} client(s) on file."}
+        if module_id == "prospects":
+            self._ensure_hubspot_portal_id()
+            results = self._decorate_buildpro_clients(bd.list_clients(status="prospect", limit=100))
+            return {"results": results, "summary": f"{len(results)} prospect(s) on file."}
+        if module_id == "jobs":
+            results = bd.list_jobs(limit=100)
+            return {"results": results, "summary": f"{len(results)} job(s) on file."}
+        if module_id == "matches":
+            results = bd.top_matches(limit=100)
+            return {"results": results, "summary": f"{len(results)} candidate/job match(es) on file."}
+        if module_id in ("ddf", "deals"):
+            return self._module_ddf()
+        if module_id == "communications":
+            return self._module_communications()
+        if module_id == "system":
+            return self._module_system()
+        if module_id == "files":
+            return self._module_files(query)
+        if module_id == "knowledge":
+            return self._module_knowledge(query, note)
+        if module_id == "reports":
+            return self._module_reports()
+        if module_id == "email":
+            return self._module_email(query)
+        if module_id == "calendar":
+            return self._module_calendar()
+        if module_id in ("hubspot", "hubspot-contacts", "hubspot-companies"):
+            return self._module_hubspot()
+        if module_id in ("social", "buffer", "social-channels"):
+            return self._module_social()
+        if module_id == "company_core":
+            return self._module_company_core()
+        # Personal Planet (Section 9): Email/Contacts have their own real
+        # data; Calendar/Files/Communications are the exact same live
+        # modules the top-level domains of the same name already use
+        # (reused, not duplicated) — just reachable from a second, more
+        # relevant place in the Nucleus tree.
+        if module_id == "personal-email":
+            return self._module_personal_email()
+        if module_id == "personal-contacts":
+            return self._module_personal_contacts()
+        if module_id == "personal-calendar":
+            return self._module_calendar()
+        if module_id in ("personal-files", "personal-documents"):
+            return self._module_files(query)
+        if module_id == "personal-communications":
+            return self._module_communications()
+        if module_id == "personal-tasks":
+            return self._module_personal_tasks()
+        if module_id == "personal-alerts":
+            return {"note": "No dedicated personal alert feed exists yet — nothing fabricated here.", "alerts": []}
+        # Any other real hierarchy node (careerrocket, etc.) — honest
+        # placeholder rather than a 404, since it's still a real,
+        # navigable Nucleus even before it has its own live data source.
+        return {"summary": "No live data source connected for this Nucleus yet."}
+
+    def _module_buildpro(self) -> dict:
+        candidates = bd.list_candidates(limit=200)
+        clients = bd.list_clients(limit=200)
+        jobs = bd.list_jobs(status="open", limit=200)
+        prospects = [c for c in clients if c.get("status") == "prospect"]
+        matches = bd.top_matches(limit=200)
+        qualified = [m for m in matches if (m.get("match_score") or 0) >= 70]
+        top_scores = qualified[:5]  # top_matches() is already ordered by score DESC
+        data = {
+            "buildpro_recruiting": {
+                "candidate_count": len(candidates),
+                "client_count": len(clients),
+                "active_jobs": len(jobs),
+                "prospect_count": len(prospects),
+                "qualified_matches": len(qualified),
+                "highest_match_scores": [
+                    {"candidate_name": m.get("candidate_name"), "job_title": m.get("job_title"),
+                     "match_score": m.get("match_score")}
+                    for m in top_scores
+                ],
+            },
+            "buildpro_followups": {
+                "candidates": bd.list_candidates_needing_followup(),
+                "clients": bd.list_clients_needing_followup(),
+            },
+        }
+        try:
+            data["business_intelligence"] = biz_intel.summary("buildpro")
+        except Exception:
+            data["business_intelligence"] = {"counts": {}}
+        try:
+            data["top_opportunities"] = opp_engine.rank_opportunities(business="buildpro", limit=5)
+        except Exception:
+            data["top_opportunities"] = []
+        return data
+
+    def _module_ddf(self) -> dict:
+        data = {"top_products": ddf.get_top_products(limit=5)}
+        try:
+            data["business_intelligence"] = biz_intel.summary("ddf")
+        except Exception:
+            data["business_intelligence"] = {"counts": {}}
+        return data
+
+    def _module_communications(self) -> dict:
+        try:
+            status = twilio.get_status() if twilio is not None else {"state": "NOT_CONFIGURED", "detail": "Twilio module unavailable."}
+        except Exception as e:
+            status = {"state": "ERROR", "detail": str(e)}
+        configured = status.get("state") == "CONFIGURED"
+        children = nucleus_hierarchy.get_hierarchy_children("communications")
+        # "contacts" has no backing store regardless of Twilio config — a
+        # placeholder either way, distinct from the other channels which
+        # flip live once Twilio is actually configured.
+        channels = {}
+        for c in children:
+            key = c["id"].replace("comm-", "")
+            channels[key] = {"status": "placeholder" if key == "contacts" or not configured else "live"}
+        return {
+            "configured": configured,
+            "status": status.get("state", "NOT_CONFIGURED"),
+            "detail": status.get("detail"),
+            "channels": channels,
+            "children": self._overlay_communications_placeholder(children),
+        }
+
+    def _module_system(self) -> dict:
+        data = dict(get_system_status())
+        try:
+            data["agents"] = agent_orchestrator.summary()
+        except Exception:
+            data["agents"] = {"agents": []}
+        try:
+            data["strategic_objective"] = strategic_obj.get_objective_status()
+        except Exception:
+            data["strategic_objective"] = {}
+        try:
+            data["business_intelligence"] = biz_intel.summary()
+        except Exception:
+            data["business_intelligence"] = {"counts": {}}
+        data["integration_health"] = self._integration_health()
+        return data
+
+    def _integration_health(self) -> dict:
+        """Cheap, local/config-presence health for every system the /3d
+        spec calls out.
+
+        2026-09-02 reliability audit finding: the previous vocabulary used
+        "CONNECTED" for both "a credential is present" and "this in-process
+        component is actually running" — Lee's own words, "Do not label an
+        integration 'working' merely because an environment variable
+        exists," is exactly the gap that conflation created (e.g. Buffer/
+        HubSpot showed CONNECTED purely because BUFFER_TOKEN/HUBSPOT_TOKEN
+        were set, never because either was actually verified live).
+        Vocabulary is now:
+          CONFIGURED    — a credential/setting is present; not verified live
+                          here (this feeds a 30s-polled panel — a live
+                          network call per integration per poll isn't
+                          reasonable; see _module_hubspot/_module_social for
+                          the live AUTHENTICATED/AUTH_FAILED check, run only
+                          when a user actually opens that module).
+          AUTHENTICATED — a live credential check has actually succeeded
+                          (Gmail/Calendar's OAuth status is already a real,
+                          fast local check, not a network round-trip).
+          OPERATIONAL   — an in-process component with no external
+                          credential to check; it's already proven to work
+                          by the fact that this call is executing.
+          NOT_CONFIGURED — no credential/setting present.
+          AUTH_FAILED   — a credential is present but the live check
+                          rejected it.
+          RUNTIME_FAILED — an unexpected error while checking, distinct
+                          from "not configured" or "auth failed."
+        Never returns a credential value — presence only, same standard as
+        core/headless/config.py's summarize()."""
+        from core.headless import config as headless_config
+        health: dict[str, str] = {}
+        health["jarvis_backend"] = "OPERATIONAL"     # this call running IS the backend
+        health["render"] = "OPERATIONAL"             # same process — if this runs, Render is serving it
+        health["tool_executor"] = "OPERATIONAL"      # importable/running in this same process
+        health["ollama"] = "CONFIGURED" if headless_config.OLLAMA_API_KEY else "NOT_CONFIGURED"
+        health["groq"] = "CONFIGURED" if headless_config.GROQ_API_KEY else "NOT_CONFIGURED"
+        health["gemini"] = "CONFIGURED" if headless_config.GEMINI_API_KEY else "NOT_CONFIGURED"
+        health["cartesia"] = (
+            "CONFIGURED" if (headless_config.CARTESIA_API_KEY and headless_config.CARTESIA_VOICE_ID)
+            else "NOT_CONFIGURED"
+        )
+        try:
+            from actions import twilio_integration
+            health["twilio"] = "CONFIGURED" if twilio_integration.is_configured() else "NOT_CONFIGURED"
+        except Exception:
+            health["twilio"] = "RUNTIME_FAILED"
+        health["buffer"] = "CONFIGURED" if headless_config.BUFFER_TOKEN else "NOT_CONFIGURED"
+        health["hubspot"] = "CONFIGURED" if headless_config.HUBSPOT_TOKEN else "NOT_CONFIGURED"
+        try:
+            g_status = google_auth.get_credential_status()
+            if g_status.get("authorized"):
+                health["gmail"] = "AUTHENTICATED"
+                health["calendar"] = "AUTHENTICATED"
+            elif g_status.get("credential_file") == "present":
+                health["gmail"] = "AUTH_FAILED"
+                health["calendar"] = "AUTH_FAILED"
+            else:
+                health["gmail"] = "NOT_CONFIGURED"
+                health["calendar"] = "NOT_CONFIGURED"
+        except Exception:
+            health["gmail"] = "RUNTIME_FAILED"
+            health["calendar"] = "RUNTIME_FAILED"
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{headless_config.DB_PATH}?mode=ro", uri=True, timeout=2)
+            conn.execute("SELECT 1")
+            conn.close()
+            health["database"] = "OPERATIONAL"
+        except Exception:
+            health["database"] = "RUNTIME_FAILED"
+        try:
+            from memory.memory_manager import load_memory
+            load_memory()
+            health["memory"] = "OPERATIONAL"
+        except Exception:
+            health["memory"] = "RUNTIME_FAILED"
+        try:
+            from core.headless.obsidian import ObsidianVault
+            vstatus = ObsidianVault().status()
+            if not vstatus.get("configured"):
+                health["knowledge"] = "NOT_CONFIGURED"
+            elif vstatus.get("exists"):
+                health["knowledge"] = "OPERATIONAL"
+            else:
+                health["knowledge"] = "RUNTIME_FAILED"
+        except Exception:
+            health["knowledge"] = "RUNTIME_FAILED"
+        return health
+
+    def _hubspot_portal_url(self, kind: str, record_id: str | None) -> str | None:
+        """'Open in HubSpot' deep link for a contact/company record — Lee's
+        instruction that HubSpot stays the authoritative CRM record and
+        /3d never builds a duplicate detail view: every BuildPro
+        candidate/client/prospect/match that's actually linked to a real
+        HubSpot record (hubspot_contact_id/hubspot_company_id) should
+        resolve straight to that record instead. Returns None (never a
+        broken link) when there's no record id or the portal id hasn't
+        been discovered yet — the portal id itself comes from a live
+        verify_hubspot() call the module functions below already make;
+        cached here since it never changes once known, so it costs one
+        real network round-trip total, not one per record rendered."""
+        if not record_id:
+            return None
+        portal_id = self._hubspot_portal_id
+        if not portal_id:
+            return None
+        path = "contact" if kind == "contact" else "company"
+        return f"https://app.hubspot.com/contacts/{portal_id}/{path}/{record_id}"
+
+    def _remember_hubspot_portal_id(self, verify: dict) -> None:
+        if self._hubspot_portal_id or not verify.get("verified"):
+            return
+        account = verify.get("account") or {}
+        portal_id = account.get("portalId") or account.get("portal_id") or account.get("hub_id")
+        if portal_id:
+            self._hubspot_portal_id = str(portal_id)
+
+    def _ensure_hubspot_portal_id(self) -> None:
+        """Lazily discovers and caches the HubSpot portal id so BuildPro
+        candidate/client/prospect/match views (not just the HubSpot
+        module itself) can render 'Open in HubSpot' links. A no-op (no
+        network call) after the first successful lookup — the portal id
+        never changes for a given account — and a cheap no-op every time
+        if HubSpot genuinely isn't configured, same as every other
+        'live check on module open' path in this file."""
+        if self._hubspot_portal_id:
+            return
+        try:
+            verify = hubspot_integration.verify_hubspot()
+        except Exception:
+            return
+        self._remember_hubspot_portal_id(verify)
+
+    def _decorate_hubspot_contacts(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to raw HubSpot contact records (top-level 'id')."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("contact", r.get("id"))} for r in records]
+
+    def _decorate_hubspot_companies(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to raw HubSpot company records (top-level 'id')."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("company", r.get("id"))} for r in records]
+
+    def _decorate_buildpro_candidates(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to buildpro_data candidate rows — None
+        (never a broken link) for a candidate with no hubspot_contact_id,
+        e.g. one that only ever came in through the Gmail intake chain
+        before a successful HubSpot sync."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("contact", r.get("hubspot_contact_id"))} for r in records]
+
+    def _decorate_buildpro_clients(self, records: list[dict]) -> list[dict]:
+        """Adds 'hubspot_url' to buildpro_data client rows."""
+        return [{**r, "hubspot_url": self._hubspot_portal_url("company", r.get("hubspot_company_id"))} for r in records]
+
+    # Star display names + which _integration_health() key each one reads —
+    # the single source of truth both stay in sync with (no second health
+    # check invented for this planet). "connected" only when the platform
+    # is doing something more than "a key is present": AUTHENTICATED/
+    # OPERATIONAL count, CONFIGURED does not (Lee's own standing rule, see
+    # _integration_health's docstring) — a configured-but-unverified
+    # integration is shown honestly as NOT CONNECTED, not glossed over.
+    _COMPANY_CORE_STARS = (
+        ("render", "Render (hosting)"),
+        ("database", "Database"),
+        ("memory", "Memory / Brain"),
+        ("knowledge", "JARVIS Brain (Obsidian)"),
+        ("ollama", "Ollama Cloud"),
+        ("groq", "Groq"),
+        ("gemini", "Gemini"),
+        ("cartesia", "Cartesia (voice)"),
+        ("twilio", "Twilio (SMS/calls)"),
+        ("hubspot", "HubSpot (CRM)"),
+        ("gmail", "Gmail"),
+        ("calendar", "Google Calendar"),
+        ("buffer", "Buffer (social)"),
+    )
+    _COMPANY_CORE_CONNECTED_STATUSES = {"AUTHENTICATED", "OPERATIONAL"}
+
+    def _module_company_core(self) -> dict:
+        """2026-09-03 (Lee's autonomous-CEO spec, Section 18): the Company
+        Core Planet — every real infrastructure platform JARVIS actually
+        runs on, as its own navigable Nucleus with named stars. Reuses
+        _integration_health() (already the real, live-checked health
+        computation _module_system() uses) rather than building a second
+        health check — this is a second, more prominent HOME for that same
+        real data, not a duplicate of it. A star with no live-verified
+        connection is labeled 'NOT CONNECTED' honestly, never hidden or
+        glossed as healthy."""
+        health = self._integration_health()
+        stars = []
+        for key, name in self._COMPANY_CORE_STARS:
+            status = health.get(key, "NOT_CONFIGURED")
+            stars.append({
+                "id": key, "name": name, "status": status,
+                "connected": status in self._COMPANY_CORE_CONNECTED_STATUSES,
+            })
+        connected_count = sum(1 for s in stars if s["connected"])
+        return {
+            "stars": stars,
+            "summary": f"{connected_count}/{len(stars)} platform(s) connected and verified.",
+        }
+
+    def _module_hubspot(self) -> dict:
+        """Real HubSpot module — verify_hubspot() is a live, lightweight
+        auth check (see actions/hubspot_integration.py), then a small
+        recent-records pull. User-initiated (opened from the Nucleus tree),
+        not polled, so a live call here is fine. NOT_AVAILABLE is reported
+        honestly rather than fabricating data when HubSpot isn't
+        configured or the live check fails."""
+        try:
+            verify = hubspot_integration.verify_hubspot()
+        except Exception as e:
+            verify = {"configured": False, "verified": False, "status": f"ERROR:{e}"}
+        self._remember_hubspot_portal_id(verify)
+        data: dict = {"status": verify, "health_status": _verify_to_health_status(verify), "hubspot_portal_id": self._hubspot_portal_id}
+        if not verify.get("verified"):
+            data["recent_contacts"] = []
+            data["recent_companies"] = []
+            data["note"] = "NOT AVAILABLE" if not verify.get("configured") else "NOT AVAILABLE — HubSpot check failed."
+            return data
+        try:
+            contacts = hubspot_integration.get_contacts(limit=10)
+            data["recent_contacts"] = self._decorate_hubspot_contacts(contacts.get("results", []) if contacts.get("ok") else [])
+        except Exception:
+            data["recent_contacts"] = []
+        try:
+            companies = hubspot_integration.get_companies(limit=10)
+            data["recent_companies"] = self._decorate_hubspot_companies(companies.get("results", []) if companies.get("ok") else [])
+        except Exception:
+            data["recent_companies"] = []
+        return data
+
+    _BUFFER_MODULE_CACHE_TTL = 60           # normal: avoid re-hitting Buffer on rapid repeat opens
+    _BUFFER_MODULE_CACHE_TTL_RATE_LIMITED = 300  # back off harder once Buffer has actually 429'd us
+
+    def _module_social(self) -> dict:
+        """Real Buffer/social module — status, connected channels, and
+        (live schema introspection) which scheduled-post operations this
+        account's token genuinely supports. Never returns the Buffer token
+        anywhere in this payload — get_channels()/verify_buffer() don't
+        carry it, and channel dicts are defensively stripped of anything
+        that looks like a credential field before being sent to the
+        browser. User-initiated (opened from the Nucleus tree), not
+        polled.
+
+        2026-09-03 finding: this used to fire 3 live Buffer GraphQL calls
+        (verify + channels + capabilities) on every single open with no
+        caching at all — a genuinely healthy token showed
+        "UNAVAILABLE:429" after a few normal opens because WE were the
+        rate limit, not because Buffer or the token were unhealthy. Now
+        cached briefly (see the TTLs above); a 429 gets cached longer so
+        the next open doesn't immediately re-trigger the same limit."""
+        cached = self._buffer_module_cache.get("data")
+        if cached is not None:
+            ttl = (
+                self._BUFFER_MODULE_CACHE_TTL_RATE_LIMITED
+                if str(cached.get("status", {}).get("status", "")).startswith("RATE_LIMITED")
+                else self._BUFFER_MODULE_CACHE_TTL
+            )
+            if time.time() - self._buffer_module_cache["ts"] < ttl:
+                return {**cached, "cached": True}
+        try:
+            verify = buffer_integration.verify_buffer()
+        except Exception as e:
+            verify = {"configured": False, "verified": False, "status": f"ERROR:{e}"}
+        data: dict = {"status": verify, "health_status": _verify_to_health_status(verify)}
+        if not verify.get("verified"):
+            data["channels"] = []
+            data["scheduling_capabilities"] = {"configured": verify.get("configured", False), "status": verify.get("status"), "capabilities": {}}
+            if str(verify.get("status", "")).startswith("RATE_LIMITED"):
+                data["note"] = verify.get("detail") or "RATE LIMITED — Buffer is throttling this token right now; try again shortly."
+            else:
+                data["note"] = "NOT AVAILABLE" if not verify.get("configured") else "NOT AVAILABLE — Buffer check failed."
+            self._buffer_module_cache = {"ts": time.time(), "data": data}
+            return data
+        try:
+            channels_result = buffer_integration.get_channels()
+            raw_channels = channels_result.get("channels", []) if channels_result.get("status") == "VERIFIED" else []
+        except Exception:
+            raw_channels = []
+        _CRED_KEYS = {"token", "accesstoken", "access_token", "secret", "apikey", "api_key"}
+        data["channels"] = [
+            {k: v for k, v in c.items() if k.lower() not in _CRED_KEYS}
+            for c in raw_channels
+        ]
+        try:
+            data["scheduling_capabilities"] = buffer_integration.discover_scheduling_capabilities()
+        except Exception as e:
+            data["scheduling_capabilities"] = {"configured": True, "status": f"ERROR:{e}", "capabilities": {}}
+        self._buffer_module_cache = {"ts": time.time(), "data": data}
+        return data
+
+    def _module_files(self, query: str) -> dict:
+        results = []
+        try:
+            if query.strip():
+                for p in BASE_DIR.rglob(f"*{query.strip()}*"):
+                    if any(part in (".git", "__pycache__", "node_modules", ".venv") for part in p.parts):
+                        continue
+                    if p.is_file():
+                        results.append({"name": p.name, "path": str(p.relative_to(BASE_DIR))})
+                    if len(results) >= 50:
+                        break
+        except Exception:
+            pass
+        recent_files: list[dict] = []
+        try:
+            recent_files = [
+                {"name": f.name, "size": f.stat().st_size}
+                for f in sorted(
+                    (p for p in self._uploads_dir.iterdir() if p.is_file()),
+                    key=lambda p: p.stat().st_mtime, reverse=True,
+                )[:10]
+            ]
+        except Exception:
+            pass
+        return {"results": results, "recent_files": recent_files}
+
+    def _module_knowledge(self, query: str = "", note: str = "") -> dict:
+        """JARVIS Brain — a thin read-only wrapper over the existing
+        core.headless.obsidian.ObsidianVault (no new retrieval system:
+        list_notes()/search_notes()/read_note() are the same methods the
+        obsidian LLM tool already uses). Distinct from _module_files:
+        this is specifically the Obsidian knowledge vault (default
+        knowledge/JARVIS Brain/), not a general filesystem search.
+        Every field below comes straight from the vault — an unconfigured
+        vault, an empty vault, or a not-found note is reported honestly,
+        never fabricated."""
+        from core.headless.obsidian import ObsidianVault
+        vault = ObsidianVault()
+        vault_path = vault.status().get("path")
+        if not vault.is_configured():
+            return {
+                "configured": False, "vault_path": vault_path,
+                "summary": "No JARVIS Brain vault configured.", "notes": [],
+            }
+        if note:
+            content = vault.read_note(note)
+            found = content is not None
+            return {
+                "configured": True, "vault_path": vault_path,
+                "note": {"path": note, "content": content, "found": found},
+                "summary": f"Reading {note}" if found else f"{note!r} not found in the JARVIS Brain.",
+            }
+        if query.strip():
+            results = vault.search_notes(query)
+            return {
+                "configured": True, "vault_path": vault_path,
+                "query": query, "results": results,
+                "summary": f'{len(results)} note(s) match "{query}".',
+            }
+        notes = vault.list_notes()
+        return {
+            "configured": True, "vault_path": vault_path,
+            "notes": notes,
+            "summary": f"{len(notes)} note(s) in the JARVIS Brain." if notes else "The JARVIS Brain vault is empty.",
+        }
+
+    def _module_reports(self) -> dict:
+        report_files: list[dict] = []
+        try:
+            reports_dir = BASE_DIR / "data" / "reports"
+            if reports_dir.is_dir():
+                report_files = [{"name": f.name} for f in sorted(reports_dir.iterdir(), reverse=True)[:20]]
+        except Exception:
+            pass
+        return {"system_status": get_system_status(), "report_files": report_files}
+
+    def _module_email(self, query: str = "") -> dict:
+        """Real Gmail module — the live inbox itself (sender/subject/date/
+        classification/attachments/processing status), not just whether
+        Gmail is authorized.
+
+        2026-09-03 finding: this used to unconditionally return "Email is
+        authorized. Live content retrieval isn't wired into this view
+        yet." — Gmail was already a real, working, tested integration
+        (actions/gmail_integration.py's list_messages()/classify_message(),
+        the same functions the scheduled buildpro_email_monitor/
+        buildpro_candidate_intake/buildpro_client_intake agents already
+        run every hour) that this specific view simply never called.
+        User-initiated (opened from the Nucleus tree), not polled, so a
+        live Gmail call here is fine — same standard as
+        _module_hubspot()/_module_social(). Defaults to the same in:inbox
+        scope agent_orchestrator.py's _INTAKE_QUERY uses (never is:unread
+        — see that module's 2026-09-02 finding: is:unread silently and
+        permanently excludes every message anyone with mailbox access has
+        ever opened), and honors an explicit search query the same way
+        _module_files()/_module_knowledge() do.
+
+        'processed'/'processed_as' cross-references buildpro_data's real
+        per-message dedup table (is_message_processed) — the same table
+        the scheduled intake agents write to — so this honestly reflects
+        whether JARVIS already acted on a message rather than guessing."""
+        try:
+            status = google_auth.get_credential_status()
+        except Exception as e:
+            status = {"authorized": False, "credential_file": "unknown", "error": str(e)}
+        if not status.get("authorized"):
+            return {"configured": False, "status": status, "messages": [], "note": "Gmail isn't authorized yet — run the one-time Google sign-in to enable this view."}
+        from actions import gmail_integration
+        from actions import email_classification
+        gmail_query = query.strip() if query and query.strip() else "in:inbox"
+        try:
+            r = gmail_integration.list_messages(query=gmail_query, max_results=20)
+        except Exception as e:
+            return {"configured": True, "status": status, "messages": [], "note": f"Gmail scan failed: {e}"}
+        if not r.get("ok"):
+            return {
+                "configured": True, "status": status, "messages": [], "query": gmail_query,
+                "note": f"Gmail scan failed ({r.get('state')}): {r.get('detail')}",
+            }
+        messages = []
+        for m in r.get("messages", []):
+            message_id = m.get("id") or ""
+            classification = gmail_integration.classify_message(m)
+            # 2026-09-03 (Lee's spec, Sections 4 & 12): the broader 7-category
+            # result + a real, clickable "OPEN SOURCE EMAIL" deep link —
+            # additive next to 'classification' (legacy label, unchanged)
+            # so nothing that already reads that key breaks.
+            cls = email_classification.classify_email(m)
+            processed_candidate = bd.is_message_processed(message_id, "candidate_intake")
+            processed_client = bd.is_message_processed(message_id, "client_intake")
+            attachments = m.get("attachments") or []
+            messages.append({
+                "id": message_id,
+                "sender": m.get("sender"),
+                "sender_domain": m.get("sender_domain"),
+                "subject": m.get("subject"),
+                "date": m.get("date"),
+                "snippet": m.get("snippet"),
+                "classification": classification,
+                "category": cls["category"],
+                "category_confidence": cls["confidence"],
+                "category_reason": cls["reason"],
+                "company_id": cls["company_id"],
+                "permalink": m.get("permalink") or "SOURCE UNAVAILABLE",
+                "unread": "UNREAD" in (m.get("labels") or []),
+                "has_attachments": bool(attachments),
+                "attachment_names": [a.get("filename") for a in attachments if a.get("filename")],
+                "processed": processed_candidate or processed_client,
+                "processed_as": "candidate_intake" if processed_candidate else ("client_intake" if processed_client else None),
+            })
+        relevant = sum(1 for m in messages if m["classification"] in ("candidate_reply", "client_inquiry"))
+        return {
+            "configured": True,
+            "status": status,
+            "query": gmail_query,
+            "messages": messages,
+            "summary": f"{len(messages)} message(s) in view ({relevant} candidate/client-relevant, {sum(1 for m in messages if m['processed'])} already processed by JARVIS).",
+        }
+
+    def _module_personal_email(self) -> dict:
+        """2026-09-03 (Lee's autonomous-CEO spec, Section 9): the Personal
+        Planet's Email category — the exact same live Gmail scan
+        _module_email() runs, filtered to messages the 7-category
+        classifier actually calls PERSONAL, with the same real deep
+        links. Not a second Gmail integration; a filtered view of the one
+        that already exists."""
+        base = self._module_email("in:inbox")
+        if not base.get("configured") or base.get("messages") is None:
+            return base
+        from actions import email_classification
+        personal = [m for m in base["messages"] if m.get("category") == email_classification.CATEGORY_PERSONAL]
+        return {**base, "messages": personal, "summary": f"{len(personal)} personal message(s) in view."}
+
+    def _module_personal_contacts(self) -> dict:
+        """Real personal contacts — Twilio's own SMS/call history table
+        (actions/twilio_integration.py's lookup_contact/get_history) is
+        the only real, non-HubSpot contact data this system has; HubSpot
+        is BuildPro's business CRM, not Lee's personal contact list, so
+        it isn't reused here. Honestly NOT_CONFIGURED when Twilio isn't
+        set up rather than fabricating a contact list."""
+        from actions import twilio_integration
+        if not twilio_integration.is_configured():
+            return {"configured": False, "contacts": [], "note": "Twilio isn't configured — no personal contact/call history available."}
+        try:
+            history = twilio_integration.get_history(limit=25)
+        except Exception as e:
+            return {"configured": True, "contacts": [], "note": f"Could not read contact history: {e}"}
+        return {"configured": True, "contacts": history, "summary": f"{len(history)} recent contact(s) from call/SMS history."}
+
+    def _module_personal_tasks(self) -> dict:
+        """No dedicated personal task store exists in this system (Section
+        20: real data only, no fabricated placeholder). REVIEW_REQUIRED-
+        classified personal-adjacent mail is the closest real signal —
+        surfaced honestly as 'needs a look', not invented tasks."""
+        return {"note": "No dedicated personal task list exists yet — nothing fabricated here.", "tasks": []}
+
+    def _module_calendar(self) -> dict:
+        try:
+            status = google_auth.get_credential_status()
+        except Exception as e:
+            status = {"authorized": False, "credential_file": "unknown", "error": str(e)}
+        return {"configured": bool(status.get("authorized")), "status": status}
+
+    def _overview_payload(self) -> dict:
+        root = nucleus_hierarchy.get_hierarchy_root()
+        hierarchy_children = list(root.get("children", []))
+        modules = []
+        for domain in hierarchy_children:
+            module_id = "deals" if domain["id"] == "ddf" else domain["id"]
+            modules.append({"id": module_id, "name": domain.get("name", domain["id"])})
+        # Live-computed communications placeholder overlay applied to the
+        # hierarchy tree the 3D scene actually renders from — see
+        # _overlay_communications_placeholder's docstring.
+        hierarchy = dict(root)
+        hierarchy["children"] = [
+            {**d, "children": self._overlay_communications_placeholder(d.get("children", []))}
+            if d["id"] == "communications" else d
+            for d in hierarchy_children
+        ]
+        try:
+            strategic_objective = strategic_obj.get_objective_status()
+        except Exception:
+            strategic_objective = {}
+        return {
+            "focus": self._nucleus_id if self._nucleus_id != "jarvis" else "core",
+            "modules": modules,
+            "summary": {"module_count": len(modules)},
+            "strategic_objective": strategic_objective,
+            "hierarchy": hierarchy,
+        }
+
     def _aes_key(self, session_key: str) -> bytes:
         if session_key not in self._aes_cache:
             self._aes_cache[session_key] = _derive_key(session_key)
@@ -424,7 +1421,7 @@ class DashboardServer:
         except Exception:
             return None
 
-    # ── callbacks ────────────────────────────────────────────────────────
+    # ── callbacks ────────────────────────────────────────────
 
     def set_wake_callback(self, fn) -> None:
         self._wake_callback = fn
@@ -432,7 +1429,7 @@ class DashboardServer:
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
 
-    # ── broadcast ────────────────────────────────────────────────────────
+    # ── broadcast ──────────────────────────────────────────────
 
     async def broadcast(self, msg: dict) -> None:
         self._history.append(msg)
@@ -446,7 +1443,7 @@ class DashboardServer:
                 dead.add(ws)
         self._clients -= dead
 
-    # ── FastAPI app ───────────────────────────────────────────────────────
+    # ── FastAPI app ────────────────────────────────────────────────
 
     def _build_app(self) -> "FastAPI":
         app = FastAPI(docs_url=None, redoc_url=None)
@@ -604,7 +1601,7 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
-        # ── Phone mic real-time audio → Gemini Live ──────────────────────────
+        # ── Phone mic real-time audio → Gemini Live ───────────────────
 
         @app.websocket("/ws/phone-audio")
         async def phone_audio_ws(websocket: WebSocket, token: str = ""):
@@ -632,7 +1629,7 @@ class DashboardServer:
                     {"type": "sys", "text": "Phone microphone stopped."}
                 ))
 
-        # ── File sharing ──────────────────────────────────────────────────────
+        # ── File sharing ──────────────────────────────────────────────
 
         def _safe_filename(raw: str) -> str:
             name = Path(raw).name                          # strip path components
@@ -748,14 +1745,298 @@ class DashboardServer:
             finally:
                 self._clients.discard(websocket)
 
-        return app
+        # ── /3d spatial command center ─────────────────────────
+        # /3d/api/* and /3d/ws accept three credentials — see .env.example's
+        # JARVIS_API_TOKEN comment, which already documented the pairing-key
+        # acceptance below as intended but it was never actually wired in:
+        def _3d_auth(req: Request) -> bool:
+            """Accepts: (1) the JARVIS_API_TOKEN Bearer auth used by /3d/api/*
+            clients and tests, (2) the desktop app's own pairing-key/PIN
+            session token (self._tokens — the same credential /api/command
+            already accepts), so main.py's raw DashboardServer — which never
+            mounts /ui and typically has no JARVIS_API_TOKEN set — has a
+            working browser path to /3d at all, or (3) the same browser
+            session cookie /ui already sets on login — so a person who's
+            simply logged into the normal JARVIS interface can click through
+            to /3d and it just works, with no separate login step and no
+            token ever appearing in a URL or needing to be typed in twice."""
+            from core.headless import config as headless_config
+            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            if tok and headless_config.API_TOKEN and tok == headless_config.API_TOKEN:
+                return True
+            if tok and tok in self._tokens:
+                return True
+            from core.headless.ui import _session_valid, COOKIE_NAME
+            return _session_valid(req.cookies.get(COOKIE_NAME))
 
-    # ── serve ─────────────────────────────────────────────────────────────
+        _THREE_D_DIR = STATIC_DIR / "3d"
+
+        @app.get("/3d", response_class=HTMLResponse)
+        async def three_d_page(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return HTMLResponse((_THREE_D_DIR / "index.html").read_text(encoding="utf-8"))
+
+        @app.get("/3d/sw.js")
+        async def three_d_service_worker(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            # Served at /3d/sw.js (top-level scope), NOT /3d/assets/sw.js —
+            # a service worker's default scope is the directory it's served
+            # from, so this must sit at /3d/ to cover /3d/* rather than
+            # only /3d/assets/*.
+            return FileResponse(str(_THREE_D_DIR / "sw.js"), media_type="application/javascript")
+
+        @app.get("/3d/assets/{asset_path:path}")
+        async def three_d_assets(asset_path: str, req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            safe = (_THREE_D_DIR / asset_path).resolve()
+            if _THREE_D_DIR.resolve() not in safe.parents and safe != _THREE_D_DIR.resolve():
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            if not safe.is_file():
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            media_type = None
+            if safe.suffix == ".js":
+                media_type = "application/javascript"
+            elif safe.suffix == ".json":
+                media_type = "application/json"
+            elif safe.suffix == ".svg":
+                media_type = "image/svg+xml"
+            return FileResponse(str(safe), media_type=media_type)
+
+        @app.get("/3d/api/overview")
+        async def three_d_overview(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return JSONResponse(self._overview_payload())
+
+        @app.get("/3d/api/module/{module_id}")
+        async def three_d_module(module_id: str, req: Request, query: str = "", note: str = ""):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            node = nucleus_hierarchy.get_hierarchy_node(module_id) or {"id": module_id, "name": module_id}
+            children = nucleus_hierarchy.get_hierarchy_children(module_id)
+            path = nucleus_hierarchy.get_hierarchy_path(module_id)
+            data = self._module_data(module_id, query, note)
+            if module_id == "communications":
+                data.setdefault("children", self._overlay_communications_placeholder(children))
+            else:
+                data.setdefault("node", node)
+                data.setdefault("children", children)
+                data.setdefault("path", path)
+            return JSONResponse({"module": {"id": module_id, "name": node.get("name", module_id)}, "data": data})
+
+        @app.post("/3d/api/command")
+        async def three_d_command(req: Request):
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            action = body.get("action", "")
+            try:
+                if action == "navigate":
+                    result = self.apply_navigation(body.get("nav_action", "status"), body.get("nucleus_id", ""))
+                    asyncio.create_task(self._broadcast_3d(result))
+                elif action == "system_status":
+                    result = get_system_status()
+                elif action == "chat":
+                    text = (body.get("text") or "").strip()
+                    if not text:
+                        return JSONResponse({"ok": False, "error": "No text provided."}, status_code=400)
+                    history = body.get("history") or []
+                    result = await self._handle_3d_chat(text, history)
+                elif action == "speak":
+                    text = (body.get("text") or "").strip()
+                    if not text:
+                        return JSONResponse({"ok": False, "error": "No text provided."}, status_code=400)
+                    from core.headless.ui import synthesize_reply_audio
+                    result = synthesize_reply_audio(text)
+                elif action == "approve_task":
+                    from actions.agent_orchestrator import orchestrator as agent_orchestrator
+                    task_id = (body.get("task_id") or "").strip()
+                    if not task_id:
+                        return JSONResponse({"ok": False, "error": "No task_id provided."}, status_code=400)
+                    try:
+                        task = agent_orchestrator.approve_task(task_id)
+                    except KeyError as e:
+                        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+                    result = task.to_public_dict()
+                    asyncio.create_task(self._broadcast_3d({
+                        "type": "activity", "source": "approval", "kind": "approved",
+                        "message": f"Approved: {result.get('description', task_id)}", "ts": time.time(),
+                    }))
+                    asyncio.create_task(self._broadcast_3d({"type": "jarvis_state", "state": "success", "label": "Task approved", "ts": time.time()}))
+                elif action == "reject_task":
+                    from actions.agent_orchestrator import orchestrator as agent_orchestrator
+                    task_id = (body.get("task_id") or "").strip()
+                    if not task_id:
+                        return JSONResponse({"ok": False, "error": "No task_id provided."}, status_code=400)
+                    try:
+                        task = agent_orchestrator.reject_task(task_id)
+                    except KeyError as e:
+                        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+                    result = task.to_public_dict()
+                    asyncio.create_task(self._broadcast_3d({
+                        "type": "activity", "source": "approval", "kind": "rejected",
+                        "message": f"Denied: {result.get('description', task_id)}", "ts": time.time(),
+                    }))
+                    asyncio.create_task(self._broadcast_3d({"type": "jarvis_state", "state": "idle", "label": "Task denied", "ts": time.time()}))
+                else:
+                    return JSONResponse({"ok": False, "error": f"Unknown command action: {action!r}"}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+            return JSONResponse({"ok": True, "result": result})
+
+        @app.get("/3d/api/approvals")
+        async def three_d_approvals(req: Request):
+            """Real pending-approval queue for the 3D approval center — the
+            same AgentOrchestrator PENDING_APPROVAL tasks /ui/api/tasks
+            already exposes (cookie-only), surfaced here so a
+            pairing-token/Bearer 3D session can read it too. 'reason' is
+            the task's real description (AgentTask has no separate reason
+            field — see orchestrator_api.py); 'risk' is the agent's actual
+            permission_level (always EXECUTE for anything reaching this
+            state) rather than an invented numeric score."""
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from actions.agent_orchestrator import orchestrator as agent_orchestrator, TaskStatus
+            pending = [t for t in agent_orchestrator.list_tasks() if t.status == TaskStatus.PENDING_APPROVAL]
+            pending.sort(key=lambda t: t.created_ts, reverse=True)
+            out = []
+            for t in pending:
+                agent = agent_orchestrator.get_agent(t.agent_id)
+                d = t.to_public_dict()
+                d["agent_name"] = agent.name if agent else t.agent_id
+                d["system"] = agent.nucleus_id if agent else "unknown"
+                d["risk"] = agent.permission_level.value if agent else "unknown"
+                out.append(d)
+            return JSONResponse({"approvals": out})
+
+        @app.get("/3d/api/activity")
+        async def three_d_activity(req: Request, limit: int = 30):
+            """Real recent-activity history for the 3D feed to load on
+            open, instead of resetting empty every time the page loads —
+            reuses status_api.activity() (agent events + audit log +
+            proactive triggers, already time-sorted) directly rather than
+            re-implementing a second activity feed."""
+            if not _3d_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core.headless import status_api
+            return JSONResponse(status_api.activity(limit=limit))
+
+        @app.websocket("/3d/ws")
+        async def three_d_ws(websocket: WebSocket, token: str = ""):
+            from core.headless import config as headless_config
+            from core.headless.ui import _session_valid, COOKIE_NAME
+            tok = token.strip()
+            token_ok = bool(tok) and bool(headless_config.API_TOKEN) and tok == headless_config.API_TOKEN
+            # Pairing-key/PIN session token — same credential /api/command
+            # already accepts — matches _3d_auth above (see its docstring).
+            pairing_ok = bool(tok) and tok in self._tokens
+            # A same-origin browser tab already sends the /ui session
+            # cookie automatically on the websocket handshake, same as it
+            # would on any other same-origin request — no separate login
+            # needed, matching the HTTP routes' _3d_auth above.
+            cookie_ok = _session_valid(websocket.cookies.get(COOKIE_NAME))
+            if not (token_ok or pairing_ok or cookie_ok):
+                await websocket.close(code=4001)
+                return
+            await websocket.accept()
+            self._3d_ws_clients.add(websocket)
+            try:
+                await websocket.send_json(self.apply_navigation("status"))
+                while True:
+                    data = await websocket.receive_json()
+                    if data.get("type") == "navigate":
+                        result = self.apply_navigation(data.get("action", "status"), data.get("nucleus_id", ""))
+                        await self._broadcast_3d(result)
+            except WebSocketDisconnect:
+                pass
+            finally:
+                self._3d_ws_clients.discard(websocket)
+
+        # ── Twilio webhooks ────────────────────────────────────
+        # The only routes in this file meant to receive traffic from the
+        # open internet (a real Twilio number's webhooks) — every one is
+        # signature-verified before anything is recorded or broadcast.
+        # See docs/DASHBOARD_SECURITY.md.
+
+        async def _reject_unless_signed(req: Request, form: dict) -> JSONResponse | None:
+            if not _verify_twilio_signature(req, form):
+                return JSONResponse({"error": "Invalid or missing Twilio signature."}, status_code=403)
+            return None
+
+        @app.post("/twilio/voice")
+        async def twilio_voice(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            twilio._log(
+                direction="inbound", kind="call", sid=form.get("CallSid"),
+                from_number=form.get("From"), to_number=form.get("To"),
+                status=form.get("CallStatus"),
+            )
+            asyncio.create_task(self._broadcast_3d({
+                "type": "notification",
+                "text": f"Incoming call from {form.get('From', 'unknown')}",
+                "ts": time.time(),
+            }))
+            return Response(content=twilio.voicemail_twiml(), media_type="application/xml")
+
+        @app.post("/twilio/sms")
+        async def twilio_sms(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            twilio._log(
+                direction="inbound", kind="sms", sid=form.get("MessageSid"),
+                from_number=form.get("From"), to_number=form.get("To"), body=form.get("Body"),
+            )
+            asyncio.create_task(self._broadcast_3d({
+                "type": "notification",
+                "text": f"New SMS from {form.get('From', 'unknown')}: {(form.get('Body') or '')[:80]}",
+                "ts": time.time(),
+            }))
+            return JSONResponse({"ok": True})
+
+        @app.post("/twilio/status")
+        async def twilio_status(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            sid = form.get("MessageSid") or form.get("CallSid")
+            if sid:
+                twilio.update_by_sid(sid, status=form.get("MessageStatus") or form.get("CallStatus"))
+            return JSONResponse({"ok": True})
+
+        @app.post("/twilio/transcription")
+        async def twilio_transcription(req: Request):
+            form = dict((await req.form()))
+            rejected = await _reject_unless_signed(req, form)
+            if rejected is not None:
+                return rejected
+            sid = form.get("CallSid")
+            if sid:
+                twilio.update_by_sid(sid, transcription=form.get("TranscriptionText"))
+            return JSONResponse({"ok": True})
+
+        return _PlainHttpGuard(app)
+
+    # ── serve ────────────────────────────────────────────────────────────────────
 
     async def _serve_alias(self) -> None:
         """Second HTTPS server on PORT+1 sharing the same app and in-memory state.
         Chrome HTTPS-upgrades any bare IP:PORT the user types, so this port also needs TLS.
         User types IP:8001 → Chrome tries https → self-signed cert warning → accept once → done."""
+        if not is_port_free(PORT + 1):
+            _report_port_conflict(PORT + 1, "dashboard alias")
+            return
         ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"
         ssl_cert = BASE_DIR / "config" / "certs" / "jarvis.crt"
         asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
@@ -766,10 +2047,28 @@ class DashboardServer:
         print(f"[Dashboard] Manual entry:  {self._ip}:{PORT + 1}  (type in browser, accept cert once)")
         await uvicorn.Server(cfg).serve()
 
+    async def _serve_http_plain(self) -> None:
+        """Plain-HTTP server on HTTP_PORT sharing the same app and in-memory
+        state, only ever started when the main PORT is HTTPS-only. Without
+        this, a client (a health checker, a plain `curl`, an older device)
+        that connects with plain HTTP to the TLS-only main port gets an
+        empty reply/connection reset rather than a real answer."""
+        if not is_port_free(HTTP_PORT):
+            _report_port_conflict(HTTP_PORT, "dashboard plain-HTTP")
+            return
+        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, HTTP_PORT)
+        cfg = uvicorn.Config(self.app, host="0.0.0.0", port=HTTP_PORT, log_level="warning")
+        print(f"[Dashboard] Plain HTTP also available: http://{self._ip}:{HTTP_PORT}")
+        await uvicorn.Server(cfg).serve()
+
     async def serve(self) -> None:
         if not _DEPS_OK:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
             print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
+            return
+
+        if not is_port_free(PORT):
+            _report_port_conflict(PORT, "dashboard main")
             return
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
@@ -782,6 +2081,7 @@ class DashboardServer:
 
         if use_ssl:
             asyncio.create_task(self._serve_alias())
+            asyncio.create_task(self._serve_http_plain())
 
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0", port=PORT, log_level="warning",

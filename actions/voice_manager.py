@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from core.tts import TTSPlayer
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+
+# voice_manager provider names -> core.tts engine names
+_PROVIDER_ENGINE_MAP = {"local": "kokoro", "elevenlabs": "elevenlabs"}
+
+# Gemini prebuilt voice names — never valid as a Kokoro/ElevenLabs voice id,
+# so a leftover Gemini voice selection must not be forwarded to those engines.
+_GEMINI_VOICE_NAMES = {"Charon", "Puck", "Kore", "Leda", "Orus", "Zephyr"}
+
+
+def create_tts_player(config: dict[str, Any]):
+    """Thin, lazily-importing wrapper around core.tts.create_tts_player —
+    core.tts imports sounddevice, which needs the PortAudio system
+    library, absent in the headless container (see build_tts_player's
+    docstring). A bare `from core.tts import create_tts_player` at
+    module level would defeat the whole point by importing it anyway;
+    this wrapper defers that until an actual TTS player is being built,
+    while staying a real module-level name — so tests can still
+    monkeypatch `voice_manager.create_tts_player` exactly as before,
+    since build_tts_player() below calls it by looking it up from this
+    module's own namespace at call time, not a bound local import."""
+    from core.tts import create_tts_player as _real_create_tts_player
+    return _real_create_tts_player(config)
+
+
+def load_voice_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {"provider": "gemini", "voice": "Charon", "speed": 1.0}
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"provider": "gemini", "voice": "Charon", "speed": 1.0}
+    return {
+        "provider": (data.get("voice_provider") or "gemini").lower(),
+        "voice": data.get("voice_name") or "Charon",
+        "speed": float(data.get("voice_speed") or 1.0),
+    }
+
+
+def save_voice_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        data = {}
+    else:
+        try:
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["voice_provider"] = (cfg.get("provider") or "gemini").lower()
+    data["voice_name"] = cfg.get("voice") or "Charon"
+    data["voice_speed"] = float(cfg.get("speed") or 1.0)
+    CONFIG_PATH.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    return load_voice_config()
+
+
+def get_voice_provider_config() -> dict[str, Any]:
+    cfg = load_voice_config()
+    provider = cfg.get("provider") or "gemini"
+    if provider not in {"gemini", "local", "elevenlabs"}:
+        provider = "gemini"
+    return {"provider": provider, "voice": cfg.get("voice") or "Charon", "speed": float(cfg.get("speed") or 1.0)}
+
+
+def get_available_voices() -> list[str]:
+    return ["Charon", "Puck", "Kore", "Leda", "Orus", "Zephyr"]
+
+
+def build_tts_player(voice_cfg: dict[str, Any] | None = None) -> "TTSPlayer | None":
+    """Build a core.tts.TTSPlayer for the configured non-Gemini voice provider.
+
+    Returns None for provider == "gemini" — Gemini Live produces its own
+    audio output directly, so no separate TTS engine is needed in that case.
+    Raises whatever the underlying engine raises (e.g. missing API key,
+    missing model) so callers can decide how to fall back.
+
+    core.tts (imported inside this module's own create_tts_player()
+    wrapper above, not here and not at module level) needs sounddevice,
+    which needs the PortAudio system library — present on the desktop
+    but not in the headless container. This function is the only thing
+    in this module that ever needed core.tts; the config-only functions
+    above it (load/save/get_voice_provider_config/get_available_voices)
+    never did, so this was always an unnecessary coupling. Found live:
+    core/headless/personalization.py imports this whole module for the
+    config-reading functions, which pulled in sounddevice transitively
+    and crashed GET /ui/api/settings with "OSError: PortAudio library
+    not found" on Render.
+    """
+    cfg = voice_cfg or get_voice_provider_config()
+    provider = (cfg.get("provider") or "gemini").lower()
+    if provider == "gemini":
+        return None
+
+    engine_name = _PROVIDER_ENGINE_MAP.get(provider, provider)
+
+    try:
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    elevenlabs_key = raw.get("elevenlabs_api_key", "")
+
+    tts_config: dict[str, Any] = {
+        "tts_engine": engine_name,
+        "tts_speed": cfg.get("speed", 1.0),
+        "elevenlabs_api_key": elevenlabs_key,
+    }
+    voice_val = cfg.get("voice")
+    if voice_val and voice_val not in _GEMINI_VOICE_NAMES:
+        tts_config["tts_voice"] = voice_val
+
+    return create_tts_player(tts_config)

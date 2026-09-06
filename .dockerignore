@@ -1,0 +1,28 @@
+# Never bake secrets, local dev state, or the desktop-only virtualenv
+# into the image - the container gets its config from env vars, not
+# from copying config/api_keys.json or .env into the build context.
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+data/
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+config/api_keys.json
+config/api_keys.corrupt-*.json
+config/api_keys.tmp-*
+config/google/
+config/certs/
+memory/long_term.json
+memory/long_term.corrupt-*.json
+memory/long_term.tmp-*
+.claude/
+docs/
+*.md
+!README.md

@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+google-genai
+google-generativeai
+groq
+requests
+beautifulsoup4
+duckduckgo-search
+playwright
+cryptography
+python-multipart
+pillow
+numpy
+psutil
+youtube-transcript-api
+python-pptx
+qrcode[pil]

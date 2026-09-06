@@ -1,1 +1,51 @@
 config/api_keys.json
+config/strategic_objective.json
+config/google/
+config/certs/
+config/preferences.json
+config/preferences.corrupt-*.json
+config/preferences.tmp-*
+# 2026-09-03 fix: this is actions/nucleus_hierarchy.py's runtime-generated
+# cache of DEFAULT_HIERARCHY (_ensure_config() only writes it when
+# missing) — it was accidentally committed once (c2c2f64), which meant
+# every DEFAULT_HIERARCHY edit since then silently had NO EFFECT in any
+# checkout/deploy that already had this file, because _ensure_config()
+# never overwrites an existing one. Same category as the other generated
+# config/*.json files above; never meant to be tracked.
+config/nucleus_config.json
+
+# Personal data, not source code — see docs/MEMORY_SCHEMA.md
+memory/long_term.json
+
+# Corruption-recovery backups made by memory_manager.py/config_manager.py —
+# these can contain the exact same secrets/personal data as the files they
+# back up, so they must never be committed either.
+memory/long_term.corrupt-*.json
+config/api_keys.corrupt-*.json
+memory/long_term.tmp-*
+config/api_keys.tmp-*
+
+# Python virtual environment — never commit, regenerated via requirements.txt
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local runtime data — sqlite DBs, generated logs, uploads
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+
+# J3 headless secrets — real values only ever belong in a local .env or a
+# cloud platform's secret store, never in git. .env.example ships with
+# variable names only and stays tracked.
+.env
+.env.*
+!.env.example
+
+config/api_keys.json

@@ -1,0 +1,210 @@
+{
+  "active_business": "BuildPro",
+  "businesses": {
+    "BuildPro": {
+      "name": "BuildPro Recruiters LLC",
+      "industry": "Executive Search / AEC Recruiting",
+      "dashboard_settings": {
+        "lead_sourcing": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Automated Lead Discovery",
+          "description": "Enable/disable automated sourcing of GC, Architecture, Engineering, Interior Design firms"
+        },
+        "outreach_cadence": {
+          "enabled": true,
+          "type": "select",
+          "label": "Contact Frequency",
+          "options": ["Daily", "Weekly", "Bi-weekly", "Monthly", "Custom"],
+          "current": "Daily"
+        },
+        "company_tier_filter": {
+          "enabled": true,
+          "type": "select",
+          "label": "Company Tier Filter",
+          "options": ["All", "Enterprise (1000+ employees)", "Mid-market (100-1000)", "Small (10-100)", "Custom"],
+          "current": "All"
+        },
+        "geographic_focus": {
+          "enabled": true,
+          "type": "select",
+          "label": "Geographic Focus",
+          "options": ["Texas Primary", "Texas + Southwest", "National", "Custom"],
+          "current": "National"
+        },
+        "segment_focus": {
+          "enabled": true,
+          "type": "multi_select",
+          "label": "Business Segments",
+          "options": ["General Contractors", "Architecture Firms", "Engineering Firms", "Interior Design", "All"],
+          "current": ["General Contractors", "Architecture Firms", "Engineering Firms", "Interior Design"]
+        },
+        "approval_gate": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Require Human Approval Before Outreach",
+          "description": "When enabled, all outreach drafts wait for your approval before sending",
+          "current": true
+        },
+        "pipeline_visibility": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Show Pipeline Stage Breakdown",
+          "description": "Display detailed pipeline metrics on dashboard (sourced, enriched, drafted, approved, sent)",
+          "current": true
+        },
+        "success_metrics": {
+          "enabled": true,
+          "type": "multi_select",
+          "label": "Key Metrics to Display",
+          "options": ["Pipeline Coverage", "Response Rate", "Placement Success Rate", "Outreach Velocity", "Company Diversity"],
+          "current": ["Pipeline Coverage", "Response Rate", "Placement Success Rate", "Outreach Velocity"]
+        }
+      },
+      "integrations": {
+        "hubspot": "CONNECTED",
+        "apollo": "CONNECTED",
+        "gmail": "CONNECTED",
+        "google_calendar": "CONNECTED"
+      }
+    },
+    "CareerRocketPro": {
+      "name": "CareerRocketPro.com",
+      "industry": "AI-Powered Resume Platform",
+      "dashboard_settings": {
+        "pricing_model": {
+          "enabled": true,
+          "type": "select",
+          "label": "Pricing Model",
+          "options": ["One-Time Purchase", "Monthly Subscription", "Freemium"],
+          "current": "One-Time Purchase",
+          "note": "Consider switching to subscription for recurring revenue"
+        },
+        "template_visibility": {
+          "enabled": true,
+          "type": "select",
+          "label": "Template Tiers",
+          "options": ["All Templates Free", "Basic Free / Premium Paid", "All Premium"],
+          "current": "Basic Free / Premium Paid"
+        },
+        "user_engagement": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Show User Engagement Metrics",
+          "description": "Display active users, resumes created, template usage",
+          "current": true
+        },
+        "analytics_tracking": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Enable Detailed Analytics",
+          "description": "Track user drop-off points, feature usage, conversion funnels",
+          "current": true
+        },
+        "version_history": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Show Resume Version History",
+          "description": "Display all versions of user resumes with timestamps",
+          "current": true
+        },
+        "email_campaigns": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Auto Email Campaigns",
+          "description": "Enable automated email reminders and feature updates to users",
+          "current": false
+        },
+        "key_metrics": {
+          "enabled": true,
+          "type": "multi_select",
+          "label": "Dashboard Metrics",
+          "options": ["Active Users", "Resumes Created", "Template Usage", "Revenue", "Churn Rate", "Feature Adoption"],
+          "current": ["Active Users", "Resumes Created", "Template Usage", "Revenue"]
+        }
+      },
+      "integrations": {
+        "stripe": "CONNECTED",
+        "gmail": "PLANNED",
+        "analytics": "CONNECTED"
+      }
+    },
+    "Affiliate_App": {
+      "name": "Automated Affiliate Marketing Platform",
+      "industry": "Affiliate Marketing Orchestration",
+      "dashboard_settings": {
+        "commission_tracking": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Real-Time Commission Tracking",
+          "description": "Monitor earnings by source, affiliate, and product in real-time",
+          "current": true
+        },
+        "link_performance": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Link Performance Dashboard",
+          "description": "View CTR, conversion rate, and revenue by tracking link",
+          "current": true
+        },
+        "partner_tier_management": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Partner Tier Visibility",
+          "description": "Show/hide different commission tiers and incentive structures",
+          "current": true
+        },
+        "payout_automation": {
+          "enabled": true,
+          "type": "select",
+          "label": "Payout Schedule",
+          "options": ["Weekly", "Bi-weekly", "Monthly", "Custom"],
+          "current": "Monthly"
+        },
+        "payout_threshold": {
+          "enabled": true,
+          "type": "text",
+          "label": "Minimum Payout Amount",
+          "description": "Minimum earnings required before automatic payout",
+          "current": "$100.00"
+        },
+        "performance_alerts": {
+          "enabled": true,
+          "type": "toggle",
+          "label": "Performance Alerts",
+          "description": "Notify on significant changes in link performance or earnings",
+          "current": true
+        },
+        "product_focus": {
+          "enabled": true,
+          "type": "multi_select",
+          "label": "Featured Products",
+          "options": ["All Products", "Top Performers", "New Launches", "Custom Selection"],
+          "current": ["Top Performers"]
+        },
+        "key_metrics": {
+          "enabled": true,
+          "type": "multi_select",
+          "label": "Dashboard Metrics",
+          "options": ["Total Revenue", "Active Links", "Conversion Rate", "Partner Count", "Average Commission", "Earnings Trend"],
+          "current": ["Total Revenue", "Active Links", "Conversion Rate", "Partner Count"]
+        }
+      },
+      "integrations": {
+        "stripe": "CONNECTED",
+        "linktracker": "CONNECTED",
+        "email": "PLANNED"
+      }
+    }
+  },
+  "global_settings": {
+    "default_view": "3d_orb",
+    "theme": "dark",
+    "refresh_interval_seconds": 30,
+    "enable_voice_commands": true,
+    "voice_provider": "gemini",
+    "always_on_microphone": true,
+    "morning_briefing_enabled": true,
+    "data_sync_enabled": true
+  }
+}
