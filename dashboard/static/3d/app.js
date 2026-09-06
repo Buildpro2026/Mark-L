@@ -173,13 +173,19 @@ function initThree() {
   // Executive lighting: a cool ambient fill plus a brighter key light and a
   // dim rim light from the opposite side, so the orb reads as a lit sphere
   // with real depth rather than a flat glowing disc.
-  scene.add(new THREE.AmbientLight(0x2e4256, 0.9));
+  scene.add(new THREE.AmbientLight(0x2e4256, 0.55));
   const key = new THREE.PointLight(0x9fe6ff, 2.6, 60);
   key.position.set(10, 12, 8);
   scene.add(key);
   const rim = new THREE.PointLight(0x4a3a6e, 1.1, 50);
   rim.position.set(-12, -4, -10);
   scene.add(rim);
+  // A real "sun" — a directional light gives every planet an actual
+  // lit-side/shadow-side terminator instead of the flat, evenly-lit
+  // look a point light alone produces on a small sphere at this scale.
+  const sun = new THREE.DirectionalLight(0xfff4e0, 1.4);
+  sun.position.set(30, 18, 22);
+  scene.add(sun);
 
   scene.add(rootGroup, childGroup, lineGroup, childLineGroup);
 
@@ -190,22 +196,279 @@ function initThree() {
   return true;
 }
 
+// ── Deep-space environment (2026-09-06 visual rebuild) ──────────────────
+// A single flat Points cloud read as a screensaver, not a real volume.
+// Three depth layers (near/mid/far — different radius bands, sizes,
+// brightness, and a warm/cool color split) give real parallax depth as
+// the camera moves, plus a very faint, slow-drifting nebula backdrop
+// (a large BackSide sphere with a soft procedural cloud texture) for
+// atmospheric depth without looking like a repeating tiled wallpaper.
+let nebulaMesh = null;
+
 function createStarfield() {
-  const count = 900;
-  const positions = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const r = 40 + Math.random() * 140;
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
-    positions[i * 3 + 1] = r * Math.cos(phi) * 0.5;
-    positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  const LAYERS = [
+    { count: 1400, rMin: 55, rMax: 90,  size: 0.22, opacity: 0.55, warm: 0.5 },  // far — small, dense
+    { count: 550,  rMin: 32, rMax: 55,  size: 0.34, opacity: 0.75, warm: 0.5 },  // mid
+    { count: 160,  rMin: 18, rMax: 32,  size: 0.55, opacity: 0.95, warm: 0.4 },  // near — few, bright, bigger
+  ];
+  starField = new THREE.Group();
+  for (const layer of LAYERS) {
+    const positions = new Float32Array(layer.count * 3);
+    const colors = new Float32Array(layer.count * 3);
+    const cool = new THREE.Color(0x9fc4ff), warm = new THREE.Color(0xfff1d6), white = new THREE.Color(0xffffff);
+    for (let i = 0; i < layer.count; i++) {
+      const r = layer.rMin + Math.random() * (layer.rMax - layer.rMin);
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.cos(phi) * 0.55;
+      positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+      const roll = Math.random();
+      const c = roll < layer.warm * 0.3 ? warm : roll < layer.warm ? cool : white;
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    const mat = new THREE.PointsMaterial({
+      size: layer.size, map: _getStarDotTexture(), transparent: true, opacity: layer.opacity,
+      vertexColors: true, sizeAttenuation: true, depthWrite: false, alphaTest: 0.02,
+    });
+    starField.add(new THREE.Points(geo, mat));
   }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  const mat = new THREE.PointsMaterial({ color: 0x6fa8c9, size: 0.32, transparent: true, opacity: 0.5 });
-  starField = new THREE.Points(geo, mat);
   scene.add(starField);
+  createNebula();
+}
+
+// Very faint, large-scale color drift behind the stars — pure procedural
+// canvas (a handful of huge soft-edged blobs), not a photographic skybox,
+// since this sandbox has no network path to real deep-space imagery (the
+// same restriction already documented for BuildPro's hero photography).
+// Kept deliberately subtle: this is atmosphere, not wallpaper.
+function createNebula() {
+  const w = 1024, h = 512;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = w; canvasEl.height = h;
+  const ctx = canvasEl.getContext("2d");
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, w, h);
+  const rng = _mulberry32(1337);
+  const blobs = [
+    [0x24314f, 6], [0x2c2340, 5], [0x1c3a3f, 4], [0x321f3a, 4],
+  ];
+  for (const [hex, count] of blobs) {
+    const [r, g, b] = _shade(hex, 0);
+    for (let i = 0; i < count; i++) {
+      const x = rng() * w, y = h * 0.15 + rng() * h * 0.7, radius = 120 + rng() * 220;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      grad.addColorStop(0, `rgba(${r},${g},${b},0.5)`);
+      grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvasEl);
+  const geo = new THREE.SphereGeometry(120, 32, 20);
+  const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, transparent: true, opacity: 0.5, depthWrite: false });
+  nebulaMesh = new THREE.Mesh(geo, mat);
+  scene.add(nebulaMesh);
+}
+
+// ── Procedural planet surfaces (2026-09-06 visual rebuild) ──────────────
+// Flat MeshStandardMaterial colors read as plain colored balls. Real
+// satellite/texture-pack imagery isn't reachable (this sandbox's network
+// egress blocks it — same restriction already documented for BuildPro's
+// hero photography), so surface detail is generated in code: a seeded
+// PRNG per domain id (stable across reloads — BuildPro always looks like
+// BuildPro) drives layered soft-edged blobs into a canvas, styled per
+// domain so each Nucleus reads as a distinct world rather than a recolored
+// sphere — continents+clouds for the business/CRM domains, banded for the
+// more dynamic/content-driven ones, cratered/icy for infrastructure ones.
+function _mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function _hashSeed(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
+  return h;
+}
+function _shade(hex, amt) {
+  const clamp = (v) => Math.max(0, Math.min(255, v));
+  return [clamp(((hex >> 16) & 255) + amt), clamp(((hex >> 8) & 255) + amt), clamp((hex & 255) + amt)];
+}
+
+const NUCLEUS_STYLES = {
+  company_core: "ringed", buildpro: "terran", ddf: "terran-ocean",
+  careerrocket: "banded", email: "ice", calendar: "cratered",
+  knowledge: "banded-gold", files: "cratered", reports: "ice",
+  communications: "terran-grey", system: "cratered-hot", personal: "terran-grey",
+  hubspot: "terran", social: "banded",
+};
+
+// 2026-09-06 round 2 rebuild: the original _drawBlobs was a pure
+// radial-gradient-to-zero at every stop, so EVERY shape it drew — however
+// it was combined — read as one soft, edgeless smudge, and the terran
+// continents in particular were only 1-2 giant instances of it at low
+// alpha. On an actual sphere at normal viewing size that's exactly a
+// "blurry blob of one-dimensional color," not surface detail — a real
+// defect only visible by rendering and looking, not by reading the code.
+// `hardness` fixes the shape itself: the gradient now holds full alpha out
+// to `hardness` of the radius before falling off, so a blob reads as a
+// landmass/crater with an actual edge instead of a uniform fog dot.
+function _drawBlobs(ctx, w, h, rng, count, rgb, radiusRange, alphaRange, hardness = 0.15) {
+  for (let i = 0; i < count; i++) {
+    const x = rng() * w, y = rng() * h;
+    const r = radiusRange[0] + rng() * (radiusRange[1] - radiusRange[0]);
+    const a = alphaRange[0] + rng() * (alphaRange[1] - alphaRange[0]);
+    for (const dx of [-w, 0, w]) {   // wrap horizontally — seamless seam where the sphere UV wraps
+      const grad = ctx.createRadialGradient(x + dx, y, 0, x + dx, y, r);
+      grad.addColorStop(0, `rgba(${rgb},${a})`);
+      grad.addColorStop(Math.min(0.98, hardness), `rgba(${rgb},${a})`);
+      grad.addColorStop(1, `rgba(${rgb},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(x + dx, y, r, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+// Real per-pixel surface grain — every blob-based technique above is still
+// smooth at the pixel level, which is exactly what reads as "airbrushed"
+// rather than "a rocky/rough surface" once a light source rakes across it.
+// A few percent of random per-pixel luminance jitter is enough to break
+// that smoothness up without looking like static/noise from a distance.
+function _addGrain(ctx, w, h, rng, amount) {
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const j = (rng() - 0.5) * amount;
+    d[i] = Math.max(0, Math.min(255, d[i] + j));
+    d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + j));
+    d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + j));
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function _makePlanetTexture(nodeId, baseColorHex, style) {
+  const w = 1024, h = 512;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = w; canvasEl.height = h;
+  const ctx = canvasEl.getContext("2d");
+  const rng = _mulberry32(_hashSeed(nodeId));
+
+  const baseGrad = ctx.createLinearGradient(0, 0, 0, h);
+  baseGrad.addColorStop(0, `rgb(${_shade(baseColorHex, -55).join(",")})`);
+  baseGrad.addColorStop(0.5, `rgb(${_shade(baseColorHex, 10).join(",")})`);
+  baseGrad.addColorStop(1, `rgb(${_shade(baseColorHex, -55).join(",")})`);
+  ctx.fillStyle = baseGrad;
+  ctx.fillRect(0, 0, w, h);
+
+  if (style === "banded" || style === "banded-gold") {
+    const bandCount = 10 + Math.floor(rng() * 5);
+    let y = 0;
+    for (let i = 0; i < bandCount; i++) {
+      const bandH = (h / bandCount) * (0.6 + rng() * 0.8);
+      const amt = (rng() - 0.5) * 90;
+      ctx.fillStyle = `rgba(${_shade(baseColorHex, amt).join(",")},0.7)`;
+      ctx.fillRect(0, y, w, bandH);
+      // A thin darker seam at each band boundary — sells "distinct bands"
+      // rather than one gradient, at a scale that still reads at a glance.
+      ctx.fillStyle = `rgba(${_shade(baseColorHex, amt - 40).join(",")},0.5)`;
+      ctx.fillRect(0, y, w, Math.max(1, bandH * 0.08));
+      y += bandH;
+    }
+    _drawBlobs(ctx, w, h, rng, 90, _shade(baseColorHex, 45).join(","), [10, 34], [0.1, 0.22], 0.2);
+    _drawBlobs(ctx, w, h, rng, 60, _shade(baseColorHex, -45).join(","), [6, 18], [0.12, 0.24], 0.25);
+  } else if (style === "ringed") {
+    _drawBlobs(ctx, w, h, rng, 70, _shade(baseColorHex, -25).join(","), [14, 40], [0.2, 0.4], 0.3);
+    _drawBlobs(ctx, w, h, rng, 40, _shade(baseColorHex, 25).join(","), [6, 16], [0.15, 0.3], 0.35);
+    ctx.fillStyle = `rgba(${_shade(baseColorHex, -35).join(",")},0.45)`;
+    ctx.fillRect(0, h * 0.44, w, h * 0.1);
+    ctx.fillStyle = `rgba(${_shade(baseColorHex, 20).join(",")},0.3)`;
+    ctx.fillRect(0, h * 0.4, w, h * 0.03);
+  } else if (style.startsWith("cratered")) {
+    const hot = style === "cratered-hot";
+    _drawBlobs(ctx, w, h, rng, 140, _shade(baseColorHex, -60).join(","), [5, 16], [0.25, 0.5], 0.55);
+    _drawBlobs(ctx, w, h, rng, 55, _shade(baseColorHex, hot ? 90 : 45).join(","), [3, 10], [0.2, 0.4], 0.6);
+    _drawBlobs(ctx, w, h, rng, 200, _shade(baseColorHex, -30).join(","), [1, 4], [0.15, 0.3], 0.7);
+  } else if (style === "ice") {
+    _drawBlobs(ctx, w, h, rng, 120, "255,255,255", [3, 14], [0.1, 0.32], 0.4);
+    _drawBlobs(ctx, w, h, rng, 45, _shade(baseColorHex, -35).join(","), [8, 26], [0.15, 0.3], 0.3);
+    _drawBlobs(ctx, w, h, rng, 90, "255,255,255", [1, 4], [0.15, 0.3], 0.8);
+  } else {
+    // terran / terran-ocean / terran-grey — continents + coastline detail
+    // + a soft, separate cloud layer (clouds stay low-hardness/soft on
+    // purpose — real clouds ARE diffuse; land should not be).
+    // Darker land against a bright ocean reads reliably regardless of the
+    // base hue's own saturation — a positive (lighter) delta on an
+    // already-near-maxed channel (ddf's mint green has G pinned at 255)
+    // barely changes anything, verified via screenshot to be nearly
+    // invisible; a negative delta always has room to darken.
+    const landAmt = style === "terran-ocean" ? -70 : -20;
+    _drawBlobs(ctx, w, h, rng, 26, _shade(baseColorHex, landAmt).join(","), [26, 60], [0.6, 0.8], 0.5);
+    _drawBlobs(ctx, w, h, rng, 40, _shade(baseColorHex, landAmt).join(","), [8, 22], [0.55, 0.75], 0.55);
+    _drawBlobs(ctx, w, h, rng, 70, _shade(baseColorHex, landAmt - 25).join(","), [3, 9], [0.4, 0.6], 0.6);
+    _drawBlobs(ctx, w, h, rng, 26, "255,255,255", [16, 40], [0.08, 0.18], 0.1);
+  }
+
+  _addGrain(ctx, w, h, rng, 14);
+
+  const tex = new THREE.CanvasTexture(canvasEl);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+// Thin Fresnel-rim atmosphere — a physically-motivated limb glow (bright
+// only at the grazing edge, transparent head-on) instead of a flat haze
+// sprite sitting on top of the whole planet and hiding its surface.
+const _ATMOSPHERE_VERTEX = `
+  varying vec3 vNormal;
+  void main() {
+    vNormal = normalize(normalMatrix * normal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const _ATMOSPHERE_FRAGMENT = `
+  uniform vec3 glowColor;
+  varying vec3 vNormal;
+  void main() {
+    float rim = pow(1.0 - abs(vNormal.z), 2.5);
+    gl_FragColor = vec4(glowColor, rim * 0.85);
+  }
+`;
+// A real ring (concentric flat annuli, not a painted texture band) for the
+// "ringed" style — verified via screenshot that the texture-only band read
+// as a barely-visible smudge from most camera angles, especially face-on to
+// the sphere's pole; an actual 3D ring reads correctly from any angle and
+// gives Company Core a silhouette no other Nucleus has, which is the actual
+// point of "individual visual identity" rather than just a recolored ball.
+function makePlanetRing(radius, hexColor) {
+  const group = new THREE.Group();
+  const bands = [[1.3, 1.55, 0.55], [1.6, 1.75, 0.28], [1.8, 2.05, 0.42]];
+  for (const [innerMul, outerMul, alpha] of bands) {
+    const geo = new THREE.RingGeometry(radius * innerMul, radius * outerMul, 64, 1);
+    const mat = new THREE.MeshBasicMaterial({
+      color: hexColor, side: THREE.DoubleSide, transparent: true, opacity: alpha, depthWrite: false,
+    });
+    group.add(new THREE.Mesh(geo, mat));
+  }
+  group.rotation.x = Math.PI / 2 - 0.35; // near-horizontal, slight tilt for visual interest
+  return group;
+}
+
+function makeAtmosphere(radius, hexColor) {
+  const geo = new THREE.SphereGeometry(radius * 1.14, 28, 18);
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: _ATMOSPHERE_VERTEX, fragmentShader: _ATMOSPHERE_FRAGMENT,
+    uniforms: { glowColor: { value: new THREE.Color(hexColor) } },
+    transparent: true, depthWrite: false, side: THREE.FrontSide, blending: THREE.AdditiveBlending,
+  });
+  return new THREE.Mesh(geo, mat);
 }
 
 function createOrb() {
@@ -271,7 +534,14 @@ function sphereDirections(count) {
   if (count === 1) return [new THREE.Vector3(0, 0, 1)];
   const out = [];
   for (let i = 0; i < count; i++) {
-    const y = 1 - (i / (count - 1)) * 2;          // 1 → -1
+    // 2026-09-06 fix: this used to reach the exact poles (y = ±1). Whichever
+    // domain landed there (index 0) sat directly above JARVIS with its
+    // label pushed straight up — screenshot-verified to clip under the
+    // fixed top header bar in the default camera framing, and it only got
+    // more visible once Company Core (which happened to land there) grew
+    // an actual ring. Insetting the range keeps the same Fibonacci-style
+    // spread without ever placing a node at a pole.
+    const y = (1 - (i / (count - 1)) * 2) * 0.82;  // 0.82 → -0.82
     const r = Math.sqrt(Math.max(0, 1 - y * y));
     const theta = GOLDEN_ANGLE * i;
     out.push(new THREE.Vector3(Math.cos(theta) * r, y, Math.sin(theta) * r));
@@ -283,6 +553,28 @@ function sphereDirections(count) {
 // mesh reads as a glow without a real postprocessing bloom pass (which
 // would need EffectComposer/RenderPass/UnrealBloomPass vendored — more
 // weight than this scene needs for the effect it buys).
+// A crisp, tightly-falling-off round dot — WITHOUT this, THREE.PointsMaterial
+// renders each point as a flat square sprite (native GL point rendering),
+// which reads as broken/glitchy pixels rather than stars. Deliberately a
+// separate, tighter texture from _getGlowTexture() below (that one's wide
+// soft falloff is for big ambient blobs, not a crisp point of light).
+let _starDotTexture = null;
+function _getStarDotTexture() {
+  if (_starDotTexture) return _starDotTexture;
+  const size = 32;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = size; canvasEl.height = size;
+  const ctx = canvasEl.getContext("2d");
+  const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.35, "rgba(255,255,255,0.85)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  _starDotTexture = new THREE.CanvasTexture(canvasEl);
+  return _starDotTexture;
+}
+
 let _glowTexture = null;
 function _getGlowTexture() {
   if (_glowTexture) return _glowTexture;
@@ -335,15 +627,40 @@ function updateOrbits(t) {
 }
 
 // ── Nucleus meshes ──────────────────────────────────────────────────────
-function makeNucleusMesh(node, radius, color, placeholder = false) {
-  const geo = new THREE.SphereGeometry(radius, 28, 18);
-  const mat = new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: placeholder ? 0.22 : 0.5,
-    roughness: 0.4, metalness: 0.18, wireframe: placeholder,
-    transparent: placeholder, opacity: placeholder ? 0.5 : 1,
-  });
+// 2026-09-06 visual rebuild: was a flat MeshStandardMaterial color with no
+// map at all — every domain read as an identically-shaded colored ball,
+// with a big additive glow sprite (see the old orbit.glow usage) doing the
+// only visual work. Real (procedurally generated, see _makePlanetTexture)
+// surface detail now carries that weight instead, so emissiveIntensity
+// is dialed down — a lit texture and a washed-out emissive glow fight
+// each other, and the texture is the one actually worth seeing.
+function makeNucleusMesh(node, radius, color, placeholder = false, withAtmosphere = true) {
+  const geo = new THREE.SphereGeometry(radius, 40, 26);
+  let mat;
+  if (placeholder) {
+    mat = new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.22,
+      roughness: 0.4, metalness: 0.18, wireframe: true, transparent: true, opacity: 0.5,
+    });
+  } else {
+    const style = NUCLEUS_STYLES[node.id] || "cratered";
+    const texture = _makePlanetTexture(node.id, color, style);
+    mat = new THREE.MeshStandardMaterial({
+      map: texture, color: 0xffffff, emissive: color, emissiveIntensity: 0.07,
+      roughness: 0.75, metalness: 0.08,
+    });
+  }
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.userData = { kind: "nucleus", id: node.id, name: node.name, node, placeholder, baseEmissive: placeholder ? 0.22 : 0.5 };
+  mesh.userData = { kind: "nucleus", id: node.id, name: node.name, node, placeholder, baseEmissive: placeholder ? 0.22 : 0.12 };
+  // Slow per-planet spin — a static textured sphere reads as a flat
+  // painted disc; even a slow rotation sells it as a real 3D body.
+  mesh.userData.spinSpeed = placeholder ? 0 : 0.03 + (Math.abs(_hashSeed(node.id)) % 100) / 100 * 0.05;
+  if (withAtmosphere && !placeholder) {
+    mesh.add(makeAtmosphere(radius, color));
+    if ((NUCLEUS_STYLES[node.id] || "cratered") === "ringed") {
+      mesh.add(makePlanetRing(radius, color));
+    }
+  }
   const label = makeLabelSprite(node.name, placeholder ? "#8fa0ad" : "#eafcff", { scale: 0.85 });
   label.position.set(0, radius + 0.55, 0);
   mesh.add(label);
@@ -388,27 +705,44 @@ let infoObjects = [];             // spawned data objects (files/deals/etc.)
 // the background. Cleared on goHome()/focusing a different nucleus.
 let expandedRootId = null;
 
-// 2026-09-06 fix: drilling into one domain's children left every sibling
-// domain fully lit, at full opacity, still in frame — no amount of camera
-// distance tuning fixes that cleanly (closer crowds the focused domain's
-// own children together; further just drags the siblings back into view).
-// The actual fix is dimming everything that ISN'T the focused domain —
-// its sphere, its glow, its connector line, and its label — so the child
-// view reads as one clear subject instead of a cluttered field of
-// unrelated spheres and overlapping text.
-const _SIBLING_DIM_OPACITY = 0.12;
-
+// 2026-09-06 fix (round 1): drilling into one domain's children left every
+// sibling domain fully lit, at full opacity, still in frame — no amount of
+// camera distance tuning fixes that cleanly (closer crowds the focused
+// domain's own children together; further just drags the siblings back
+// into view). Round 1 tried dimming each sibling's opacity instead of
+// hiding it outright.
+//
+// 2026-09-06 fix (round 2 — root-caused via actual browser inspection,
+// not just code review): round 1 never worked. Two independent bugs, both
+// only visible by screenshotting the focused view and reading back live
+// material state, not by reading the code:
+//   1. `mesh.children[0]` was assumed to be the label sprite, but
+//      makeNucleusMesh() adds the atmosphere mesh BEFORE the label, so
+//      `children[0]` is the atmosphere and the label (children[1]) was
+//      never touched — every "dimmed" sibling kept its full-brightness
+//      name floating in the scene.
+//   2. The atmosphere's fragment shader (_ATMOSPHERE_FRAGMENT) hardcodes
+//      its own alpha as `rim * 0.85` and never reads a material.opacity
+//      uniform at all — ShaderMaterial does NOT get that wired up for
+//      free the way MeshStandardMaterial does. So even correctly touching
+//      the atmosphere's `.opacity` property is a no-op: its rim glow
+//      stayed at full brightness regardless, which alone was bright
+//      enough to still read as "this planet is still here." Combined with
+//      updateOrbits() continuing to move every non-focused sibling (and
+//      redrawing its connector line every frame to follow), the result
+//      was exactly the reported bug: full-brightness spheres, labels, and
+//      connector lines still sweeping across the focused view.
+// The robust fix is to stop fighting opacity/shader-uniform plumbing
+// entirely and just hide the whole subtree: Object3D.visible=false
+// already hides a mesh and everything parented to it (atmosphere, label)
+// in one property, verified by direct in-browser testing.
 function _setSiblingsDimmed(focusedId) {
   for (const [id, mesh] of rootMeshes) {
-    const dim = focusedId && id !== focusedId;
-    const opacity = dim ? _SIBLING_DIM_OPACITY : 1;
-    mesh.material.transparent = true;
-    mesh.material.opacity = opacity;
-    const label = mesh.children[0];
-    if (label && label.material) label.material.opacity = opacity;
+    const dim = !!(focusedId && id !== focusedId);
+    mesh.visible = !dim;
     const orbit = mesh.userData.orbit;
-    if (orbit?.glow) orbit.glow.material.opacity = opacity;
-    if (orbit?.line) orbit.line.material.opacity = dim ? _SIBLING_DIM_OPACITY * 0.8 : 0.5;
+    if (orbit?.glow) orbit.glow.visible = !dim;
+    if (orbit?.line) orbit.line.visible = !dim;
   }
 }
 
@@ -425,7 +759,15 @@ function buildRootRing(hierarchy) {
     const mesh = makeNucleusMesh(node, NODE_RADIUS, color);
     const dir = dirs[i];
     mesh.position.set(dir.x * ROOT_RADIUS, dir.y * ROOT_RADIUS, dir.z * ROOT_RADIUS);
-    const glow = makeGlowSprite(color, NODE_RADIUS * 4.2);
+    // 2026-09-06 fix: this used to be scaled 4.2x the planet's own radius
+    // at full opacity — a flat additive blob big enough to wash out the
+    // real surface texture/lighting above, exactly the "haze conceals a
+    // low-quality asset" failure mode. The real Fresnel atmosphere on the
+    // mesh itself (see makeAtmosphere) now carries the rim-glow job; this
+    // is just a faint, small presence marker for at-a-glance color-coding
+    // from far away, not a cover-up.
+    const glow = makeGlowSprite(color, NODE_RADIUS * 1.7);
+    glow.material.opacity = 0.35;
     glow.position.copy(mesh.position);
     rootGroup.add(glow);
     const line = drawConnection(new THREE.Vector3(0, 0, 0), mesh.position, color);
@@ -446,7 +788,9 @@ function showChildrenFor(nucleusId, parentPos, children) {
   const parentColor = NUCLEUS_COLORS[nucleusId] ?? 0x8fa8b8;
   children.forEach((child, i) => {
     const placeholder = !!child.placeholder;
-    const mesh = makeNucleusMesh(child, CHILD_NODE_RADIUS, placeholder ? 0x5a6a78 : parentColor, placeholder);
+    // No atmosphere shell on children — at this small radius/tight spacing
+    // it would just add visual noise on top of the crowding fix above.
+    const mesh = makeNucleusMesh(child, CHILD_NODE_RADIUS, placeholder ? 0x5a6a78 : parentColor, placeholder, false);
     const dir = dirs[i];
     mesh.position.set(
       parentPos.x + dir.x * CHILD_RADIUS,
@@ -1590,6 +1934,12 @@ function animate() {
   if (!REDUCED_MOTION) orbMesh.rotation.y += 0.0025 * (currentOrbState === "thinking" ? 3 : 1);
   orbLight.intensity = 2.8 + (REDUCED_MOTION ? 0 : Math.sin(t * speed) * 0.8);
   if (!REDUCED_MOTION) starField.rotation.y += 0.00006;
+  if (!REDUCED_MOTION) {
+    // Slow per-planet spin (see makeNucleusMesh's spinSpeed) — sells each
+    // textured sphere as a real rotating body rather than a static painted disc.
+    for (const mesh of rootGroup.children) if (mesh.userData?.spinSpeed) mesh.rotation.y += mesh.userData.spinSpeed * 0.01;
+    for (const mesh of childGroup.children) if (mesh.userData?.spinSpeed) mesh.rotation.y += mesh.userData.spinSpeed * 0.01;
+  }
   updateOrbits(t);
   updateTween();
   controls.update();
