@@ -48,6 +48,7 @@ from actions import cartesia_calls
 from actions import clock
 from actions import gmail_integration
 from actions import calendar_integration
+from actions import google_tasks_integration
 from actions import airtable_integration
 from actions import hubspot_integration
 from actions import buffer_integration
@@ -582,6 +583,120 @@ class ToolExecutor:
                         )
             else:
                 result = f"Unknown calendar action: {calaction}"
+
+        elif name == "google_tasks":
+            gtaction = (args.get("action") or "status").strip().lower()
+            if gtaction == "status":
+                s = await loop.run_in_executor(None, google_auth.get_credential_status)
+                if s.get("authorized"):
+                    result = "Google Tasks is connected and authorized."
+                elif s.get("credential_file") == "missing":
+                    result = "Google Tasks isn't set up — no Google client-secret file found."
+                else:
+                    result = "Google credentials exist but aren't authorized yet — the one-time Google sign-in hasn't been completed."
+            elif gtaction == "list":
+                max_results = int(args.get("max_results") or 20)
+                r = await loop.run_in_executor(None, lambda: google_tasks_integration.list_tasks(max_results))
+                if not r["ok"]:
+                    result = f"Couldn't read Google Tasks ({r.get('state')}): {r.get('detail')}"
+                elif not r["tasks"]:
+                    result = "No open tasks."
+                else:
+                    result = "; ".join(
+                        f"{t.get('id')}: {t.get('title')}" + (f" (due {t['due']})" if t.get("due") else "")
+                        for t in r["tasks"][:8]
+                    )
+            elif gtaction == "get":
+                task_id = (args.get("task_id") or "").strip()
+                if not task_id:
+                    result = "I need the task id to look up."
+                else:
+                    r = await loop.run_in_executor(None, lambda: google_tasks_integration.get_task(task_id))
+                    if not r["ok"]:
+                        result = f"Couldn't read that task ({r.get('state')}): {r.get('detail')}"
+                    else:
+                        t = r["task"]
+                        result = f"{t.get('title')}: {t.get('notes') or '(no notes)'} — status {t.get('status')}"
+            elif gtaction == "create":
+                title = (args.get("title") or "").strip()
+                if not title:
+                    result = "I need a title to create a task."
+                else:
+                    r = await loop.run_in_executor(
+                        None, lambda: google_tasks_integration.create_task(
+                            title, notes=args.get("notes", "") or "", due_iso=args.get("due_iso", "") or "", approved=True,
+                        )
+                    )
+                    result = (
+                        f"Task created: {title}." if r["ok"]
+                        else f"Couldn't create the task ({r.get('state')}): {r.get('detail')}"
+                    )
+                    audit_log.record(
+                        "google_tasks_create", execution_status="succeeded" if r["ok"] else "failed",
+                        result={"title": title}, error=None if r["ok"] else r.get("detail"),
+                        external_system="google_tasks", reference_id=r.get("task_id"),
+                    )
+            elif gtaction == "update":
+                task_id = (args.get("task_id") or "").strip()
+                if not task_id:
+                    result = "I need the task id to update."
+                else:
+                    fields = {}
+                    for key in ("title", "notes", "due_iso"):
+                        if args.get(key):
+                            fields[key] = args[key]
+                    if not fields:
+                        result = "I need at least one thing to change."
+                    else:
+                        r = await loop.run_in_executor(
+                            None, lambda: google_tasks_integration.update_task(task_id, approved=True, **fields)
+                        )
+                        result = (
+                            "Task updated." if r["ok"]
+                            else f"Couldn't update the task ({r.get('state')}): {r.get('detail')}"
+                        )
+                        audit_log.record(
+                            "google_tasks_update", execution_status="succeeded" if r["ok"] else "failed",
+                            result={"task_id": task_id, "fields": list(fields.keys())},
+                            error=None if r["ok"] else r.get("detail"),
+                            external_system="google_tasks", reference_id=task_id,
+                        )
+            elif gtaction == "complete":
+                task_id = (args.get("task_id") or "").strip()
+                if not task_id:
+                    result = "I need the task id to mark complete."
+                else:
+                    r = await loop.run_in_executor(
+                        None, lambda: google_tasks_integration.complete_task(task_id, approved=True)
+                    )
+                    result = (
+                        "Task marked complete." if r["ok"]
+                        else f"Couldn't complete the task ({r.get('state')}): {r.get('detail')}"
+                    )
+                    audit_log.record(
+                        "google_tasks_complete", execution_status="succeeded" if r["ok"] else "failed",
+                        result={"task_id": task_id}, error=None if r["ok"] else r.get("detail"),
+                        external_system="google_tasks", reference_id=task_id,
+                    )
+            elif gtaction == "delete":
+                task_id = (args.get("task_id") or "").strip()
+                if not task_id:
+                    result = "I need the task id to delete."
+                else:
+                    r = await loop.run_in_executor(
+                        None, lambda: google_tasks_integration.delete_task(task_id, approved=True)
+                    )
+                    result = (
+                        "Task deleted." if r["ok"]
+                        else f"Couldn't delete the task ({r.get('state')}): {r.get('detail')}"
+                    )
+                    audit_log.record(
+                        "google_tasks_delete", execution_status="succeeded" if r["ok"] else "failed",
+                        result={"task_id": task_id}, error=None if r["ok"] else r.get("detail"),
+                        external_system="google_tasks", reference_id=task_id,
+                    )
+            else:
+                result = f"Unknown google_tasks action: {gtaction}"
 
         elif name == "airtable":
             aaction    = (args.get("action") or "status").strip().lower()

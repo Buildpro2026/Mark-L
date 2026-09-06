@@ -668,6 +668,36 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "google_tasks",
+        "description": (
+            "Reads and manages Google Tasks (the user's default task "
+            "list). Actions: 'status' (is Tasks connected? — shares "
+            "Gmail/Calendar's Google OAuth, so this can say NOT_AUTHORIZED "
+            "even when Gmail/Calendar work, if the tasks scope was added "
+            "after the last authorization), 'list' (incomplete tasks, "
+            "read-only, always safe), 'get' (one task's full detail by "
+            "id), 'create' (creates a REAL task), 'update' (modifies a "
+            "REAL existing task's title/notes/due date — only the fields "
+            "provided are changed), 'complete' (marks a REAL task done), "
+            "'delete' (permanently removes a REAL task). "
+            "Only call 'create'/'update'/'complete'/'delete' when the "
+            "user has EXPLICITLY stated what to add/change/finish/remove "
+            "— never invent a task or guess at one the user didn't name."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":   {"type": "STRING", "description": "status | list | get | create | update | complete | delete"},
+                "task_id":  {"type": "STRING", "description": "Target task id, for 'get'/'update'/'complete'/'delete'"},
+                "title":    {"type": "STRING", "description": "Task title, for 'create'/'update'"},
+                "notes":    {"type": "STRING", "description": "Task notes/details, for 'create'/'update' (optional)"},
+                "due_iso":  {"type": "STRING", "description": "Due date (RFC3339, e.g. '2026-08-20') for 'create'/'update' (optional)"},
+                "max_results": {"type": "INTEGER", "description": "Max tasks to return for 'list' (default 20)"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "airtable",
         "description": (
             "Reads and manages records in Airtable — a flexible database "
