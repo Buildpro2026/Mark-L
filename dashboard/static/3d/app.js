@@ -1202,6 +1202,18 @@ async function goHome({ fromServer = false, notify = true } = {}) {
   updateBreadcrumb(["Jarvis"]);
   updateRailActive(null);
   clearGroup(childGroup);
+  // 2026-09-06 fix: childGroup was cleared here but childLineGroup was not,
+  // so every drill-down leaked its child connector lines into the scene
+  // permanently. They stayed anchored to the parent's position as it was
+  // SNAPSHOT at focus time (see showChildrenFor), while goHome clears
+  // expandedRootId and lets that parent resume orbiting — so the orphaned
+  // star of lines visibly drifted away from the planet it belonged to, with
+  // nothing at either end. _setSiblingsDimmed() could never hide them
+  // either: it only knows about rootMeshes' own orbit lines, not
+  // childLineGroup. showChildrenFor() already clears both groups together;
+  // this makes goHome() symmetric with it, which is what keeps childGroup
+  // and childLineGroup from ever diverging.
+  clearGroup(childLineGroup);
   childMeshes = new Map();
   infoObjects = [];
   flyTo(new THREE.Vector3(0, 0, 0), 17);
