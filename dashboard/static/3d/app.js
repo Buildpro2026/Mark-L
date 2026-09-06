@@ -1308,6 +1308,7 @@ function renderDockReply(text, opts = {}) {
 async function submitDockCommand() {
   const text = dockInput.value.trim();
   if (!text) return;
+  stopSpeaking(); // submitting a new command IS the user interrupting JARVIS
   dockInput.value = "";
   if (tryParseNavCommand(text)) return;
 
@@ -1345,7 +1346,29 @@ dockInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submitDock
 // calls the exact same synthesize_reply_audio() the browser /ui uses (see
 // core/headless/ui.py) — no second voice provider. Toggle defaults off;
 // honest toast if no TTS provider is configured on this deployment. ─────
+//
+// Barge-in fix (2026-09-06): this Audio object was previously a plain local
+// const with no reference kept anywhere outside this function — there was
+// no code path that could ever pause/cancel it once play() started. The
+// only way to silence JARVIS was to refresh the page (which tears down the
+// whole JS context, including this orphaned Audio element). _currentSpeech
+// now holds the live element so stopSpeaking() can actually reach it, and
+// every real "the user is acting now" entry point this UI has — submitting
+// a typed command, and tapping the mic to talk — calls stopSpeaking() first.
+let _currentSpeech = null;
+
+function stopSpeaking() {
+  if (_currentSpeech) {
+    try { _currentSpeech.pause(); _currentSpeech.currentTime = 0; } catch (_) {}
+    _currentSpeech.onended = null;
+    _currentSpeech.onerror = null;
+    _currentSpeech = null;
+  }
+  if (currentOrbState === "speaking") setOrbState("idle");
+}
+
 async function speakText(text) {
+  stopSpeaking(); // a new reply always cuts off whatever JARVIS was still saying
   try {
     const res = await _authFetch("/3d/api/command", {
       method: "POST",
@@ -1364,8 +1387,9 @@ async function speakText(text) {
       return;
     }
     const audio = new Audio(`data:${result.mime_type};base64,${result.audio_base64}`);
+    _currentSpeech = audio;
     setOrbState("speaking", { label: "Speaking..." });
-    const backToIdle = () => { if (currentOrbState === "speaking") setOrbState("idle"); };
+    const backToIdle = () => { _currentSpeech = null; if (currentOrbState === "speaking") setOrbState("idle"); };
     audio.onended = backToIdle;
     audio.onerror = backToIdle;
     await audio.play();
@@ -1405,6 +1429,7 @@ function _f32toPcm16(f32, srcRate) {
 }
 
 async function startMic() {
+  stopSpeaking(); // tapping the mic to talk IS the user interrupting JARVIS
   if (!navigator.mediaDevices?.getUserMedia) {
     showToast("This browser can't access the microphone (needs HTTPS or localhost).");
     return;

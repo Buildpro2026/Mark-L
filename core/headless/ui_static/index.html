@@ -3609,7 +3609,13 @@ checkSession();
     conversationTimeoutMs: Number(localStorage.getItem("jarvis_convo_ms")) || 45000,
     // Words needed to treat speech-over-JARVIS as a real interruption
     // rather than the mic hearing JARVIS's own voice through the speakers.
-    bargeInMinWords: 2,
+    // 2026-09-06 fix: this was 2, which silently dropped the single most
+    // natural way a person actually interrupts someone talking — a bare
+    // "Stop!" or "Wait!" is exactly one word and never reached stopSpeaking()
+    // at all. isEcho() already guards the false-positive case (JARVIS's own
+    // voice bleeding back through the mic), so a length-1 threshold doesn't
+    // trade away that protection.
+    bargeInMinWords: 1,
   };
   window.jarvisVoiceConfig = voiceCfg;
 
@@ -3868,8 +3874,22 @@ checkSession();
       }
     }
     window.__jarvisResumeAfterTurn = resumeAfterTurn;
+    // 2026-09-06 fix: this used to only flip voiceState to SPEAKING without
+    // ever confirming the recognizer was actually running. maybeBargeIn()
+    // is driven entirely by recognition.onresult — if the mic wasn't
+    // already live (e.g. the question that triggered this reply was typed,
+    // not spoken, so neither continuous nor wake mode had ever started it),
+    // recognition.onresult never fires at all and voice barge-in silently
+    // can't work for the entire reply, no matter how loudly someone says
+    // "Stop." startRecognizer() is a safe no-op if it's already running,
+    // and mic permission was already granted (the same constraint every
+    // other startRecognizer() caller here already lives with).
     window.__jarvisSetSpeakingState = (on) => {
-      if (on) { setVoiceState(VoiceState.SPEAKING); openConversation(); }
+      if (on) {
+        setVoiceState(VoiceState.SPEAKING);
+        openConversation();
+        startRecognizer("command");
+      }
     };
 
     micBtn.addEventListener("click", () => {
