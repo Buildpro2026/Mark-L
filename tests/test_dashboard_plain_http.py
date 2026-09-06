@@ -3,6 +3,7 @@ import socket
 
 from dashboard.server import DashboardServer, HTTP_PORT
 from dashboard import server as srv
+from tests.conftest import DASHBOARD_AUTH_HEADERS
 
 
 def test_http_port_is_two_above_primary_port():
@@ -79,7 +80,7 @@ def test_serve_does_not_start_plain_http_when_ssl_disabled(monkeypatch):
 
 # ── real end-to-end: actually bind the socket and make a real plain-HTTP
 #    request against it — the same class of failure ("empty reply") this
-#    whole change exists to fix wouldn't be caught by a mocked test ──────────
+#    whole change exists to fix wouldn't be caught by a mocked test ─────
 
 def test_serve_http_plain_actually_answers_plain_http_requests(monkeypatch):
     import requests
@@ -100,7 +101,8 @@ def test_serve_http_plain_actually_answers_plain_http_requests(monkeypatch):
                 raise AssertionError("plain HTTP server never started listening")
 
             resp = await asyncio.to_thread(
-                requests.get, f"http://127.0.0.1:{HTTP_PORT}/3d", timeout=5
+                requests.get, f"http://127.0.0.1:{HTTP_PORT}/3d", timeout=5,
+                headers=DASHBOARD_AUTH_HEADERS,
             )
             return resp
         finally:
