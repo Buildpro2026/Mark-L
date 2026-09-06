@@ -95,6 +95,12 @@ CARTESIA_API_VERSION = _env("CARTESIA_API_VERSION", "2026-03-01")
 # Where JARVIS calls when he's the one initiating (E.164, e.g. +13125550142).
 JARVIS_OWNER_PHONE = _env("JARVIS_OWNER_PHONE")
 
+# Inbox the Daily Deal Finders public site's contact form forwards to (see
+# actions/ddf_contact.py). Overridable per-deployment; falls back to the
+# same account the rest of this codebase's Gmail integration already
+# authenticates as.
+DDF_CONTACT_EMAIL = _env("DDF_CONTACT_EMAIL", "buildprorecruiters@gmail.com")
+
 # ── Product-data discovery (2026-09-03, autonomous-CEO/COS spec Section
 # FIFTH) ────────────────────────────────────────────────────────────────
 # Amazon's own Product Advertising API requires an approved Associates

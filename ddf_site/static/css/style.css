@@ -178,6 +178,10 @@ main { max-width: 1200px; margin: 0 auto; padding: 28px 20px 60px; }
   color: var(--text); padding: 12px 14px; font-size: 14px; font-family: inherit;
 }
 .contact-form textarea { min-height: 120px; resize: vertical; }
+.form-status { font-size: 13px; padding: 10px 12px; border-radius: 8px; }
+.form-status.pending { color: var(--text-dim); }
+.form-status.success { color: var(--green); background: rgba(46,204,113,0.1); }
+.form-status.error { color: #ff6b6b; background: rgba(255,107,107,0.1); }
 
 .site-footer {
   border-top: 1px solid var(--border);

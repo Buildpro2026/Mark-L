@@ -27,11 +27,14 @@ try:
     from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
+    from pydantic import BaseModel
     _DEPS_OK = True
 except ImportError:
     _DEPS_OK = False
+    BaseModel = object
 
 from actions import daily_deal_finders as ddf
+from actions import ddf_contact
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -71,6 +74,7 @@ def _shell(title: str, content: str, active_path: str = "", extra_head: str = ""
   {extra_head}
 </head>
 <body>
+  <script src="/static/js/site.js"></script>
   <header class="site-header">
     <div class="bar">
       <a href="/" class="brand"><span class="dot">●</span> {SITE_NAME}</a>
@@ -86,7 +90,6 @@ def _shell(title: str, content: str, active_path: str = "", extra_head: str = ""
       <span><a href="/affiliate-disclosure">Affiliate Disclosure</a> &middot; <a href="/contact">Contact</a></span>
     </div>
   </footer>
-  <script src="/static/js/site.js"></script>
 </body>
 </html>"""
 
@@ -103,6 +106,12 @@ def _listing_page(title: str, subtitle: str, api_path: str, active_path: str, em
     </script>
     """
     return _shell(title, content, active_path)
+
+
+class ContactSubmission(BaseModel):
+    name: str = ""
+    email: str
+    message: str
 
 
 class DDFSiteServer:
@@ -266,13 +275,15 @@ class DDFSiteServer:
             <div class="static-content">
               <h1>Contact Us</h1>
               <p>Questions about a deal, a partnership inquiry, or found a broken link? Send us a message.</p>
-              <form class="contact-form" onsubmit="return false;">
-                <input type="text" placeholder="Your name">
-                <input type="email" placeholder="Your email">
-                <textarea placeholder="Message"></textarea>
-                <button class="cta-btn" type="button" disabled>Contact form coming soon</button>
+              <form class="contact-form" id="contact-form">
+                <input type="text" name="name" placeholder="Your name" maxlength="200">
+                <input type="email" name="email" placeholder="Your email" required maxlength="254">
+                <textarea name="message" placeholder="Message" required maxlength="5000"></textarea>
+                <button class="cta-btn" type="submit">Send Message</button>
+                <div class="form-status" id="contact-form-status" hidden></div>
               </form>
             </div>
+            <script>initContactForm("contact-form", "contact-form-status");</script>
             """
             return _shell("Contact", content, "/contact")
 
@@ -334,6 +345,11 @@ class DDFSiteServer:
         async def api_track_click(product_id: str, platform: str | None = None):
             changed = ddf.record_affiliate_click(product_id, platform=platform)
             return JSONResponse({"ok": changed})
+
+        @app.post("/api/contact")
+        async def api_contact(payload: ContactSubmission):
+            result = ddf_contact.submit_contact_message(payload.name, payload.email, payload.message)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
         return app
 
