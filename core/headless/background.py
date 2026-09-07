@@ -76,6 +76,13 @@ CEO_CYCLE_POLL_SECS = 900
 # freed within one poll cycle of the schedulers that need it, infrequent
 # enough that the sweep itself is never the load.
 SELF_HEALING_POLL_SECS = 1800
+# How often inbound email/LinkedIn are swept for high-value opportunities.
+# 15 minutes is responsive enough that a client inquiry is surfaced while
+# it is still the same conversation, and bounded so this can never become a
+# high-frequency poll against Gmail. The sweep itself runs around the clock;
+# only the decision to INTERRUPT Lee is gated on business hours, so nothing
+# arriving overnight is lost — it waits for the morning report.
+INBOUND_MONITOR_POLL_SECS = 900
 _SUPERVISOR_RESTART_BACKOFF_SECS = 5.0
 _SUPERVISOR_RESTART_BACKOFF_MAX_SECS = 300.0
 
@@ -108,6 +115,7 @@ class BackgroundWorker:
             ("objective_loop", self._run_objective_loop),
             ("approval_notifier", self._run_approval_notifier),
             ("self_healing", self._run_self_healing),
+            ("inbound_monitor", self._run_inbound_monitor),
         ]
         # The morning CEO cycle has exactly one scheduled owner. In this
         # deployment that owner is the Render Cron Job (jarvis-morning-ceo,
@@ -155,6 +163,26 @@ class BackgroundWorker:
             except Exception as e:
                 logger.warning("self-healing sweep failed: %s", e)
             await asyncio.sleep(SELF_HEALING_POLL_SECS)
+
+    # ── Inbound business opportunities (email + LinkedIn) ───────────────
+
+    async def run_inbound_monitor_once(self) -> dict:
+        from actions import inbound_opportunity_monitor
+        return await asyncio.to_thread(inbound_opportunity_monitor.run)
+
+    async def _run_inbound_monitor(self) -> None:
+        await asyncio.sleep(90)   # let the first agent sweep land first
+        while not self._stopping:
+            try:
+                report = await self.run_inbound_monitor_once()
+                if report.get("total_notified") or report.get("total_dispatched"):
+                    logger.info(
+                        "inbound monitor: %s task(s) created, %s immediate notification(s)",
+                        report.get("total_dispatched"), report.get("total_notified"),
+                    )
+            except Exception as e:
+                logger.warning("inbound monitor sweep failed: %s", e)
+            await asyncio.sleep(INBOUND_MONITOR_POLL_SECS)
 
     async def _supervise(self, name: str, loop_fn) -> None:
         """Keeps one background loop alive for the life of the process.

@@ -928,6 +928,32 @@ def _system_monitor_agent_handler(task: "AgentTask") -> dict:
     return {"summary": "System status collected.", "status": status}
 
 
+def _linkedin_monitor_agent_handler(task: "AgentTask") -> dict:
+    """Watches inbound LinkedIn for real business opportunities.
+
+    OBSERVE by design: it reads, classifies and surfaces. It never sends a
+    LinkedIn message, never replies, and never represents Lee externally —
+    any outbound step that comes out of what it finds is a separate task
+    that still passes the approval gate."""
+    from actions import inbound_opportunity_monitor as monitor
+    result = monitor.linkedin_findings()
+    state = result["state"]
+    if state != "SUCCESS":
+        expected = state in ("NOT_CONFIGURED", "AUTH_ERROR")
+        out = {"summary": f"LinkedIn monitoring unavailable: {state}.", "state": state}
+        if not expected:
+            out["error"] = result.get("detail") or state
+        return out
+    findings = result["findings"]
+    return {
+        "summary": (f"{len(findings)} inbound LinkedIn opportunit(y/ies) worth attention "
+                    f"out of {result.get('scanned', 0)} message(s) scanned."),
+        "state": state,
+        "findings": [{"title": f["title"], "priority": (f.get("verdict") or {}).get("priority")}
+                     for f in findings],
+    }
+
+
 def _calendar_intelligence_agent_handler(task: "AgentTask") -> dict:
     """Reads the real calendar and reports what needs preparing. Read-only:
     creating or moving an event is a real-world commitment and stays behind
@@ -1349,6 +1375,18 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_social_content_agent_handler,
         autonomous_ok=True,  # ignores task.description entirely — a pure connectivity/status survey
+    ),
+    "linkedin_monitor_agent": AgentDefinition(
+        id="linkedin_monitor_agent", name="LinkedIn Monitor Agent",
+        description=(
+            "Monitors inbound LinkedIn activity for potential clients and candidates. "
+            "Detection only — never sends a message or represents Lee externally; "
+            "outbound follow-up is a separate approval-gated task."
+        ),
+        nucleus_id="buildpro", business="buildpro",
+        permission_level=PermissionLevel.OBSERVE, schedule="60m",
+        handler=_linkedin_monitor_agent_handler,
+        autonomous_ok=True,   # read-only classification of real inbound mail
     ),
     "calendar_intelligence_agent": AgentDefinition(
         id="calendar_intelligence_agent", name="Calendar Intelligence Agent",

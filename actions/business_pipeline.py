@@ -346,7 +346,19 @@ def research_findings(limit: int = 5) -> dict[str, Any]:
 
 # ── DISPATCH ─────────────────────────────────────────────────────────────
 
+def linkedin_inbound_findings() -> dict[str, Any]:
+    from actions import inbound_opportunity_monitor as monitor
+    return monitor.linkedin_findings()
+
+
+def email_opportunity_findings() -> dict[str, Any]:
+    from actions import inbound_opportunity_monitor as monitor
+    return monitor.email_opportunity_findings()
+
+
 SOURCES: dict[str, Callable[[], dict[str, Any]]] = {
+    "linkedin_inbound": linkedin_inbound_findings,
+    "email_opportunity": email_opportunity_findings,
     "calendar": calendar_findings,
     "gmail": gmail_findings,
     "hubspot": hubspot_findings,

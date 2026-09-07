@@ -71,7 +71,9 @@ def level_for(message_type: str) -> int:
 
 
 def notify(message_type: str, event_id: str, title: str, detail: str = "",
-           data: Optional[dict] = None, dry_run: bool = False) -> dict[str, Any]:
+           data: Optional[dict] = None, dry_run: bool = False,
+           destination_source: Optional[str] = None,
+           destination_data: Optional[dict] = None) -> dict[str, Any]:
     """Routes one message. `event_id` is the delivery identity — the
     existing notifier sends each one exactly once, so a caller that
     recomputes the same id for the same real-world event gets deduplication
@@ -82,6 +84,22 @@ def notify(message_type: str, event_id: str, title: str, detail: str = "",
     never means the underlying work failed."""
     from actions import approval_notifier
     from actions import operating_memory
+    from actions import notification_destinations
+
+    # Where this notification takes you, derived from the record's own
+    # identity. None when there is no safe destination — a notification with
+    # a dead link is worse than one without, because it teaches you not to
+    # click. Never blocks delivery.
+    destination = None
+    if destination_source:
+        try:
+            destination = notification_destinations.build(destination_source, destination_data)
+        except Exception:
+            # Where the message TAKES you is strictly less important than the
+            # message ARRIVING. A destination that cannot be built downgrades
+            # the notification to informational; it never suppresses it.
+            logger.debug("could not build a destination for %s", event_id, exc_info=True)
+            destination = None
 
     level = level_for(message_type)
     prefixed = f"{_PREFIXES.get(message_type, '')}{title}"
@@ -94,7 +112,8 @@ def notify(message_type: str, event_id: str, title: str, detail: str = "",
         ok = result.get("action") in ("sms", "already_sent") and result.get("ok", True) is not False
         outcome = {
             "ok": bool(ok), "message_type": message_type, "level": level,
-            "event_id": event_id, "delivery": result,
+            "event_id": event_id, "delivery": result, "destination": destination,
+            "actionable": destination is not None,
         }
     except Exception as exc:
         # Deliberately no retry: re-sending is a real side effect, and the
@@ -102,7 +121,8 @@ def notify(message_type: str, event_id: str, title: str, detail: str = "",
         logger.warning("notification delivery failed for %s: %s", event_id, exc)
         outcome = {
             "ok": False, "message_type": message_type, "level": level,
-            "event_id": event_id, "error": str(exc),
+            "event_id": event_id, "error": str(exc), "destination": destination,
+            "actionable": destination is not None,
             "delivery": {"action": "failed", "ok": False},
         }
 
@@ -111,7 +131,8 @@ def notify(message_type: str, event_id: str, title: str, detail: str = "",
     operating_memory.record(
         operating_memory.NOTIFICATION, source=message_type,
         subject=event_id, summary=f"{prefixed}: {outcome['delivery'].get('action')}",
-        data={"level": level, **({"data": data} if data else {})},
+        data={"level": level, "destination": destination,
+              **({"data": data} if data else {})},
         ok=outcome["ok"],
     )
     return outcome
@@ -152,6 +173,10 @@ def approval_request(task_id: str, agent_name: str, what: str,
     return notify(
         APPROVAL_REQUEST, event_id=f"approval-{task_id}",
         title=f"{agent_name} needs approval", detail=detail, dry_run=dry_run,
+        # Opens the approval for a decision. Opening is navigation; the
+        # decision itself is a separate authenticated action through the
+        # orchestrator, so a link can never approve anything.
+        destination_source="approval", destination_data={"task_id": task_id},
     )
 
 

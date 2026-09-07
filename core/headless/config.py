@@ -147,6 +147,37 @@ JARVIS_CEO_CYCLE_HOUR_UTC = int(_env("JARVIS_CEO_CYCLE_HOUR_UTC", "11") or 11)  
 # Every other background worker is unaffected by this flag.
 JARVIS_CEO_CYCLE_IN_WEB_SERVICE = _env_bool("JARVIS_CEO_CYCLE_IN_WEB_SERVICE", False)
 
+# ── Business hours ──────────────────────────────────────────────────────
+# One place, so "is it business hours" is never a hard-coded clock check
+# scattered through the monitors. Local hours in UTC terms because every
+# other schedule in this codebase is UTC (see JARVIS_CEO_CYCLE_HOUR_UTC);
+# the defaults are ~08:00-18:00 US Central.
+#
+# What this actually gates: whether a CRITICAL/HIGH opportunity interrupts
+# Lee immediately, or waits to be summarised in the morning report. It never
+# gates whether monitoring RUNS — JARVIS keeps watching overnight, he just
+# does not phone at 3am about it.
+JARVIS_BUSINESS_HOURS_START_UTC = int(_env("JARVIS_BUSINESS_HOURS_START_UTC", "13") or 13)
+JARVIS_BUSINESS_HOURS_END_UTC = int(_env("JARVIS_BUSINESS_HOURS_END_UTC", "23") or 23)
+# Monday=0 .. Sunday=6. Weekends default off: a weekend interruption should
+# be a deliberate choice, not an accident of the default.
+JARVIS_BUSINESS_DAYS = tuple(
+    int(d) for d in (_env("JARVIS_BUSINESS_DAYS", "0,1,2,3,4") or "0,1,2,3,4").split(",")
+    if d.strip().isdigit()
+)
+
+
+def is_business_hours(now=None) -> bool:
+    """True when an immediate interruption is appropriate. Never raises."""
+    from datetime import datetime, timezone
+    try:
+        now = now or datetime.now(timezone.utc)
+        if now.weekday() not in JARVIS_BUSINESS_DAYS:
+            return False
+        return JARVIS_BUSINESS_HOURS_START_UTC <= now.hour < JARVIS_BUSINESS_HOURS_END_UTC
+    except Exception:
+        return False
+
 def summarize() -> dict:
     return {
         "data_dir": str(DATA_DIR),
@@ -178,4 +209,6 @@ def summarize() -> dict:
         "product_data_api_provider": PRODUCT_DATA_API_PROVIDER,
         "ceo_cycle_hour_utc": JARVIS_CEO_CYCLE_HOUR_UTC,
         "ceo_cycle_in_web_service": JARVIS_CEO_CYCLE_IN_WEB_SERVICE,
+        "business_hours_utc": [JARVIS_BUSINESS_HOURS_START_UTC, JARVIS_BUSINESS_HOURS_END_UTC],
+        "in_business_hours_now": is_business_hours(),
     }

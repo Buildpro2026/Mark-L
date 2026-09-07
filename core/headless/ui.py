@@ -283,9 +283,16 @@ def synthesize_reply_audio(text: str) -> dict:
     wearing the same name. ElevenLabs stays as a real fallback rather than
     being ripped out — if the Cartesia key is missing or its API is down,
     the caller keeps a human-sounding voice."""
-    from actions import cartesia_tts, elevenlabs_tts
+    from actions import gemini_tts, cartesia_tts, elevenlabs_tts
 
-    providers = [p for p in (cartesia_tts, elevenlabs_tts) if p.is_configured()]
+    # Gemini first, and deliberately: it is free, it is already configured
+    # via GEMINI_API_KEY, and it is the voice ("Charon") the desktop app has
+    # always used — so the browser now sounds like the same assistant
+    # instead of falling through to the OS speechSynthesis voice, which is
+    # what "JARVIS sounds robotic" actually was. Cartesia and ElevenLabs
+    # remain in the chain untouched: the phone line is a Cartesia agent, and
+    # removing them would leave that surface without a voice.
+    providers = [p for p in (gemini_tts, cartesia_tts, elevenlabs_tts) if p.is_configured()]
     if not providers:
         return {"configured": False}
 

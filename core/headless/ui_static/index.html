@@ -3616,6 +3616,16 @@ checkSession();
     // voice bleeding back through the mic), so a length-1 threshold doesn't
     // trade away that protection.
     bargeInMinWords: 1,
+    // Fraction of a heard fragment's significant words that must appear in
+    // what JARVIS is saying for it to count as his own audio. 0.6 tolerates
+    // the mis-transcription that always happens to speaker bleed, without
+    // swallowing a genuine sentence that merely shares a word or two.
+    echoMatchRatio: 0.6,
+    // How long after playback stops that late-finalising audio is still
+    // treated as JARVIS's own. Speech recognition lags real audio, so the
+    // tail of a reply lands after onend; without this window those words
+    // read as a new user sentence.
+    selfAudioTailMs: 1500,
   };
   window.jarvisVoiceConfig = voiceCfg;
 
@@ -3758,12 +3768,31 @@ checkSession();
     // bars: enough words to be a real instruction, and words that aren't
     // simply an echo of the sentence currently being spoken.
     function isEcho(text) {
-      const spoken = (window.__jarvisSpokenText || "").toLowerCase();
+      // Compares against everything JARVIS has said THIS TURN, not just the
+      // sentence currently in the air. A long reply is spoken in chunks and
+      // the microphone lags behind, so the fragment coming back is usually
+      // from a chunk that finished a moment ago; matching only the current
+      // chunk missed exactly those.
+      const spoken = (window.__jarvisSelfAudioRef || "").toLowerCase();
       if (!spoken) return false;
       const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 3);
       if (!words.length) return false;
       const matches = words.filter(w => spoken.includes(w)).length;
-      return matches / words.length > 0.6;
+      return matches / words.length > voiceCfg.echoMatchRatio;
+    }
+
+    // Is this audio JARVIS's own coming back through the speakers?
+    //
+    // True while he is speaking, and for a short tail afterwards: speech
+    // recognition finalises with real latency, so the last words of a reply
+    // routinely arrive AFTER playback has ended. Without the tail those
+    // trailing words look like a brand-new user sentence — which is exactly
+    // how a reply ends up answering itself.
+    function isSelfAudio(text) {
+      const withinTail =
+        window.__jarvisSelfAudioUntil && Date.now() < window.__jarvisSelfAudioUntil;
+      if (voiceState !== VoiceState.SPEAKING && !withinTail) return false;
+      return isEcho(text);
     }
 
     function maybeBargeIn(text) {
@@ -3771,7 +3800,11 @@ checkSession();
       const words = text.trim().split(/\s+/).filter(Boolean);
       if (words.length < voiceCfg.bargeInMinWords) return false;
       if (isEcho(text)) return false;
+      // A real person is talking over JARVIS. Cancel cleanly and invalidate
+      // the response in flight so it cannot resume behind the new one.
+      window.__jarvisTurnEpoch = (window.__jarvisTurnEpoch || 0) + 1;
       stopSpeaking();
+      resetTurn();
       setVoiceState(VoiceState.LISTENING);
       openConversation();
       return true;
@@ -3826,9 +3859,34 @@ checkSession();
       const heard = (finalChunk + " " + interim).trim();
       if (!heard) return;
 
+      // THE INVARIANT: user audio may create a user turn; JARVIS's own audio
+      // never may. This check has to come first and has to RETURN.
+      //
+      // The bug it fixes: maybeBargeIn() already recognised an echo and
+      // correctly declined to interrupt — but its answer was discarded, so
+      // the echoed words fell through, were appended to utteranceBuffer and
+      // armed the endpoint timer. JARVIS transcribed himself, submitted it
+      // as a user turn, and answered his own sentence a beat later. That is
+      // the "he suddenly starts talking about something else" symptom.
+      //
+      // Dropping the audio here is not the same as going deaf: the
+      // recogniser stays live throughout, and genuine speech (which will
+      // not match what he is saying) still reaches maybeBargeIn below.
+      if (isSelfAudio(heard)) return;
+
       // Someone talking over JARVIS wins immediately, before any other
-      // interpretation of what was said.
-      maybeBargeIn(heard);
+      // interpretation of what was said. If a barge-in fires, the turn has
+      // been reset underneath us — this result belongs to the new turn.
+      if (maybeBargeIn(heard)) {
+        if (finalChunk) utteranceBuffer = finalChunk.trim();
+        interimText = interim.trim();
+        armEndpoint();
+        return;
+      }
+
+      // Still speaking and it was not a barge-in and not an echo: hold off
+      // rather than blending it into a turn while he has the floor.
+      if (voiceState === VoiceState.SPEAKING) return;
 
       if (micMode === "wake" && !conversationActive) {
         if (!WAKE_PATTERN.test(heard)) return;
@@ -4080,6 +4138,12 @@ checkSession();
   }
   function onSpeakingEnded() {
     window.__jarvisSpokenText = "";
+    // Keep the self-audio reference alive briefly. The recogniser is still
+    // finalising the last words JARVIS said; clearing the reference the
+    // instant playback ends is what let those trailing words through as a
+    // user turn. The reference itself is cleared when the tail expires.
+    const cfg = window.jarvisVoiceConfig || {};
+    window.__jarvisSelfAudioUntil = Date.now() + (cfg.selfAudioTailMs || 1500);
     if (window.__jarvisResumeAfterTurn) window.__jarvisResumeAfterTurn();
   }
   // Hard stop for barge-in: kills whichever output path is live. Called
@@ -4088,6 +4152,11 @@ checkSession();
   function stopSpeaking() {
     _speaking = false;
     window.__jarvisSpokenText = "";
+    // A hard stop means a person took the floor. End the self-audio window
+    // immediately, or the very sentence that interrupted him would be
+    // filtered as his own echo.
+    window.__jarvisSelfAudioRef = "";
+    window.__jarvisSelfAudioUntil = 0;
     try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
     if (currentAudioEl) {
       try { currentAudioEl.pause(); currentAudioEl.currentTime = 0; } catch (e) {}
@@ -4104,6 +4173,13 @@ checkSession();
     const cleanText = cleanForSpeech(text);
     if (!cleanText) return;
     window.__jarvisSpokenText = cleanText;
+    // Accumulated, not replaced: a reply spoken in several chunks must stay
+    // recognisable as JARVIS's own audio even once a later chunk is playing,
+    // because the microphone is always a beat behind. Bounded so a long
+    // conversation cannot grow this without limit.
+    const prevRef = window.__jarvisSelfAudioRef || "";
+    window.__jarvisSelfAudioRef = (prevRef + " " + cleanText).trim().slice(-4000);
+    window.__jarvisSelfAudioUntil = 0;   // live playback: the state check covers it
     // Skip the network round-trip once we know no neural provider is
     // configured — falls straight to the browser voice from then on.
     if (neuralTtsAvailable !== false) {

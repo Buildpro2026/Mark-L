@@ -246,13 +246,15 @@ def test_a_worker_exception_does_not_take_down_the_others():
         worker.start()
         try:
             names = {t.get_name() for t in worker._tasks}
-            assert len(names) == 6
+            # Every supervised loop, whatever the current roster is. The
+            # property under test is isolation, not the count.
+            assert len(names) == len(worker._tasks) and len(names) >= 6
             # one supervised loop dying must leave the rest running
             victim = next(t for t in worker._tasks if t.get_name() == "proactive_observer")
             victim.cancel()
             await asyncio.sleep(0)
             alive = [t for t in worker._tasks if not t.done()]
-            assert len(alive) >= 5, "cancelling one worker took others with it"
+            assert len(alive) >= len(names) - 1, "cancelling one worker took others with it"
         finally:
             await worker.stop()
 

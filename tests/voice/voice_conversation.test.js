@@ -218,7 +218,149 @@ async function run() {
     w.close();
   }
 
-  const failed = results.filter(r => !r.pass);
+  
+  // ═══ TEST E: self-listening — JARVIS's own audio must never become a turn ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.jarvisVoiceConfig.continuationGraceMs = 300;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+
+    const reply = "I reviewed the recruiting pipeline this morning and there are four candidates above the ninety percent threshold worth your attention";
+    w.speakReply(reply);
+    await sleep(80);
+
+    // The mic hears JARVIS, in fragments, exactly as Chrome transcribes
+    // speaker bleed. None of it may reach sendMessage.
+    rec.emit("i reviewed the recruiting pipeline this morning", true);
+    await sleep(100);
+    rec.emit(" and there are four candidates above the ninety percent threshold", true);
+    await sleep(500);
+
+    check("E1 JARVIS's own speech creates no user turn",
+      (w.__sent || []).length === 0,
+      `sent=${JSON.stringify(w.__sent || [])}`);
+    check("E2 JARVIS was not interrupted by himself",
+      spokenCancelled <= 1, `cancels=${spokenCancelled}`);
+  }
+
+  // ═══ TEST F: trailing echo AFTER playback ends is still not a turn ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+
+    w.speakReply("the strongest candidate is available starting monday");
+    await sleep(60);
+    if (w.__utt && w.__utt.onend) w.__utt.onend();   // playback finished
+    await sleep(30);
+    // Recognition finalises the tail only now — still JARVIS's words.
+    rec.emit("is available starting monday", true);
+    await sleep(500);
+
+    check("F1 late-finalising echo after playback creates no turn",
+      (w.__sent || []).length === 0,
+      `sent=${JSON.stringify(w.__sent || [])}`);
+  }
+
+  // ═══ TEST G: real barge-in still wins while JARVIS speaks ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+
+    w.speakReply("here is the full recruiting summary for this morning");
+    await sleep(80);
+    const before = spokenCancelled;
+    rec.emit("stop", true);                     // one word, deliberate
+    await sleep(60);
+    check("G1 a one-word interruption still stops JARVIS",
+      spokenCancelled > before, `cancels ${before} -> ${spokenCancelled}`);
+
+    rec.emit("call marcus about the superintendent role instead", true);
+    await sleep(500);
+    const sent = w.__sent || [];
+    check("G2 the interrupting request is what gets sent",
+      sent.length === 1 && sent[0].includes("marcus"),
+      JSON.stringify(sent));
+  }
+
+  // ═══ TEST H: cancel, then immediately a new request ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+
+    w.speakReply("reviewing the pipeline now");
+    await sleep(60);
+    rec.emit("wait", true);                      // barge-in
+    await sleep(40);
+    rec.emit("show me the client list instead", true);
+    await sleep(500);
+
+    const sent = w.__sent || [];
+    check("H1 exactly one request after cancel-then-ask",
+      sent.length === 1, `sent=${JSON.stringify(sent)}`);
+    // The invariant is that the CANCELLED reply cannot come back — not that
+    // nothing is speaking, since answering the new request is correct.
+    check("H2 the cancelled response does not resume behind the new one",
+      !(w.__jarvisSpokenText || "").includes("reviewing the pipeline"),
+      `spoken="${w.__jarvisSpokenText}"`);
+  }
+
+  // ═══ TEST I: a background/autonomous event during speech is not a turn ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+
+    w.speakReply("three drafts are ready for your review");
+    await sleep(60);
+    // An autonomous notification speaks; it must not become a user turn.
+    w.speakReply("a new candidate inquiry just arrived");
+    await sleep(500);
+
+    check("I1 autonomous speech creates no user turn",
+      (w.__sent || []).length === 0,
+      `sent=${JSON.stringify(w.__sent || [])}`);
+  }
+
+  // ═══ TEST J: recogniser restart (session recovery) keeps the guard ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    let rec = w.__rec;
+
+    w.speakReply("the pipeline review is complete for today");
+    await sleep(60);
+    rec.stop();                     // Chrome ends the session mid-reply
+    await sleep(400);               // page restarts it
+    rec = w.__rec;
+    rec.emit("the pipeline review is complete for today", true);
+    await sleep(500);
+
+    check("J1 echo after a recogniser restart still creates no turn",
+      (w.__sent || []).length === 0,
+      `sent=${JSON.stringify(w.__sent || [])}`);
+  }
+
+const failed = results.filter(r => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   process.exit(failed.length ? 1 : 0);
 }

@@ -49,3 +49,7 @@ Thumbs.db
 !.env.example
 
 config/api_keys.json
+
+# Node dependencies for the browser voice test harness
+# (tests/voice/*.test.js needs jsdom; install with `npm install jsdom`)
+node_modules/

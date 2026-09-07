@@ -238,6 +238,7 @@ def test_background_worker_starts_independently_of_gemini_session():
             assert names == {
                 "agent_scheduler", "background_monitor", "proactive_observer",
                 "objective_loop", "approval_notifier", "self_healing",
+                "inbound_monitor",
             }
             assert all(isinstance(t, asyncio.Task) for t in worker._tasks)
             assert all(not t.done() for t in worker._tasks)
