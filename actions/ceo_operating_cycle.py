@@ -55,6 +55,9 @@ from actions.agent_orchestrator import orchestrator as agent_orchestrator
 from actions import business_intelligence as biz_intel
 from actions import business_modules
 from actions import business_pipeline
+from actions import integration_health
+from actions import jarvis_brain
+from actions import operating_memory
 from actions import ddf_discovery
 from actions import executive_brief
 from actions import priorities_engine
@@ -127,7 +130,28 @@ def _task_ok(task) -> bool:
 def _gather() -> dict[str, Any]:
     brief = executive_brief.generate_brief()
     modules = business_modules.gather_all()
-    return {"brief": brief, "modules": modules}
+
+    # What is actually possible this morning, established BEFORE any work is
+    # attempted. Previously the cycle tried everything and learned the
+    # answer through failures, which made an unset credential look identical
+    # to a broken one.
+    try:
+        health = integration_health.check_all()
+    except Exception as exc:
+        logger.warning("integration health check failed: %s", exc)
+        health = {"integrations": {}, "healthy": [], "degraded": {}, "capabilities": {}}
+
+    # The Brain, on the autonomous path. Retrieval is query-scoped and
+    # budgeted; a missing or unreadable vault yields {} and the cycle runs
+    # exactly as before — knowledge informs decisions, it is not a
+    # prerequisite for making them.
+    try:
+        knowledge = jarvis_brain.operating_context(["mandate", "approval"])
+    except Exception:
+        logger.debug("brain context unavailable", exc_info=True)
+        knowledge = {}
+
+    return {"brief": brief, "modules": modules, "health": health, "knowledge": knowledge}
 
 
 def _prioritize() -> list[dict[str, Any]]:
@@ -264,6 +288,10 @@ def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], e
             by_kind[d["kind"]] = by_kind.get(d["kind"], 0) + 1
         detail = ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in sorted(by_kind.items()))
         lines.append(f"Created {business['total_dispatched']} new task(s) from business findings: {detail}.")
+    unavailable = [c for c, ok in (gathered.get("health", {}).get("capabilities") or {}).items() if not ok]
+    if unavailable:
+        lines.append("Capabilities unavailable this cycle: " + ", ".join(sorted(unavailable)) + ".")
+
     degraded = [n for n, st in (business.get("states") or {}).items() if st != business_pipeline.SUCCESS]
     if degraded:
         states = ", ".join(f"{n}={business['states'][n]}" for n in sorted(degraded))
@@ -277,14 +305,16 @@ def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], e
 
 
 def _deliver_report(run_date: str, summary_text: str) -> dict[str, Any]:
-    from actions import approval_notifier
+    from actions import notifications
     # level=2 is the whole severity statement: send the morning brief as an
     # SMS, but don't escalate it to a phone call the way a level-3 incident
     # does (see approval_notifier's 0=log 1=dashboard 2=SMS 3=SMS+call scale).
-    return approval_notifier.notify_urgent_event(
+    result = notifications.daily_report(
         event_id=f"ceo_cycle-{run_date}", title="JARVIS Morning Brief", detail=summary_text,
-        level=2,
     )
+    # The router returns its own envelope; the cycle has always reported the
+    # transport's result, so unwrap rather than change what callers see.
+    return result.get("delivery", result)
 
 
 def _record_delivery_failure(run_date: str, detail: str) -> None:
@@ -309,6 +339,37 @@ def _record_delivery_failure(run_date: str, detail: str) -> None:
         )
     except Exception:
         logger.debug("could not file delivery-failure risk entry", exc_info=True)
+
+
+def _remember_cycle(run_date: str, result: dict[str, Any],
+                    execution: dict[str, Any], delivery_ok: bool) -> None:
+    """Writes this cycle and each agent outcome into operating memory.
+
+    Wrapped end to end: recording that the work happened must never be the
+    reason the work is reported as failed. Per-agent outcomes are what
+    self_healing.failure_streak() later reads to tell a broken agent from an
+    unlucky one."""
+    try:
+        operating_memory.record(
+            operating_memory.CYCLE_RUN, source="ceo_operating_cycle",
+            subject=run_date,
+            summary=(f"Cycle {run_date}: {result['agents_run']} agent task(s), "
+                     f"{(result.get('notification') or {}).get('action', 'n/a')} delivery"),
+            data={
+                "agents_run": result["agents_run"],
+                "state": result["state"],
+                "business_dispatched": (execution.get("business") or {}).get("total_dispatched", 0),
+            },
+            ok=delivery_ok,
+        )
+        for task in [*execution.get("due_tasks", []), *execution.get("stale_tasks", [])]:
+            operating_memory.record(
+                operating_memory.AGENT_OUTCOME, source=task.agent_id, subject=task.id,
+                summary=(task.error or (task.result or {}).get("summary") or task.status.value)[:300],
+                ok=_task_ok(task),
+            )
+    except Exception:
+        logger.debug("could not write cycle outcome to operating memory", exc_info=True)
 
 
 def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
@@ -361,4 +422,5 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         "report_delivered": delivery_ok,
     }
     _mark_ran(run_date, summary_text, risk_count=len(gathered["brief"].get("risks", [])), agents_run=result["agents_run"])
+    _remember_cycle(run_date, result, execution, delivery_ok)
     return result

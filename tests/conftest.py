@@ -18,6 +18,7 @@ from actions import agent_orchestrator as _ao
 from actions import buildpro_data as _bd
 from actions import business_intelligence as _bi
 from actions import autonomous_ledger as _ledger
+from actions import operating_memory as _opmem
 from core import startup as _startup
 from core.headless import config as _headless_config
 
@@ -56,6 +57,7 @@ def _isolate_agent_orchestrator_db(monkeypatch, tmp_path):
     # claimed a real subject id in the live file would make every later run
     # silently skip that subject as "already handled".
     monkeypatch.setattr(_ledger, "DB_PATH", shared_db_path)
+    monkeypatch.setattr(_opmem, "DB_PATH", shared_db_path)
 
 
 @pytest.fixture

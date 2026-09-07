@@ -71,6 +71,11 @@ CEO_CYCLE_POLL_SECS = 900
 # crash, and the ceiling that backoff doubles toward. Short enough that a
 # one-off blip costs almost nothing, capped so a permanently broken loop
 # retries steadily instead of hot-spinning.
+# How often the monitoring sweep looks for stuck tasks, broken agents and
+# degraded integrations. Half-hourly: frequent enough that a wedged agent is
+# freed within one poll cycle of the schedulers that need it, infrequent
+# enough that the sweep itself is never the load.
+SELF_HEALING_POLL_SECS = 1800
 _SUPERVISOR_RESTART_BACKOFF_SECS = 5.0
 _SUPERVISOR_RESTART_BACKOFF_MAX_SECS = 300.0
 
@@ -102,6 +107,7 @@ class BackgroundWorker:
             ("proactive_observer", self._run_proactive_observer),
             ("objective_loop", self._run_objective_loop),
             ("approval_notifier", self._run_approval_notifier),
+            ("self_healing", self._run_self_healing),
         ]
         # The morning CEO cycle has exactly one scheduled owner. In this
         # deployment that owner is the Render Cron Job (jarvis-morning-ceo,
@@ -124,6 +130,31 @@ class BackgroundWorker:
             asyncio.create_task(self._supervise(name, fn), name=name)
             for name, fn in loops
         ]
+
+    # ── Monitoring / self-healing ───────────────────────────────────────
+    # The supervisor above restarts a loop that CRASHES. This is the other
+    # half: the failures that leave everything running — a task wedged in
+    # RUNNING holding its agent out of the workforce, an agent failing every
+    # attempt, an integration that quietly stopped authenticating. All of
+    # those are invisible precisely because the local error handling worked.
+
+    async def run_self_healing_once(self) -> dict:
+        from actions import self_healing
+        return await asyncio.to_thread(self_healing.run_sweep)
+
+    async def _run_self_healing(self) -> None:
+        await asyncio.sleep(60)   # let the other loops settle and do a pass first
+        while not self._stopping:
+            try:
+                report = await self.run_self_healing_once()
+                if report.get("recovered") or report.get("broken_agents"):
+                    logger.info(
+                        "self-healing: recovered %s stuck task(s), %s agent(s) failing repeatedly",
+                        report.get("recovered"), report.get("broken_agents"),
+                    )
+            except Exception as e:
+                logger.warning("self-healing sweep failed: %s", e)
+            await asyncio.sleep(SELF_HEALING_POLL_SECS)
 
     async def _supervise(self, name: str, loop_fn) -> None:
         """Keeps one background loop alive for the life of the process.

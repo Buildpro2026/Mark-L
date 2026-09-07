@@ -58,7 +58,7 @@ def test_web_service_does_not_start_the_ceo_cycle_loop_by_default():
             # every other worker must be untouched by this change
             assert names == {
                 "agent_scheduler", "background_monitor", "proactive_observer",
-                "objective_loop", "approval_notifier",
+                "objective_loop", "approval_notifier", "self_healing",
             }
         finally:
             await worker.stop()

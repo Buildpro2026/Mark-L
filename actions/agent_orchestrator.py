@@ -86,12 +86,21 @@ class TaskStatus(str, Enum):
     DONE = "done"
     FAILED = "failed"                     # terminal failure; see AgentTask.escalated for whether a human is needed
     REJECTED = "rejected"                 # agent stopped, or approval denied
+    EXPIRED = "expired"                   # approval was never given in time — never runs
+    CANCELLED = "cancelled"               # withdrawn before a decision was made
 
 
 # Bounded, and deliberately small. A transient failure deserves a second
 # chance; a failure that survives three attempts is a real problem to be
 # escalated, not something to keep hammering.
 _MAX_TASK_ATTEMPTS = 3
+
+# How long a PENDING_APPROVAL task stays actionable. A decision Lee never
+# made is not implied consent, and an approval request that silently stays
+# live for weeks means an agent could act on a situation that no longer
+# exists. Expiry is explicit and reversible — the work can always be
+# re-proposed against current facts.
+APPROVAL_TTL_SECONDS = 72 * 3600
 _RETRY_BACKOFF_SECS = (2.0, 8.0)   # waited before attempt 2 and attempt 3
 
 # Indirection so tests drive the retry path without actually sleeping.
@@ -1608,15 +1617,92 @@ class AgentOrchestrator:
 
     def approve_task(self, task_id: str) -> AgentTask:
         """Lee's approval gate for EXECUTE-level tasks. Only this call may
-        move a PENDING_APPROVAL task forward — see module/class guardrails."""
+        move a PENDING_APPROVAL task forward — see module/class guardrails.
+
+        Approving anything not currently awaiting a decision is a no-op that
+        returns the task unchanged. That covers the double-click and the
+        replayed API call (already DONE), and it covers approving something
+        that has since expired or been cancelled — which must NOT resurrect
+        it, because the situation it was proposed against is gone."""
         task = self._require_task(task_id)
         if task.status != TaskStatus.PENDING_APPROVAL:
+            self._log_event(
+                task.agent_id, "log",
+                f"Approval ignored for task {task_id}: already {task.status.value}.",
+            )
             return task
         task.status = TaskStatus.PENDING
         task.updated_ts = time.time()
         _save_task(task)
         self._log_event(task.agent_id, "log", f"Task {task_id} approved — running.")
         return self.run_task(task_id)
+
+    def cancel_task(self, task_id: str, reason: str = "") -> AgentTask:
+        """Withdraws a task awaiting approval. Distinct from reject_task:
+        rejection is Lee deciding no, cancellation is the request being
+        retracted (superseded, no longer relevant). Only a task still
+        awaiting a decision can be cancelled — a completed one stays
+        completed."""
+        task = self._require_task(task_id)
+        if task.status not in (TaskStatus.PENDING_APPROVAL, TaskStatus.PENDING):
+            return task
+        task.status = TaskStatus.CANCELLED
+        task.error = reason or "Cancelled before a decision was made."
+        task.updated_ts = time.time()
+        _save_task(task)
+        self._log_event(task.agent_id, "log", f"Task {task_id} cancelled: {task.error}")
+        return task
+
+    def expire_stale_approvals(self, ttl_seconds: float = APPROVAL_TTL_SECONDS,
+                               now: Optional[float] = None) -> list[AgentTask]:
+        """Expires approval requests older than ttl_seconds.
+
+        Silence is not consent. Without this an EXECUTE task could sit
+        PENDING_APPROVAL indefinitely and then run the moment someone
+        clicked approve on a stale dashboard — acting on a situation that
+        may be weeks out of date. Expiring is safe and reversible: the work
+        can be re-proposed against current facts."""
+        now = now if now is not None else time.time()
+        expired = []
+        for task in list(self._tasks.values()):
+            if task.status != TaskStatus.PENDING_APPROVAL:
+                continue
+            if (now - task.created_ts) < ttl_seconds:
+                continue
+            task.status = TaskStatus.EXPIRED
+            task.error = f"Approval was not given within {ttl_seconds / 3600:.0f}h — expired unrun."
+            task.updated_ts = now
+            _save_task(task)
+            self._log_event(task.agent_id, "log", f"Task {task.id} expired awaiting approval.")
+            expired.append(task)
+        return expired
+
+    def pending_approvals(self) -> list[AgentTask]:
+        return [t for t in self._tasks.values() if t.status == TaskStatus.PENDING_APPROVAL]
+
+    def request_approval(self, task_id: str, dry_run: bool = False) -> dict:
+        """Asks Lee to approve one pending task, through the shared
+        notification router.
+
+        The delivery result is returned but deliberately does NOT change the
+        task: a notification that failed to send must never leave the task
+        looking decided. It stays PENDING_APPROVAL, which is the safe state
+        — the work simply does not happen until someone actually approves."""
+        from actions import notifications
+        task = self._require_task(task_id)
+        agent = self._require_agent(task.agent_id)
+        if task.status != TaskStatus.PENDING_APPROVAL:
+            return {"ok": False, "reason": f"task is {task.status.value}, not awaiting approval"}
+        result = notifications.approval_request(
+            task_id=task.id, agent_name=agent.name, what=task.description,
+            why=f"{agent.permission_level.value}-level agent in {agent.business}",
+            dry_run=dry_run,
+        )
+        self._log_event(
+            agent.id, "log",
+            f"Approval requested for task {task.id} (delivery: {result['delivery'].get('action')}).",
+        )
+        return result
 
     def reject_task(self, task_id: str) -> AgentTask:
         task = self._require_task(task_id)
@@ -1697,7 +1783,8 @@ class AgentOrchestrator:
         # A finished task is finished. Re-running one would repeat whatever
         # its handler already did — the exact duplicate-execution risk a
         # replayed scheduler tick or a double API call creates.
-        if task.status in (TaskStatus.DONE, TaskStatus.REJECTED):
+        if task.status in (TaskStatus.DONE, TaskStatus.REJECTED,
+                           TaskStatus.EXPIRED, TaskStatus.CANCELLED):
             self._log_event(
                 agent.id, "log",
                 f"Refused to re-run task {task_id}: already {task.status.value}.",

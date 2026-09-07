@@ -237,7 +237,7 @@ def test_background_worker_starts_independently_of_gemini_session():
             # test_autonomous_wake_system.py for both ownership directions.
             assert names == {
                 "agent_scheduler", "background_monitor", "proactive_observer",
-                "objective_loop", "approval_notifier",
+                "objective_loop", "approval_notifier", "self_healing",
             }
             assert all(isinstance(t, asyncio.Task) for t in worker._tasks)
             assert all(not t.done() for t in worker._tasks)
