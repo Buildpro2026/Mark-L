@@ -103,6 +103,27 @@
       padding: 0 16px; background: var(--panel-solid);
       border-bottom: 1px solid var(--line); z-index: 20;
     }
+    /* Small-screen navigation opener, in the topbar rather than on the rail
+       for a concrete reason: the rail carries backdrop-filter, and a
+       backdrop-filter — exactly like a transform — makes that element the
+       containing block for any position:fixed descendant. The drawer's own
+       handle therefore could not pin itself to the viewport and slid
+       off-screen with the closed drawer (measured at x = -327px), leaving no
+       way to open navigation on a phone. A button outside that subtree
+       cannot be trapped by it. */
+    .nav-open-btn { display: none; }
+    @media (max-width: 900px) {
+      .nav-open-btn {
+        display: flex; flex-direction: column; justify-content: center; gap: 4px;
+        width: 36px; height: 36px; flex-shrink: 0; padding: 0 8px;
+        background: transparent; border: 1px solid var(--line-strong);
+        border-radius: 9px; cursor: pointer;
+      }
+      .nav-open-btn span { display: block; height: 2px; border-radius: 2px; background: var(--text); }
+      .nav-open-btn:hover { border-color: var(--accent); }
+      .shell.rail-collapsed .rail-toggle { display: none; }
+    }
+
     .topbar-brand {
       display: flex; align-items: center; gap: 10px; flex-shrink: 0;
       font-weight: 700; font-size: 13px; letter-spacing: 2.5px; color: var(--text);
@@ -190,7 +211,12 @@
     .breadcrumb span:last-child { color: var(--accent); }
     .breadcrumb span:last-child::after { content: ""; }
 
+    /* Home / Back share the row evenly and are allowed to shrink. Without
+       min-width:0 a flex item refuses to go below its content width, so on a
+       narrow drawer the second button was pushed past the drawer edge and
+       "Back" was clipped out of reach. */
     .rail-nav-btns { display: flex; gap: 6px; margin-bottom: 4px; }
+    .rail-nav-btns .rail-btn { flex: 1 1 0; min-width: 0; }
     .rail-btn {
       flex: 1; border: 1px solid var(--line); background: rgba(255,255,255,0.03); color: var(--text-dim);
       padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 11px; letter-spacing: 0.2px;
@@ -417,12 +443,25 @@
       .shell { grid-template-columns: 1fr !important; grid-template-rows: var(--topbar-h) 1fr; }
       .spatial-stage { grid-column: 1; grid-row: 2; }
 
+      /* Slid with `left`, not `transform`, and that is deliberate: a
+         transformed ancestor becomes the containing block for any
+         position:fixed descendant, so the drawer handle could not pin
+         itself to the viewport and rode off-screen with the closed drawer —
+         leaving no way to open navigation on a phone at all. */
       .rail {
-        grid-column: 1; grid-row: 2; position: fixed; top: var(--topbar-h); bottom: 0; left: 0;
-        max-width: 320px; transform: translateX(-100%); transition: transform .22s ease; opacity: 1 !important; pointer-events: auto !important;
+        grid-column: 1; grid-row: 2; position: fixed; top: var(--topbar-h); bottom: 0;
+        left: calc(-1 * var(--rail-w)); width: var(--rail-w);
+        max-width: 320px; transition: left .22s ease; opacity: 1 !important; pointer-events: auto !important;
       }
-      .shell:not(.rail-collapsed) .rail { transform: translateX(0); box-shadow: 20px 0 40px rgba(0,0,0,0.5); }
+      .shell:not(.rail-collapsed) .rail { left: 0; box-shadow: 20px 0 40px rgba(0,0,0,0.5); }
+      /* The handle is positioned relative to the rail, so when the rail
+         slides off-canvas the handle rides off with it — leaving no way to
+         open navigation at all on a phone. Pin it to the viewport whenever
+         the drawer is closed. */
       .rail-toggle { top: 10px; right: -34px; background: var(--panel-solid); }
+      /* Same for the panel handle: it is the only way back to the detail
+         view once the panel is collapsed to its bar. */
+      .shell.panel-collapsed .info-panel-toggle { opacity: 1; pointer-events: auto; }
 
       .info-panel {
         grid-column: 1; grid-row: 2; position: fixed; left: 0; right: 0; bottom: 0; top: auto;
@@ -447,12 +486,57 @@
       .toast-stack { max-width: calc(100vw - 32px); }
       .objective-chip { min-width: 130px; }
       .objective-amount { font-size: 10px; }
+
+      /* The topbar is a flex row of fixed-width chips. On a phone it
+         measured 657px against a 390px viewport — 267px of horizontal
+         overflow, which is why the right-hand chips were sheared off the
+         edge. Let it shrink instead of forcing a scrollbar. */
+      .topbar { gap: 10px; padding: 0 10px; overflow: hidden; }
+      .topbar-center { flex: 0 1 auto; min-width: 0; }
+      .topbar-right { flex: 0 1 auto; min-width: 0; gap: 8px; }
+      .conn-status { min-width: 0; }
     }
+
+    /* ── Phone ──────────────────────────────────────────────────────────
+       Below ~560px there is not room for every status chip AND a legible
+       brand. Only redundant STATUS TEXT is dropped, never a control: the
+       connection dot still shows state by colour, the objective chip keeps
+       its amount, and every button lives in the two drawers, which are
+       fully reachable. */
+    @media (max-width: 560px) {
+      :root { --topbar-h: 52px; }
+      .topbar { gap: 8px; padding: 0 8px; }
+      .topbar-brand { font-size: 11px; letter-spacing: 1.6px; }
+      /* Keep the dot (state is still visible), drop the wordy label. */
+      #conn-status-label { display: none; }
+      .conn-status { padding: 4px 6px; }
+      .objective-label { display: none; }
+      .objective-chip { min-width: 0; padding: 4px 8px; }
+      .voice-chip { padding: 4px 8px; font-size: 11px; }
+
+      /* Drawers get the full width they need on a narrow screen. */
+      :root { --rail-w: 86vw; }
+      .rail { max-width: none; width: 86vw; }
+      .info-panel { max-height: 58vh; }
+      .shell.panel-collapsed .info-panel { max-height: 48px; }
+
+      /* Command dock sits above the collapsed panel, never over it. */
+      .dock-wrap { width: calc(100vw - 16px); left: 8px; }
+      .shell.panel-collapsed .dock-wrap { bottom: 60px; }
+    }
+
+    /* Nothing may push the document sideways at any width — a 3D stage
+       that scrolls horizontally is a broken stage, not a wide one. */
+    html, body { max-width: 100%; overflow-x: hidden; }
   </style>
 </head>
 <body>
   <div class="shell" id="shell">
     <header class="topbar" id="topbar">
+      <button class="nav-open-btn" id="nav-open-btn" type="button"
+              aria-label="Open navigation" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
       <div class="topbar-brand"><span class="mark"></span>JARVIS</div>
       <span class="conn-status" id="conn-status">
         <span class="dot"></span>

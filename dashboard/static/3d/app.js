@@ -183,6 +183,12 @@ function initThree() {
   scene.fog = new THREE.FogExp2(0x03070d, 0.015);
 
   camera = new THREE.PerspectiveCamera(52, stageEl.clientWidth / stageEl.clientHeight, 0.1, 500);
+  // onResize() is only bound to the resize event, so it never runs on first
+  // paint — the camera kept its desktop framing until the window happened to
+  // change size. Apply the aspect-aware field of view here too, or a phone
+  // loads with the scene already cut off at both edges.
+  camera.fov = _fovForAspect(camera.aspect);
+  camera.updateProjectionMatrix();
   camera.position.set(0, 6.5, 17);
 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -2203,22 +2209,90 @@ function _syncCanvasSize() {
   window.dispatchEvent(new Event("resize"));
   setTimeout(() => window.dispatchEvent(new Event("resize")), 260);
 }
+// ── Small-screen drawer defaults ─────────────────────────────────────────
+// The responsive CSS was already correct and the layout was still broken:
+// .rail is only off-canvas when .shell carries `rail-collapsed`, and
+// .info-panel only shrinks under `panel-collapsed` — but nothing ever set
+// either class on load. So on a phone or tablet BOTH drawers opened by
+// default, the rail covered the scene, the panel took 46vh underneath it,
+// and the 3D Command Center was a sliver behind two overlays.
+//
+// Nothing is hidden by this: both drawers keep their toggles and every
+// control inside them stays reachable. They simply start closed on a small
+// screen, the way a drawer is supposed to, so the scene is what you see
+// first. Desktop is untouched — above the breakpoint both stay open.
+const SMALL_SCREEN_QUERY = "(max-width: 900px)";
+let _userSetDrawers = false;
+
+function _applyDrawerDefaults() {
+  // An explicit toggle wins for the rest of the session; a resize must not
+  // reach in and undo a choice the person just made.
+  if (_userSetDrawers) return;
+  const small = window.matchMedia(SMALL_SCREEN_QUERY).matches;
+  shellEl.classList.toggle("rail-collapsed", small);
+  shellEl.classList.toggle("panel-collapsed", small);
+  railToggleEl?.setAttribute("aria-expanded", String(!small));
+  infoPanelToggleEl?.setAttribute("aria-expanded", String(!small));
+  document.getElementById("nav-open-btn")?.setAttribute("aria-expanded", String(!small));
+}
+
+_applyDrawerDefaults();
+try {
+  window.matchMedia(SMALL_SCREEN_QUERY).addEventListener("change", () => {
+    _applyDrawerDefaults();
+    _syncCanvasSize();
+  });
+} catch (e) {
+  // Older Safari has no addEventListener on MediaQueryList; the load-time
+  // default above still applies, which is the case that actually matters.
+}
+
+// The topbar opener drives the same state as the rail's own handle — one
+// drawer, one class, no second source of truth.
+const navOpenBtnEl = document.getElementById("nav-open-btn");
+navOpenBtnEl?.addEventListener("click", () => {
+  _userSetDrawers = true;
+  const collapsed = shellEl.classList.toggle("rail-collapsed");
+  navOpenBtnEl.setAttribute("aria-expanded", String(!collapsed));
+  railToggleEl?.setAttribute("aria-expanded", String(!collapsed));
+  _syncCanvasSize();
+});
+
 railToggleEl.addEventListener("click", () => {
+  _userSetDrawers = true;
   const collapsed = shellEl.classList.toggle("rail-collapsed");
   railToggleEl.setAttribute("aria-expanded", String(!collapsed));
   _syncCanvasSize();
 });
 infoPanelToggleEl.addEventListener("click", () => {
+  _userSetDrawers = true;
   const collapsed = shellEl.classList.toggle("panel-collapsed");
   infoPanelToggleEl.setAttribute("aria-expanded", String(!collapsed));
   _syncCanvasSize();
 });
 
 // ── Resize + animate ─────────────────────────────────────────────────────
+// A perspective camera's FOV is VERTICAL. On a tall narrow viewport the
+// horizontal field collapses with the aspect ratio, so a scene framed for a
+// desktop gets its outer planets sheared off both edges — which is exactly
+// what a phone showed: Company Core and Calendar cut in half at the sides.
+// Widening the vertical FOV on portrait aspects restores the horizontal
+// field without moving the camera, so the composition stays the one that
+// was designed rather than becoming a different, zoomed-out scene.
+const BASE_FOV = 52;
+function _fovForAspect(aspect) {
+  if (aspect >= 1) return BASE_FOV;
+  // Keep roughly the desktop horizontal field as the viewport narrows,
+  // capped so an extremely narrow window cannot distort into a fisheye.
+  const widened = 2 * Math.atan(Math.tan((BASE_FOV * Math.PI / 180) / 2) / Math.max(aspect, 0.4));
+  return Math.min(78, widened * 180 / Math.PI);
+}
+
 function onResize() {
   const w = stageEl.clientWidth, h = stageEl.clientHeight;
   if (!w || !h) return;
   camera.aspect = w / h;
+  camera.fov = _fovForAspect(camera.aspect);
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   bloomComposer?.setSize(Math.max(1, Math.round(w / 2)), Math.max(1, Math.round(h / 2)));
