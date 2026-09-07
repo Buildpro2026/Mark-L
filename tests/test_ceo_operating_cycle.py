@@ -215,7 +215,7 @@ def test_summary_surfaces_real_buildpro_candidate_job_match_counts(monkeypatch):
 def test_report_notification_is_sent_when_not_dry_run(monkeypatch):
     sent = {}
 
-    def _fake_notify(event_id, title, detail, level=2, priority="normal"):
+    def _fake_notify(event_id, title, detail, level=2, dry_run=False):
         sent["event_id"] = event_id
         sent["title"] = title
         return {"event_id": event_id, "action": "none", "configured": False}
@@ -227,3 +227,38 @@ def test_report_notification_is_sent_when_not_dry_run(monkeypatch):
     assert result["notification"]["action"] == "none"  # honestly not configured, but the real path ran
     assert sent["event_id"].startswith("ceo_cycle-")
     assert sent["title"] == "JARVIS Morning Brief"
+
+
+def test_deliver_report_matches_real_notifier_signature(monkeypatch):
+    """Regression for the Cron failure `notify_urgent_event() got an
+    unexpected keyword argument 'priority'`.
+
+    _deliver_report() used to pass priority="normal" — a parameter
+    notify_urgent_event() never had. Every other test in this file
+    monkeypatched the notifier with a hand-written double whose signature
+    had drifted to match the buggy call, so the suite stayed green while
+    the real cycle crashed on Render the moment it tried to deliver.
+
+    create_autospec builds the double *from the real function*, so it
+    raises TypeError on any argument the real signature would reject.
+    That makes this test fail if the call site and the notifier ever
+    disagree again, no matter how the double is written.
+    """
+    from unittest.mock import create_autospec
+    from actions import approval_notifier
+
+    spec = create_autospec(approval_notifier.notify_urgent_event)
+    spec.return_value = {"event_id": "x", "action": "none", "configured": False}
+    monkeypatch.setattr(approval_notifier, "notify_urgent_event", spec)
+
+    result = cycle.run_cycle(force=True, dry_run=False)
+
+    assert result["state"] == "RAN"
+    spec.assert_called_once()
+    kwargs = spec.call_args.kwargs
+    assert kwargs["event_id"].startswith("ceo_cycle-")
+    assert kwargs["title"] == "JARVIS Morning Brief"
+    # The brief must still go out as a real SMS-level notification, not be
+    # silently downgraded to a no-op while "fixing" the signature.
+    assert kwargs["level"] >= 2
+    assert kwargs["detail"]

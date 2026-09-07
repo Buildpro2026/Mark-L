@@ -247,9 +247,12 @@ def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], e
 
 def _deliver_report(run_date: str, summary_text: str) -> dict[str, Any]:
     from actions import approval_notifier
+    # level=2 is the whole severity statement: send the morning brief as an
+    # SMS, but don't escalate it to a phone call the way a level-3 incident
+    # does (see approval_notifier's 0=log 1=dashboard 2=SMS 3=SMS+call scale).
     return approval_notifier.notify_urgent_event(
         event_id=f"ceo_cycle-{run_date}", title="JARVIS Morning Brief", detail=summary_text,
-        level=2, priority="normal",
+        level=2,
     )
 
 
