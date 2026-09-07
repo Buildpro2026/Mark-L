@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import requests
 
@@ -85,6 +85,115 @@ def verify_hubspot() -> dict[str, Any]:
         "status": f"UNAVAILABLE:{code}" if code else f"UNAVAILABLE:{detail}",
         "detail": detail,
     }
+
+
+def get_portal_identity() -> dict[str, Any]:
+    """WHICH HubSpot portal this token actually belongs to.
+
+    A token can be perfectly valid and still point at the wrong portal — a
+    personal sandbox, an old test account, a different company. Every call
+    then succeeds, JARVIS reports HubSpot as healthy, and it is reading and
+    writing someone else's CRM. Nothing in this codebase could detect that,
+    because verify_hubspot() only asked "did the call work".
+
+    Returns the portal id and the account's own identifying fields. No
+    secret is returned or logged; the portal id is an account identifier,
+    not a credential."""
+    if not is_configured():
+        return {"configured": False, "verified": False, "state": "NOT_CONFIGURED",
+                "detail": "HUBSPOT_TOKEN is not set."}
+    result = _request("GET", "/account-info/v3/details")
+    if not result["ok"]:
+        return {"configured": True, "verified": False,
+                "state": "UNAVAILABLE", "detail": result.get("detail"),
+                "status_code": result.get("status_code")}
+    data = result.get("data") or {}
+    portal_id = data.get("portalId") or data.get("hubId")
+    return {
+        "configured": True, "verified": True, "state": "VERIFIED",
+        "portal_id": str(portal_id) if portal_id is not None else None,
+        "account_type": data.get("accountType"),
+        "time_zone": data.get("timeZone"),
+        "currency": data.get("companyCurrency"),
+        # The portal's own UI hostname — the most direct way for a human to
+        # confirm the token points where they think it does.
+        "ui_domain": data.get("uiDomain"),
+        "data_hosting_location": data.get("dataHostingLocation"),
+    }
+
+
+def verify_expected_portal() -> dict[str, Any]:
+    """Compares the live portal id against HUBSPOT_EXPECTED_PORTAL_ID.
+
+    Unset means "nobody has pinned this yet", which is reported as
+    UNVERIFIED — deliberately NOT as success. 'We never checked' and 'we
+    checked and it matched' are different facts, and only one of them means
+    JARVIS is reading the right CRM."""
+    from core.headless import config
+    identity = get_portal_identity()
+    expected = getattr(config, "HUBSPOT_EXPECTED_PORTAL_ID", None)
+
+    if not identity.get("verified"):
+        return {**identity, "portal_match": "UNKNOWN",
+                "detail": identity.get("detail") or "could not reach HubSpot"}
+    actual = identity.get("portal_id")
+    if not expected:
+        return {**identity, "portal_match": "UNVERIFIED",
+                "detail": ("No expected portal is pinned. Set HUBSPOT_EXPECTED_PORTAL_ID "
+                           f"to {actual} once you have confirmed in the HubSpot UI that "
+                           "this is the BuildPro Recruiters portal.")}
+    if str(expected) == str(actual):
+        return {**identity, "portal_match": "MATCH"}
+    return {**identity, "portal_match": "MISMATCH",
+            "detail": (f"Token belongs to portal {actual}, but {expected} was expected. "
+                       "JARVIS may be reading a different company's CRM.")}
+
+
+def get_owners(limit: int = 100) -> dict[str, Any]:
+    """The portal's owners — the CRM-side view of its users.
+
+    Read-only, and never modifies a user. Note the limit of what this can
+    answer: HubSpot's owners API exposes users who can own records, with
+    their email and active state. It does NOT report how someone
+    authenticates, whether 2FA is on, or who the super-admin is — those
+    live in account settings, which no private-app token can read. Those
+    questions require the HubSpot UI."""
+    if not is_configured():
+        return {"ok": False, "state": "NOT_CONFIGURED", "owners": []}
+    result = _request("GET", "/crm/v3/owners", params={"limit": limit})
+    if not result["ok"]:
+        return {"ok": False, "state": "UNAVAILABLE",
+                "detail": result.get("detail"), "status_code": result.get("status_code"),
+                "owners": []}
+    owners = []
+    for row in (result.get("data") or {}).get("results", []):
+        owners.append({
+            "id": row.get("id"),
+            "email": row.get("email"),
+            "first_name": row.get("firstName"),
+            "last_name": row.get("lastName"),
+            "user_id": row.get("userId"),
+            "archived": bool(row.get("archived")),
+        })
+    return {"ok": True, "state": "OK", "owners": owners, "count": len(owners)}
+
+
+def find_owner_by_email(email: str) -> Optional[dict[str, Any]]:
+    """Is this address actually a user in THIS portal?
+
+    This is the specific question behind a failing login: HubSpot requires
+    the login address to be an active user of that portal, and a company
+    domain being correct is not sufficient."""
+    if not email:
+        return None
+    listing = get_owners()
+    if not listing.get("ok"):
+        return None
+    target = email.strip().lower()
+    for owner in listing["owners"]:
+        if (owner.get("email") or "").strip().lower() == target:
+            return owner
+    return None
 
 
 def _list_result(result: dict[str, Any]) -> dict[str, Any]:

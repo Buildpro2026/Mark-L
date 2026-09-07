@@ -39,6 +39,11 @@ EXISTING_CLIENT = "existing_client"
 EXISTING_CANDIDATE = "existing_candidate"
 GENERAL = "general_contact"
 NOISE = "noise"
+# Evidence was insufficient to say. Distinct from NOISE ("we looked and it
+# is not business") and from GENERAL ("a real person, no explicit ask") —
+# UNKNOWN means we could not establish the fact, usually because the CRM
+# was unreachable or pointed at the wrong portal.
+UNKNOWN = "unknown"
 
 # Explicit asks. Phrases, not single words: "we need to hire" is intent,
 # "hire" alone is a newsletter.
@@ -165,3 +170,57 @@ def should_notify_now(verdict: dict[str, Any], now=None) -> bool:
     if not verdict.get("requires_immediate_notification"):
         return False
     return config.is_business_hours(now)
+
+
+# ── CRM cross-reference ─────────────────────────────────────────────────
+
+def crm_relationship(email: str) -> dict[str, Any]:
+    """Is this sender an existing client/candidate according to the CRM?
+
+    Fail-safe by construction, and the direction matters. If HubSpot is
+    unconfigured, unreachable, or pointed at a portal we have not confirmed
+    is BuildPro Recruiters, this returns UNKNOWN — never "not a client".
+
+    The reason is concrete: absence of a HubSpot record is only evidence
+    when we are certain we looked in the RIGHT HubSpot. A token on a
+    sandbox portal returns zero matches for every real client, and treating
+    that silence as "not a client" would mislabel the entire book of
+    business while every health check stayed green. So a CRM we cannot
+    trust contributes nothing, and classification falls back to the email
+    evidence it already has."""
+    from actions import hubspot_integration as hs
+
+    if not email or not str(email).strip():
+        return {"party": UNKNOWN, "crm_state": "NO_EMAIL", "trusted": False}
+
+    if not hs.is_configured():
+        return {"party": UNKNOWN, "crm_state": "NOT_CONFIGURED", "trusted": False,
+                "detail": "HubSpot is not configured — CRM contributes no evidence."}
+
+    portal = hs.verify_expected_portal()
+    if not portal.get("verified"):
+        return {"party": UNKNOWN, "crm_state": "UNAVAILABLE", "trusted": False,
+                "detail": "HubSpot unreachable — CRM contributes no evidence."}
+    if portal.get("portal_match") in ("MISMATCH", "UNVERIFIED", "UNKNOWN"):
+        return {"party": UNKNOWN, "crm_state": f"PORTAL_{portal.get('portal_match')}",
+                "trusted": False,
+                "detail": ("The connected portal is not confirmed as BuildPro Recruiters, "
+                           "so an absent record proves nothing.")}
+
+    try:
+        found = hs.search_contacts(str(email).strip(), property_name="email", limit=1)
+    except Exception:
+        logger.debug("CRM lookup failed for %s", email, exc_info=True)
+        return {"party": UNKNOWN, "crm_state": "LOOKUP_FAILED", "trusted": False}
+
+    if not found.get("ok", True):
+        return {"party": UNKNOWN, "crm_state": "LOOKUP_FAILED", "trusted": False}
+
+    results = found.get("results") or []
+    if results:
+        return {"party": EXISTING_CLIENT, "crm_state": "MATCHED", "trusted": True,
+                "contact_id": (results[0] or {}).get("id")}
+    # Only here — a trusted, portal-confirmed lookup that found nothing —
+    # is absence real evidence.
+    return {"party": UNKNOWN, "crm_state": "NO_MATCH_IN_VERIFIED_PORTAL", "trusted": True,
+            "detail": "No CRM record in the confirmed portal; treat as a new contact."}

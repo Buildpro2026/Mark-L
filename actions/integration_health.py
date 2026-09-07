@@ -88,15 +88,49 @@ def _google() -> dict[str, Any]:
 
 
 def _hubspot() -> dict[str, Any]:
+    """HubSpot API health — and ONLY the API.
+
+    Two things are deliberately kept apart here, because conflating them is
+    how a broken CRM looks healthy:
+
+      * API ACCESS — can JARVIS read the CRM with its token, and is that
+        token pointed at the RIGHT portal. Both are checkable from here.
+      * HUMAN LOGIN — can a person sign in to that portal in a browser.
+        Nothing a private-app token can call reveals this. Whether an
+        address is an active login, which authentication method it uses,
+        whether 2FA is on, who the super-admin is — all of that lives in
+        account settings that no token can read. So this never reports on
+        it, and never lets API success imply it.
+
+    A token on the wrong portal is reported as AUTH_ERROR rather than
+    CONFIGURED: reading a different company's CRM is a failure, even though
+    every call succeeds."""
     from actions import hubspot_integration as hs
     if not hs.is_configured():
-        return {"state": NOT_CONFIGURED, "detail": "HUBSPOT_TOKEN is not set"}
-    result = hs.verify_hubspot()
-    if result.get("ok"):
-        return {"state": CONFIGURED}
-    state = result.get("state") or ""
-    return {"state": AUTH_ERROR if "AUTH" in state or "401" in str(result.get("detail")) else UNAVAILABLE,
-            "detail": result.get("detail") or state}
+        return {"state": NOT_CONFIGURED, "detail": "HUBSPOT_TOKEN is not set",
+                "human_login_verifiable": False}
+
+    portal = hs.verify_expected_portal()
+    base = {
+        "portal_id": portal.get("portal_id"),
+        "portal_match": portal.get("portal_match"),
+        "ui_domain": portal.get("ui_domain"),
+        # Stated on every result so no reader can mistake API health for
+        # a working human login.
+        "human_login_verifiable": False,
+        "human_login_note": ("A private-app token cannot see logins, auth methods or 2FA. "
+                             "Human portal access must be confirmed in the HubSpot UI."),
+    }
+
+    if not portal.get("verified"):
+        detail = str(portal.get("detail") or portal.get("state") or "")
+        state = AUTH_ERROR if "401" in detail or "auth" in detail.lower() else UNAVAILABLE
+        return {**base, "state": state, "detail": detail}
+
+    if portal.get("portal_match") == "MISMATCH":
+        return {**base, "state": AUTH_ERROR, "detail": portal.get("detail")}
+
+    return {**base, "state": CONFIGURED, "detail": portal.get("detail")}
 
 
 def _buffer() -> dict[str, Any]:

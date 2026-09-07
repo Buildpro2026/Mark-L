@@ -157,6 +157,15 @@ JARVIS_CEO_CYCLE_IN_WEB_SERVICE = _env_bool("JARVIS_CEO_CYCLE_IN_WEB_SERVICE", F
 # Lee immediately, or waits to be summarised in the morning report. It never
 # gates whether monitoring RUNS — JARVIS keeps watching overnight, he just
 # does not phone at 3am about it.
+# The HubSpot portal JARVIS is SUPPOSED to be reading. A valid token
+# pointed at the wrong portal — a sandbox, an old test account, another
+# company — succeeds on every call, so "the API works" cannot by itself
+# prove JARVIS is looking at BuildPro Recruiters. Pin the real portal id
+# here once it is confirmed in the HubSpot UI, and a mismatch becomes
+# loud instead of invisible. Not a secret: a portal id is an account
+# identifier, not a credential.
+HUBSPOT_EXPECTED_PORTAL_ID = _env("HUBSPOT_EXPECTED_PORTAL_ID")
+
 JARVIS_BUSINESS_HOURS_START_UTC = int(_env("JARVIS_BUSINESS_HOURS_START_UTC", "13") or 13)
 JARVIS_BUSINESS_HOURS_END_UTC = int(_env("JARVIS_BUSINESS_HOURS_END_UTC", "23") or 23)
 # Monday=0 .. Sunday=6. Weekends default off: a weekend interruption should
@@ -211,4 +220,5 @@ def summarize() -> dict:
         "ceo_cycle_in_web_service": JARVIS_CEO_CYCLE_IN_WEB_SERVICE,
         "business_hours_utc": [JARVIS_BUSINESS_HOURS_START_UTC, JARVIS_BUSINESS_HOURS_END_UTC],
         "in_business_hours_now": is_business_hours(),
+        "hubspot_expected_portal_pinned": bool(HUBSPOT_EXPECTED_PORTAL_ID),
     }
