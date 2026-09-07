@@ -333,8 +333,20 @@ def test_dashboard_import_failure_degrades_instead_of_crashing_whole_app(monkeyp
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "degraded"
+    # The invariant this test protects is its own opening line: a dashboard
+    # bug degrades the UI, not the API. Phase E made that more precise
+    # rather than weaker. `status` now describes the CORE service, because a
+    # field that reads "degraded" on every headless deployment — where the
+    # PyQt6 dashboard can never import — carries no information on the day
+    # something real breaks. The dashboard's absence is still reported, in
+    # the two fields that actually mean it.
     assert body["dashboard_ui_available"] is False
+    assert body["optional_components"]["legacy_dashboard"] is False
+    # Core stays healthy and READY: nothing the autonomous loop needs is
+    # missing just because an optional desktop UI could not load.
+    assert body["status"] == "ok"
+    assert body["ready"] is True
+    assert body["db_reachable"] is True
 
     # Core API routes must still work even though the dashboard failed.
     resp = client.get("/api/tools", headers={"Authorization": "Bearer test-dashboard-token-not-a-real-secret"})

@@ -82,12 +82,34 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
             task = getattr(app.state, "dashboard_bridge_task", None)
             if task:
                 task.cancel()
+                # Cancelling only REQUESTS cancellation; without awaiting,
+                # the process can exit while the task is still mid-iteration,
+                # and asyncio additionally logs "Task exception was never
+                # retrieved" for anything it raised on the way out. Awaiting
+                # it here is what makes shutdown actually orderly.
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("dashboard bridge failed during shutdown")
 
     @app.get("/health")
     def health():
-        """Unauthenticated platform health probe."""
+        """Unauthenticated platform health probe.
+
+        `status` reflects the CORE application only. The legacy desktop
+        dashboard is explicitly optional — it cannot import in a headless
+        container without a GUI stack — and reporting the whole service
+        "degraded" because an optional UI is absent made the field useless:
+        a signal that is always red tells you nothing on the day something
+        real breaks. Optional components are reported individually instead.
+
+        Never exposes a credential value. Every config field here is a
+        boolean or a non-secret setting (see config.summarize())."""
         cfg = config.summarize()
-        healthy = _db_reachable() and dashboard_server is not None
+        db_ok = _db_reachable()          # one connection per probe, not two
+        healthy = db_ok
         # Reuses ui._configured_providers() directly rather than a second
         # copy of the same list — the exact reason for doing this is on
         # record: /health briefly drifted out of sync with the real
@@ -96,8 +118,16 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
         providers = ui._configured_providers()
         return {
             "status": "ok" if healthy else "degraded",
+            # Readiness is a separate question from liveness: the process
+            # can be alive and serving while a subsystem it needs is not
+            # yet usable. Core readiness is the database — everything the
+            # autonomous loop persists depends on it.
+            "ready": bool(healthy),
             "uptime_seconds": round(time.time() - START_TS, 1),
-            "db_reachable": _db_reachable(),
+            "db_reachable": db_ok,
+            # Optional, and named as such so its absence is never read as a
+            # fault in the core service.
+            "optional_components": {"legacy_dashboard": dashboard_server is not None},
             "dashboard_ui_available": dashboard_server is not None,
             # Safe provider diagnostics — which chat provider a real request
             # would actually reach right now, and in what order, without

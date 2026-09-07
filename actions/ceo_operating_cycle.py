@@ -344,17 +344,33 @@ def _record_delivery_failure(run_date: str, detail: str) -> None:
 
 
 def _safe_stage(name: str, fn, default):
-    """Runs one lifecycle stage in isolation.
+    """Runs one lifecycle stage in isolation, and says so.
 
     A cycle is a chain of stages, and one broken subsystem must not cost the
     other twelve. A failing stage contributes its documented default and the
     cycle continues — which is why a snapshot failure produces {} (reported
-    as unknown) rather than aborting before any agent has run."""
+    as unknown) rather than aborting before any agent has run.
+
+    Isolation like that is invisible by default, which is its own hazard: a
+    stage can fail silently for weeks while the cycle reports success. Every
+    stage therefore emits one structured line saying which component ran,
+    how long it took, and whether it succeeded or fell back. No payloads are
+    logged — only the stage name, duration and outcome — so a log line can
+    never carry a credential or customer data."""
+    started = time.time()
     try:
-        return fn()
+        result = fn()
     except Exception:
-        logger.exception("CEO cycle stage %r failed", name)
+        logger.exception(
+            "ceo_cycle stage=%s outcome=failed duration_ms=%d action=fell_back_to_default",
+            name, int((time.time() - started) * 1000),
+        )
         return default
+    logger.info(
+        "ceo_cycle stage=%s outcome=ok duration_ms=%d",
+        name, int((time.time() - started) * 1000),
+    )
+    return result
 
 
 def _remember_cycle(run_date: str, result: dict[str, Any],
@@ -399,6 +415,7 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         return {"ok": True, "state": "ALREADY_RAN_TODAY", "run_date": run_date}
 
     wake_ts = time.time()
+    logger.info("ceo_cycle event=start run_date=%s forced=%s dry_run=%s", run_date, force, dry_run)
 
     # WAKE -> LOAD MEMORY -> LOAD BRAIN -> CHECK HEALTH. _gather() already
     # performs the last three; the previous snapshot is what lets this cycle
@@ -474,4 +491,11 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     _mark_ran(run_date, summary_text, risk_count=len(gathered["brief"].get("risks", [])), agents_run=result["agents_run"])
     _remember_cycle(run_date, result, execution, delivery_ok)
     _safe_stage("save_snapshot", lambda: business_state.save_snapshot(snapshot, run_date), None)
+    logger.info(
+        "ceo_cycle event=end run_date=%s state=%s agents_run=%d tasks_created=%d "
+        "report_delivered=%s duration_ms=%d",
+        run_date, state, result["agents_run"],
+        len((execution.get("business") or {}).get("dispatched") or []),
+        delivery_ok, int((time.time() - wake_ts) * 1000),
+    )
     return result
