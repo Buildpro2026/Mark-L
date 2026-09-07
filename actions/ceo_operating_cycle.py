@@ -58,6 +58,8 @@ from actions import business_pipeline
 from actions import integration_health
 from actions import jarvis_brain
 from actions import operating_memory
+from actions import business_state
+from actions import ceo_report
 from actions import ddf_discovery
 from actions import executive_brief
 from actions import priorities_engine
@@ -341,6 +343,20 @@ def _record_delivery_failure(run_date: str, detail: str) -> None:
         logger.debug("could not file delivery-failure risk entry", exc_info=True)
 
 
+def _safe_stage(name: str, fn, default):
+    """Runs one lifecycle stage in isolation.
+
+    A cycle is a chain of stages, and one broken subsystem must not cost the
+    other twelve. A failing stage contributes its documented default and the
+    cycle continues — which is why a snapshot failure produces {} (reported
+    as unknown) rather than aborting before any agent has run."""
+    try:
+        return fn()
+    except Exception:
+        logger.exception("CEO cycle stage %r failed", name)
+        return default
+
+
 def _remember_cycle(run_date: str, result: dict[str, Any],
                     execution: dict[str, Any], delivery_ok: bool) -> None:
     """Writes this cycle and each agent outcome into operating memory.
@@ -383,11 +399,28 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         return {"ok": True, "state": "ALREADY_RAN_TODAY", "run_date": run_date}
 
     wake_ts = time.time()
+
+    # WAKE -> LOAD MEMORY -> LOAD BRAIN -> CHECK HEALTH. _gather() already
+    # performs the last three; the previous snapshot is what lets this cycle
+    # answer "what changed" rather than only "what is".
     gathered = _gather()
+    previous = _safe_stage("previous_snapshot",
+                           lambda: business_state.previous_snapshot(before_ts=wake_ts), None)
+
+    # ASSESS BUSINESS STATE -> COMPARE WITH PREVIOUS CYCLE
+    snapshot = _safe_stage("business_snapshot", business_state.snapshot, {})
+    movement = _safe_stage("compare", lambda: business_state.compare(snapshot, previous),
+                           {"first_cycle": True, "changes": [], "unknown": [], "unchanged": []})
+
+    # IDENTIFY -> PRIORITIZE -> CREATE SAFE TASKS -> EXECUTE AUTHORIZED WORK.
+    # Task creation and execution both live in _decide_and_execute; the
+    # approval gate inside assign_task is what keeps EXECUTE-level work at
+    # PENDING_APPROVAL rather than running here.
     priorities = _prioritize()
     execution = _decide_and_execute()
+
+    # VERIFY
     verifications = _verify_and_followup(execution)
-    summary_text = _format_report(gathered, priorities, execution, verifications)
 
     # REPORT delivery is the last stage, and it is the only one whose
     # failure must not erase the four that already succeeded. Previously a
@@ -401,9 +434,25 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     # recorded, the failure is recorded honestly through the same
     # verification + risk mechanisms every other cycle failure uses (so
     # tomorrow's brief surfaces it), and nothing pretends an SMS was sent.
+    # GENERATE CEO REPORT from what actually happened.
+    report = _safe_stage(
+        "ceo_report",
+        lambda: ceo_report.build(state=snapshot, movement=movement,
+                                 health=gathered.get("health") or {}, execution=execution,
+                                 verifications=verifications, delivery_ok=True, run_date=run_date),
+        {},
+    )
+    summary_text = ceo_report.render_text(report) if report else _format_report(
+        gathered, priorities, execution, verifications)
+
+    # NOTIFY WHEN WARRANTED. A cycle that ran cleanly and found nothing is a
+    # normal outcome; texting about it daily trains its reader to ignore the
+    # channel, and then a real alert lands in a muted thread.
     delivery_ok = True
     if dry_run:
         notification: dict[str, Any] = {"action": "skipped_dry_run"}
+    elif report.get("quiet"):
+        notification = {"action": "suppressed_quiet_cycle", "ok": True}
     else:
         try:
             notification = _deliver_report(run_date, summary_text)
@@ -420,7 +469,9 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         "discovery": execution["discovery_result"], "verifications": verifications,
         "summary": summary_text, "notification": notification,
         "report_delivered": delivery_ok,
+        "business_state": snapshot, "movement": movement, "report": report,
     }
     _mark_ran(run_date, summary_text, risk_count=len(gathered["brief"].get("risks", [])), agents_run=result["agents_run"])
     _remember_cycle(run_date, result, execution, delivery_ok)
+    _safe_stage("save_snapshot", lambda: business_state.save_snapshot(snapshot, run_date), None)
     return result
