@@ -1175,7 +1175,27 @@ class ToolExecutor:
 
         elif name == "daily_deal_finders":
             daction = (args.get("action") or "").strip().lower()
-            if daction == "add_product":
+            if daction == "run_workflow":
+                # The whole objective in one tool call. ui.py caps a chain at
+                # _MAX_TOOL_CALL_ROUNDS = 4 and this pipeline needs about
+                # eight, so hand-chaining it always exhausted the loop and
+                # fell through to "try breaking the request into smaller
+                # steps" — which made Lee the orchestrator. approved is NOT
+                # taken from the model: publishing stays behind the human
+                # gate, and a natural-language request is not an approval.
+                from actions import ddf_workflow
+                objective = (args.get("objective") or "Find today's best deal and post it").strip()
+                raw_queries = args.get("queries")
+                queries = ([q.strip() for q in raw_queries.split(",") if q.strip()]
+                           if isinstance(raw_queries, str) else raw_queries) or None
+                outcome = await loop.run_in_executor(
+                    None, lambda: ddf_workflow.run_objective(objective=objective, queries=queries))
+                lines = [outcome["summary"]]
+                for step in outcome["steps"]:
+                    lines.append(f"  - {step['step']}: {step['status']}"
+                                 + (f" ({step['error']})" if step.get("error") else ""))
+                result = "\n".join(lines)
+            elif daction == "add_product":
                 pname = (args.get("name") or "").strip()
                 price = args.get("price")
                 if not pname or price is None:

@@ -843,6 +843,14 @@ TOOL_DECLARATIONS = [
     {
         "name": "daily_deal_finders",
         "description": (
+            "USE action='run_workflow' FOR ANY WHOLE-OBJECTIVE REQUEST like "
+            "'find today's best deal and post it'. It runs the complete "
+            "pipeline in ONE call — find, evaluate, verify, affiliate link, "
+            "catalog, social content, publish gate, log — and returns a "
+            "factual report of what actually happened. Never ask the user to "
+            "break such a request into steps; the tool does the "
+            "decomposition. It stops at the approval gate and does not "
+            "publish publicly on its own. "
             "Daily Deal Finders product catalog: add products, move them "
             "toward publication, and pull today's picks. 'add_product' "
             "records a new discovered product — local only, always safe, "

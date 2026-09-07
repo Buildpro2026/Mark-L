@@ -360,6 +360,136 @@ async function run() {
       `sent=${JSON.stringify(w.__sent || [])}`);
   }
 
+
+  // ═══ TEST K: MIS-TRANSCRIBED echo must not interrupt ═══
+  // The case the similarity test missed. Speaker bleed is transcribed
+  // badly, so the garbled text fails a 60% match and was treated as a new
+  // user sentence — JARVIS stopped himself mid-answer and replied to the
+  // garbage. Every word here is still one he just said.
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+
+    w.speakReply("I can review your recruiting pipeline, draft candidate outreach, and monitor inbound opportunities across email and LinkedIn");
+    await sleep(80);
+    const before = spokenCancelled;
+
+    // Mangled, out-of-order fragments — exactly how a recogniser hears
+    // speaker bleed. Similarity is low; every word is still JARVIS's.
+    rec.emit("review recruiting pipeline draft", true);
+    await sleep(120);
+    rec.emit("monitor inbound opportunities email", true);
+    await sleep(500);
+
+    check("K1 mis-transcribed echo does not interrupt JARVIS",
+      spokenCancelled === before, `cancels ${before} -> ${spokenCancelled}`);
+    check("K2 mis-transcribed echo creates no user turn",
+      (w.__sent || []).length === 0, `sent=${JSON.stringify(w.__sent || [])}`);
+  }
+
+  // ═══ TEST L: the acceptance test — full answer, then next command ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+
+    rec.emit("tell me what you can do", true);
+    await sleep(500);
+    check("L1 the user's question was sent once",
+      (w.__sent || []).length === 1, JSON.stringify(w.__sent || []));
+
+    // A long multi-sentence answer, bleeding back the whole time.
+    const answer = "I can review your recruiting pipeline and surface the strongest matches. " +
+                   "I can draft outreach for your approval. " +
+                   "I can monitor inbound email and LinkedIn for new opportunities.";
+    w.speakReply(answer);
+    await sleep(60);
+    const cancelsBefore = spokenCancelled;
+    rec.emit("i can review your recruiting pipeline and surface", true);
+    await sleep(100);
+    rec.emit("draft outreach for your approval", true);
+    await sleep(100);
+    rec.emit("monitor inbound email and linkedin for new", true);
+    await sleep(400);
+
+    check("L2 JARVIS finished without cutting himself off",
+      spokenCancelled === cancelsBefore, `cancels ${cancelsBefore} -> ${spokenCancelled}`);
+    check("L3 no self-triggered turn during the answer",
+      (w.__sent || []).length === 1, JSON.stringify(w.__sent || []));
+
+    // Playback ends; the user immediately issues the next command.
+    if (w.__utt && w.__utt.onend) w.__utt.onend();
+    await sleep(1600);                       // let the self-audio tail expire
+    rec.emit("now show me the buildpro candidates", true);
+    await sleep(500);
+    const sent = w.__sent || [];
+    check("L4 the next command is accepted immediately after",
+      sent.length === 2 && sent[1].includes("buildpro"), JSON.stringify(sent));
+  }
+
+  // ═══ TEST M: a genuine interruption still wins ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+
+    w.speakReply("I can review your recruiting pipeline and surface the strongest matches");
+    await sleep(80);
+    const before = spokenCancelled;
+    // Words JARVIS never said — unmistakably a person.
+    rec.emit("actually call marcus about the superintendent role", true);
+    await sleep(80);
+    check("M1 genuine user speech still interrupts",
+      spokenCancelled > before, `cancels ${before} -> ${spokenCancelled}`);
+    await sleep(500);
+    const sent = w.__sent || [];
+    check("M2 the interrupting request is what gets sent",
+      sent.length === 1 && sent[0].includes("marcus"), JSON.stringify(sent));
+  }
+
+  // ═══ TEST N: "Stop" still works even though it is one word ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    const rec = w.__rec;
+    w.speakReply("here is the full recruiting summary for this morning");
+    await sleep(80);
+    const before = spokenCancelled;
+    rec.emit("stop", true);
+    await sleep(80);
+    check("N1 a bare \"stop\" still interrupts", spokenCancelled > before,
+      `cancels ${before} -> ${spokenCancelled}`);
+  }
+
+  // ═══ TEST O: state transitions are observable and ordered ═══
+  {
+    const w = makeDom();
+    await sleep(200);
+    w.jarvisVoiceConfig.endpointSilenceMs = 200;
+    w.document.getElementById("orb-mic-btn").click();
+    await sleep(60);
+    w.__rec.emit("tell me what you can do", true);
+    await sleep(600);
+    const log = (w.__jarvisVoiceLog || []).map(e => e.to);
+    check("O1 transitions are recorded", log.length > 0, log.join(" -> "));
+    check("O2 the turn reaches THINKING then SPEAKING",
+      log.includes("THINKING") && log.includes("SPEAKING"), log.join(" -> "));
+    check("O3 no transition repeats itself back-to-back",
+      log.every((v, i) => i === 0 || v !== log[i - 1]), log.join(" -> "));
+  }
+
 const failed = results.filter(r => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   process.exit(failed.length ? 1 : 0);

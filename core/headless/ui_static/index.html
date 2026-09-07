@@ -3655,9 +3655,20 @@ checkSession();
   let wakeActive = localStorage.getItem("jarvis_wake_active") === "1";
   continuousBtn.classList.toggle("active", continuousMode);
 
-  function setVoiceState(next) {
+  // Every transition is logged, in order, with the reason. Self-triggered
+  // input is otherwise invisible: the state machine looks perfectly healthy
+  // while JARVIS answers his own voice, because as far as it knows a user
+  // really did speak.
+  window.__jarvisVoiceLog = [];
+  function setVoiceState(next, reason = "") {
+    const prev = voiceState;
+    if (prev === next) return;
     voiceState = next;
     window.jarvisVoiceState = next;
+    const entry = { t: Date.now(), from: prev, to: next, reason };
+    window.__jarvisVoiceLog.push(entry);
+    if (window.__jarvisVoiceLog.length > 200) window.__jarvisVoiceLog.shift();
+    console.debug(`[voice] ${prev} -> ${next}${reason ? "  (" + reason + ")" : ""}`);
     const hot = next === VoiceState.LISTENING || next === VoiceState.CONVERSATION_ACTIVE;
     micBtn.classList.toggle("listening", hot);
     window.setOrbReason("listening", next === VoiceState.LISTENING);
@@ -3788,11 +3799,37 @@ checkSession();
     // routinely arrive AFTER playback has ended. Without the tail those
     // trailing words look like a brand-new user sentence — which is exactly
     // how a reply ends up answering itself.
+    // Words that mean "stop talking" regardless of anything else. A person
+    // interrupting says one of these, and JARVIS saying the same word inside
+    // a sentence is caught by the novelty test below, so honouring them
+    // outright costs nothing.
+    const INTERRUPT_WORDS = /\b(stop|wait|hold on|cancel|shut up|never mind|nevermind)\b/i;
+
+    // Does this text contain a content word JARVIS has NOT said this turn?
+    //
+    // This is the signal the old 60%-match test was missing. Speaker bleed
+    // is transcribed badly — the recogniser mangles JARVIS's own audio, the
+    // mangled text fails a similarity threshold, and a garbled echo was
+    // therefore treated as a brand-new user sentence. But echo is still
+    // constrained in a way real speech is not: it can only be built from
+    // words JARVIS actually spoke. A sentence containing a word he never
+    // said cannot be his own audio coming back.
+    function hasNovelWords(text) {
+      const spoken = (window.__jarvisSelfAudioRef || "").toLowerCase();
+      if (!spoken) return true;                // nothing to compare against
+      const words = text.toLowerCase().match(/[a-z']{4,}/g) || [];
+      if (!words.length) return false;         // only short/filler words — not a directive
+      return words.some(w => !spoken.includes(w));
+    }
+
     function isSelfAudio(text) {
       const withinTail =
         window.__jarvisSelfAudioUntil && Date.now() < window.__jarvisSelfAudioUntil;
       if (voiceState !== VoiceState.SPEAKING && !withinTail) return false;
-      return isEcho(text);
+      if (INTERRUPT_WORDS.test(text) && hasNovelWords(text)) return false;
+      // Treat it as JARVIS's own audio if it looks like an echo by
+      // similarity OR if every content word in it is one he just said.
+      return isEcho(text) || !hasNovelWords(text);
     }
 
     function maybeBargeIn(text) {
@@ -3800,6 +3837,10 @@ checkSession();
       const words = text.trim().split(/\s+/).filter(Boolean);
       if (words.length < voiceCfg.bargeInMinWords) return false;
       if (isEcho(text)) return false;
+      // A real interruption contains something JARVIS did not just say.
+      // Without this a mis-transcribed echo cleared every other check and
+      // stopped him mid-sentence — the self-interruption being reported.
+      if (!INTERRUPT_WORDS.test(text) && !hasNovelWords(text)) return false;
       // A real person is talking over JARVIS. Cancel cleanly and invalidate
       // the response in flight so it cannot resume behind the new one.
       window.__jarvisTurnEpoch = (window.__jarvisTurnEpoch || 0) + 1;
