@@ -84,11 +84,55 @@ def is_configured() -> bool:
     return _find_client_secret_file() is not None
 
 
+def granted_scopes() -> list[str]:
+    """The scopes the cached token was ACTUALLY consented for, which is not
+    the same thing as SCOPES — see _load_cached_credentials()."""
+    try:
+        data = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    scopes = data.get("scopes") or []
+    return [str(s) for s in scopes]
+
+
+def missing_scopes() -> list[str]:
+    """Scopes this codebase wants that the cached token does not carry.
+    Non-empty means the affected APIs will fail with an insufficient-scope
+    error until someone re-runs the one-time consent — reported honestly by
+    each integration rather than retried forever."""
+    granted = set(granted_scopes())
+    return [s for s in SCOPES if s not in granted] if granted else []
+
+
+def _load_cached_credentials() -> Credentials:
+    """Loads the cached token using the scopes it was actually granted.
+
+    This used to pass the full SCOPES list. google-auth then sends that
+    list on every refresh, and Google rejects the whole request with
+    `invalid_scope: Bad Request` when the stored refresh token was
+    consented for a narrower set — which is exactly what happened when the
+    `tasks` scope was added to SCOPES after the token already existed.
+    Google never retroactively grants a new scope to an existing refresh
+    token, so the aspirational list broke Gmail and Calendar too, even
+    though both had been properly consented.
+
+    Loading with the token's own scopes keeps every already-consented API
+    working and confines the failure to the API that genuinely lacks
+    consent, where it surfaces as a clear insufficient-scope error. See
+    missing_scopes() for reporting which those are."""
+    try:
+        data = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
+        scopes = data.get("scopes") or SCOPES
+    except Exception:
+        scopes = SCOPES
+    return Credentials.from_authorized_user_file(str(TOKEN_PATH), scopes)
+
+
 def _has_valid_cached_token() -> bool:
     if not TOKEN_PATH.exists():
         return False
     try:
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+        creds = _load_cached_credentials()
         return bool(creds and (creds.valid or (creds.expired and creds.refresh_token)))
     except Exception:
         return False
@@ -118,6 +162,8 @@ def get_credential_status() -> dict[str, Any]:
         "credential_type": cred_type,
         "token_cached": TOKEN_PATH.exists(),
         "authorized": _has_valid_cached_token(),
+        # Names only — never any token material.
+        "missing_scopes": missing_scopes(),
     }
 
 
@@ -133,7 +179,7 @@ def get_credentials() -> Credentials:
             "`python -c \"from actions.google_auth import authorize_interactively as a; a()\"` "
             "once to complete the one-time browser consent step."
         )
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    creds = _load_cached_credentials()
     if creds.valid:
         return creds
     if creds.expired and creds.refresh_token:

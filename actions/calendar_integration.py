@@ -61,6 +61,13 @@ def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         "end": (event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date"),
         "location": event.get("location"),
         "html_link": event.get("htmlLink"),
+        # Attendee count is what distinguishes a real meeting from a solo
+        # block or a reminder — actions/business_pipeline.py uses it to
+        # decide which events genuinely warrant a preparation task.
+        "attendees": [
+            {"email": a.get("email"), "response_status": a.get("responseStatus")}
+            for a in (event.get("attendees") or [])
+        ],
     }
 
 

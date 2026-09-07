@@ -919,13 +919,96 @@ def _system_monitor_agent_handler(task: "AgentTask") -> dict:
     return {"summary": "System status collected.", "status": status}
 
 
-def _social_content_agent_handler(task: "AgentTask") -> dict:
-    from actions.buffer_integration import verify_buffer
-    status = verify_buffer()
+def _calendar_intelligence_agent_handler(task: "AgentTask") -> dict:
+    """Reads the real calendar and reports what needs preparing. Read-only:
+    creating or moving an event is a real-world commitment and stays behind
+    calendar_integration's own approved= gate, which this never sets."""
+    from actions import business_pipeline as bp
+    result = bp.calendar_findings()
+    state = result["state"]
+    if state != bp.SUCCESS:
+        # A missing or unconsented Google credential is an honest expected
+        # state, not an agent malfunction — the same distinction
+        # ceo_operating_cycle already makes for ddf_discovery's
+        # NOT_CONFIGURED. Reporting it as an agent `error` would put a
+        # severity-4 risk on the priorities list every single day for a
+        # credential nobody has connected yet, drowning real problems.
+        # A genuine failure still surfaces as one.
+        expected = state in (bp.NOT_CONFIGURED, bp.AUTH_ERROR)
+        out = {
+            "summary": f"Calendar unavailable: {state}." + (f" {result.get('detail')}" if result.get("detail") else ""),
+            "state": state,
+        }
+        if not expected:
+            out["error"] = result.get("detail") or state
+        return out
+    findings = result["findings"]
     return {
-        "summary": f"Buffer: {status['status']}." + ("" if status["configured"] else " Not configured — no posts can be scheduled yet."),
-        "status": status,
+        "summary": (
+            f"{len(findings)} upcoming meeting(s) need preparation "
+            f"out of {result.get('scanned', 0)} event(s) scanned."
+        ),
+        "state": state,
+        "findings": findings,
     }
+
+
+def _social_content_agent_handler(task: "AgentTask") -> dict:
+    """Prepares social content for a specific DDF product when the task
+    names one, and otherwise reports Buffer connectivity.
+
+    Preparation only — publish_to_buffer() requires approved=True and is
+    never called here, so an OBSERVE-level sweep can draft content but can
+    never post it. actions/business_pipeline.py's ddf_content findings are
+    what route a real product into this handler."""
+    from actions.buffer_integration import verify_buffer
+    from actions import daily_deal_finders as ddf
+    from actions import autonomous_ledger as ledger
+
+    status = verify_buffer()
+    product = None
+    for pid in _product_ids_in(task.description):
+        product = ddf.get_product(pid)
+        if product:
+            break
+
+    if product is None:
+        return {
+            "summary": f"Buffer: {status['status']}." + ("" if status["configured"] else " Not configured — no posts can be scheduled yet."),
+            "status": status,
+        }
+
+    try:
+        post = ddf.prepare_post(product)
+    except Exception as exc:
+        return {
+            "summary": f"Could not prepare content for {product.get('name')}: {exc}",
+            "error": str(exc),
+            "status": status,
+        }
+
+    # Content prepared exactly once per product, so a repeated sweep does
+    # not pile up duplicate drafts for the same item.
+    ledger.claim("ddf_content_prepared", str(product.get("id")),
+                 task_id=task.id, detail={"name": product.get("name")})
+    return {
+        "summary": (
+            f"Prepared social content for '{product.get('name')}'. "
+            f"Buffer: {status['status']}. Publication requires approval."
+        ),
+        "status": status,
+        "prepared_post": post,
+        "product_id": product.get("id"),
+        "requires_approval_to_publish": True,
+    }
+
+
+def _product_ids_in(text: str) -> list[str]:
+    """Pulls DDF product ids out of a task description. The pipeline writes
+    them in a stable `[product:<id>]` marker precisely so this does not have
+    to guess from prose."""
+    import re
+    return re.findall(r"\[product:([A-Za-z0-9_\-]+)\]", text or "")
 
 
 def _executive_analyst_handler(task: "AgentTask") -> dict:
@@ -1257,6 +1340,17 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         permission_level=PermissionLevel.OBSERVE, schedule=None,
         handler=_social_content_agent_handler,
         autonomous_ok=True,  # ignores task.description entirely — a pure connectivity/status survey
+    ),
+    "calendar_intelligence_agent": AgentDefinition(
+        id="calendar_intelligence_agent", name="Calendar Intelligence Agent",
+        description=(
+            "Reads upcoming calendar events and identifies meetings that need preparation. "
+            "Read-only — creating or changing an event stays behind the approval gate."
+        ),
+        nucleus_id="system", business="general",
+        permission_level=PermissionLevel.OBSERVE, schedule="180m",
+        handler=_calendar_intelligence_agent_handler,
+        autonomous_ok=True,   # pure read of the real calendar; no side effects
     ),
     "market_intelligence_agent": AgentDefinition(
         id="market_intelligence_agent", name="Market Intelligence Agent",

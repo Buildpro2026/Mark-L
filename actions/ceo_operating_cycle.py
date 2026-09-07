@@ -54,6 +54,7 @@ from core.headless import config
 from actions.agent_orchestrator import orchestrator as agent_orchestrator
 from actions import business_intelligence as biz_intel
 from actions import business_modules
+from actions import business_pipeline
 from actions import ddf_discovery
 from actions import executive_brief
 from actions import priorities_engine
@@ -142,6 +143,20 @@ def _decide_and_execute() -> dict[str, Any]:
     layers the one genuinely new autonomous action (DDF discovery, which
     is itself OBSERVE-class: a local DISCOVERED-status write, never a
     publish) alongside them."""
+    # Turn real business findings into real tasks BEFORE the sweep runs, so
+    # anything discovered this morning is executed in the same cycle rather
+    # than waiting a day. This is what connects the integrations (Gmail,
+    # Calendar, HubSpot, DDF, BuildPro, research) to the agent workforce;
+    # each source is isolated inside gather_and_dispatch, and every finding
+    # is claimed once through autonomous_ledger so a subject cannot generate
+    # the same work on every sweep.
+    try:
+        business = business_pipeline.gather_and_dispatch()
+    except Exception as exc:
+        logger.exception("business pipeline pass failed")
+        business = {"sources": {}, "states": {}, "dispatched": [], "total_dispatched": 0,
+                    "healthy_sources": 0, "error": str(exc)}
+
     due_tasks = agent_orchestrator.run_due_agents()
     stale_tasks = agent_orchestrator.run_stale_autonomous_agents()
 
@@ -152,7 +167,8 @@ def _decide_and_execute() -> dict[str, Any]:
         logger.exception("ddf_discovery.discover_new_products() raised")
         discovery_result = {"ok": False, "state": "ERROR", "detail": str(exc), "discovered": [], "saved": 0, "errors": [{"detail": str(exc)}]}
 
-    return {"due_tasks": due_tasks, "stale_tasks": stale_tasks, "discovery_result": discovery_result}
+    return {"due_tasks": due_tasks, "stale_tasks": stale_tasks,
+            "discovery_result": discovery_result, "business": business}
 
 
 def _verify_and_followup(execution: dict[str, Any]) -> list[dict[str, Any]]:
@@ -237,6 +253,21 @@ def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], e
         lines.append(f"DDF discovery: {discovery['saved']} new candidate(s) found (not yet published).")
     ran = len(execution["due_tasks"]) + len(execution["stale_tasks"])
     lines.append(f"Ran {ran} agent task(s) autonomously.")
+
+    # What the business sources actually produced this cycle. Degraded
+    # sources are named rather than quietly omitted — a morning brief that
+    # hides a broken Gmail connection is worse than one that says so.
+    business = execution.get("business") or {}
+    if business.get("total_dispatched"):
+        by_kind: dict[str, int] = {}
+        for d in business["dispatched"]:
+            by_kind[d["kind"]] = by_kind.get(d["kind"], 0) + 1
+        detail = ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in sorted(by_kind.items()))
+        lines.append(f"Created {business['total_dispatched']} new task(s) from business findings: {detail}.")
+    degraded = [n for n, st in (business.get("states") or {}).items() if st != business_pipeline.SUCCESS]
+    if degraded:
+        states = ", ".join(f"{n}={business['states'][n]}" for n in sorted(degraded))
+        lines.append(f"Business sources needing attention: {states}.")
     if failed_verifications:
         lines.append(f"{len(failed_verifications)} item(s) failed verification — filed as risks for follow-up.")
     unimplemented = [m["name"] for m in gathered["modules"].values() if not m["implemented"]]
