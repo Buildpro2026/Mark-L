@@ -40,6 +40,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 from actions import agent_orchestrator as agent_scheduler_lock
 from actions.agent_orchestrator import orchestrator as agent_orchestrator
@@ -66,6 +67,12 @@ OBJECTIVE_LOOP_POLL_SECS = 21_600  # 6 hours — matches get_stale_autonomous_ag
 # idempotent per UTC date (see ceo_operating_cycle.already_ran_today), so a
 # missed or repeated tick near the boundary can never double-run it.
 CEO_CYCLE_POLL_SECS = 900
+# How long a supervised loop waits before restarting after an unexpected
+# crash, and the ceiling that backoff doubles toward. Short enough that a
+# one-off blip costs almost nothing, capped so a permanently broken loop
+# retries steadily instead of hot-spinning.
+_SUPERVISOR_RESTART_BACKOFF_SECS = 5.0
+_SUPERVISOR_RESTART_BACKOFF_MAX_SECS = 300.0
 
 
 class BackgroundWorker:
@@ -81,17 +88,77 @@ class BackgroundWorker:
         self._stopping = False
 
     def start(self) -> None:
+        # Idempotent by design: a second start() while tasks are already
+        # running is a no-op, so a double startup event (or a test calling
+        # start() twice) can never produce two sets of loops racing each
+        # other over the same agents.
         if self._tasks:
             return
         self._stopping = False
-        self._tasks = [
-            asyncio.create_task(self._run_agent_scheduler(), name="agent_scheduler"),
-            asyncio.create_task(self._run_background_monitor(), name="background_monitor"),
-            asyncio.create_task(self._run_proactive_observer(), name="proactive_observer"),
-            asyncio.create_task(self._run_objective_loop(), name="objective_loop"),
-            asyncio.create_task(self._run_approval_notifier(), name="approval_notifier"),
-            asyncio.create_task(self._run_ceo_cycle_loop(), name="ceo_operating_cycle"),
+
+        loops: list[tuple[str, Any]] = [
+            ("agent_scheduler", self._run_agent_scheduler),
+            ("background_monitor", self._run_background_monitor),
+            ("proactive_observer", self._run_proactive_observer),
+            ("objective_loop", self._run_objective_loop),
+            ("approval_notifier", self._run_approval_notifier),
         ]
+        # The morning CEO cycle has exactly one scheduled owner. In this
+        # deployment that owner is the Render Cron Job (jarvis-morning-ceo,
+        # 0 11 * * *) running in its own container, so the web service does
+        # NOT start this loop — see config.JARVIS_CEO_CYCLE_IN_WEB_SERVICE
+        # for why a shared dedup table cannot solve this across containers.
+        # The loop stays fully wired and tested; it is simply not scheduled
+        # here unless the flag hands ownership back.
+        if headless_config.JARVIS_CEO_CYCLE_IN_WEB_SERVICE:
+            loops.append(("ceo_operating_cycle", self._run_ceo_cycle_loop))
+            logger.info("CEO operating cycle loop ENABLED in the web service (owner: web service).")
+        else:
+            logger.info(
+                "CEO operating cycle loop not started — the Render Cron Job owns the "
+                "scheduled morning cycle. Set JARVIS_CEO_CYCLE_IN_WEB_SERVICE=true to "
+                "hand ownership back to this process."
+            )
+
+        self._tasks = [
+            asyncio.create_task(self._supervise(name, fn), name=name)
+            for name, fn in loops
+        ]
+
+    async def _supervise(self, name: str, loop_fn) -> None:
+        """Keeps one background loop alive for the life of the process.
+
+        Each loop already guards its own per-iteration work, but an
+        exception raised OUTSIDE that inner guard — in setup before the
+        `while`, or in the loop machinery itself — used to end the task
+        silently. asyncio does not report an exception until the task is
+        awaited, and nothing awaits these until shutdown, so a dead worker
+        looked exactly like a healthy idle one: no traceback, no log line,
+        just work that quietly stopped happening.
+
+        This restarts a crashed loop with a bounded backoff, and always
+        says so. Cancellation is re-raised untouched so stop() still works;
+        the backoff is capped so a permanently broken loop retries at a
+        steady slow rate rather than spinning."""
+        backoff = _SUPERVISOR_RESTART_BACKOFF_SECS
+        while not self._stopping:
+            try:
+                await loop_fn()
+                # A loop returning normally means self._stopping was set.
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if self._stopping:
+                    return
+                logger.exception(
+                    "background loop %r crashed — restarting in %.0fs", name, backoff
+                )
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    raise
+                backoff = min(backoff * 2, _SUPERVISOR_RESTART_BACKOFF_MAX_SECS)
 
     async def stop(self) -> None:
         self._stopping = True
@@ -112,8 +179,28 @@ class BackgroundWorker:
         drive a single iteration without waiting on the real interval."""
         return await asyncio.to_thread(agent_orchestrator.run_due_agents)
 
+    async def _lock_call(self, fn, default=None):
+        """Runs one scheduler-lock operation without letting it end the loop.
+
+        acquire/refresh/release are all documented as never raising, but
+        they touch the filesystem, and the scheduler is the one loop whose
+        death stops all scheduled agents. A lock error must degrade to
+        "couldn't check the lock this tick", never to a silently dead
+        worker — so every call goes through here."""
+        try:
+            return await asyncio.to_thread(fn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("scheduler lock operation %s failed: %s", getattr(fn, "__name__", fn), e)
+            return default
+
     async def _run_agent_scheduler(self) -> None:
-        have_lock = await asyncio.to_thread(agent_scheduler_lock.acquire_scheduler_lock)
+        # Fails OPEN on a lock error (default=True): a filesystem hiccup
+        # while reading the lock must not stop scheduled agents from
+        # running, which is the same trade-off acquire_scheduler_lock()
+        # itself makes internally.
+        have_lock = await self._lock_call(agent_scheduler_lock.acquire_scheduler_lock, default=True)
         if not have_lock:
             logger.warning("Another JARVIS instance holds the scheduler lock — will keep retrying.")
         try:
@@ -129,11 +216,11 @@ class BackgroundWorker:
                     await asyncio.sleep(AGENT_SCHEDULER_POLL_SECS)
                 first_pass = False
                 if not have_lock:
-                    have_lock = await asyncio.to_thread(agent_scheduler_lock.acquire_scheduler_lock)
+                    have_lock = await self._lock_call(agent_scheduler_lock.acquire_scheduler_lock, default=True)
                     if not have_lock:
                         continue
                 else:
-                    await asyncio.to_thread(agent_scheduler_lock.refresh_scheduler_lock)
+                    await self._lock_call(agent_scheduler_lock.refresh_scheduler_lock)
                 try:
                     due = await asyncio.to_thread(agent_orchestrator.get_due_agents)
                     for agent in due:
@@ -146,7 +233,7 @@ class BackgroundWorker:
                     logger.warning("agent scheduler poll failed: %s", e)
         finally:
             if have_lock:
-                await asyncio.to_thread(agent_scheduler_lock.release_scheduler_lock)
+                await self._lock_call(agent_scheduler_lock.release_scheduler_lock)
 
     # ── Autonomous objective loop (turns "monitor without being asked" ──
     # into real, executed work — see agent_orchestrator.get_stale_

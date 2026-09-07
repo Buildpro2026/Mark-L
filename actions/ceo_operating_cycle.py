@@ -256,6 +256,30 @@ def _deliver_report(run_date: str, summary_text: str) -> dict[str, Any]:
     )
 
 
+def _record_delivery_failure(run_date: str, detail: str) -> None:
+    """Files a failed morning-brief delivery through the same verification
+    and risk mechanisms the cycle already uses for a failed agent run, so it
+    surfaces in tomorrow's brief instead of vanishing into a log line.
+    Deliberately does NOT try to notify about the notification failing —
+    the delivery channel is the thing that just broke."""
+    try:
+        verification.record_verification(
+            "ceo_cycle_report_delivery", intended="deliver the morning brief to Lee",
+            actual=f"delivery raised: {detail}", success=False,
+            external_system="approval_notifier", reference_id=f"ceo_cycle-{run_date}",
+            follow_up_required=True, follow_up_reason=detail,
+        )
+    except Exception:
+        logger.debug("could not record delivery-failure verification", exc_info=True)
+    try:
+        biz_intel.add_entry(
+            "risks", "general", title="CEO cycle: morning brief was not delivered",
+            content=detail, data={"run_date": run_date},
+        )
+    except Exception:
+        logger.debug("could not file delivery-failure risk entry", exc_info=True)
+
+
 def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     """The full WAKE->REPORT pass. Runs at most once per UTC calendar date
     unless force=True (tests, or a manual re-run Lee explicitly asks for).
@@ -273,13 +297,37 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     verifications = _verify_and_followup(execution)
     summary_text = _format_report(gathered, priorities, execution, verifications)
 
-    notification: dict[str, Any] = {"action": "skipped_dry_run"} if dry_run else _deliver_report(run_date, summary_text)
+    # REPORT delivery is the last stage, and it is the only one whose
+    # failure must not erase the four that already succeeded. Previously a
+    # raise here propagated out of run_cycle BEFORE _mark_ran(), so a Twilio
+    # outage meant: every agent had run, discovery had run, verifications
+    # were filed — and none of it was recorded as having happened. The
+    # background loop then saw already_ran_today() == False and re-ran the
+    # entire cycle, repeating all that work, every 15 minutes.
+    #
+    # A delivery failure is now its own distinct outcome. The work is
+    # recorded, the failure is recorded honestly through the same
+    # verification + risk mechanisms every other cycle failure uses (so
+    # tomorrow's brief surfaces it), and nothing pretends an SMS was sent.
+    delivery_ok = True
+    if dry_run:
+        notification: dict[str, Any] = {"action": "skipped_dry_run"}
+    else:
+        try:
+            notification = _deliver_report(run_date, summary_text)
+        except Exception as exc:
+            delivery_ok = False
+            logger.exception("CEO cycle report delivery failed")
+            notification = {"action": "failed", "ok": False, "error": str(exc)}
+            _record_delivery_failure(run_date, str(exc))
 
+    state = "RAN" if delivery_ok else "RAN_REPORT_UNDELIVERED"
     result = {
-        "ok": True, "state": "RAN", "run_date": run_date, "wake_ts": wake_ts,
+        "ok": True, "state": state, "run_date": run_date, "wake_ts": wake_ts,
         "priorities": priorities, "agents_run": len(execution["due_tasks"]) + len(execution["stale_tasks"]),
         "discovery": execution["discovery_result"], "verifications": verifications,
         "summary": summary_text, "notification": notification,
+        "report_delivered": delivery_ok,
     }
     _mark_ran(run_date, summary_text, risk_count=len(gathered["brief"].get("risks", [])), agents_run=result["agents_run"])
     return result

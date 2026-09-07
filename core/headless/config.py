@@ -27,6 +27,17 @@ def _env(name: str, default: str | None = None) -> str | None:
     val = os.environ.get(name)
     return val if val not in (None, "") else default
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Truthy env parsing for on/off switches. Accepts the spellings people
+    actually type in a Render dashboard; anything unrecognised falls back to
+    `default` rather than silently reading as False."""
+    raw = _env(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 DATA_DIR = Path(_env("JARVIS_DATA_DIR", str(BASE_DIR / "data")))
 DB_PATH = DATA_DIR / "jarvis2.db"
 LOG_DIR = DATA_DIR / "logs"
@@ -117,6 +128,25 @@ PRODUCT_DATA_API_URL = _env("PRODUCT_DATA_API_URL", "https://api.rainforestapi.c
 # actions/ceo_operating_cycle.py's own dedup table for the exact contract.
 JARVIS_CEO_CYCLE_HOUR_UTC = int(_env("JARVIS_CEO_CYCLE_HOUR_UTC", "11") or 11)  # ~06:00 US Central
 
+# Who OWNS the scheduled morning cycle. Exactly one scheduled owner may run
+# it, and in this deployment that owner is the Render Cron Job
+# `jarvis-morning-ceo` (0 11 * * *), which calls run_cycle(force=True) in its
+# own container.
+#
+# The web service's BackgroundWorker carries the same cycle loop, and before
+# this flag both fired: the Cron container and the web container each have
+# their own ephemeral SQLite file, so ceo_cycle_runs — the already_ran_today()
+# dedup table — is not shared between them and cannot suppress the second run.
+# The result was two full cycles and two morning texts a day, plus one more
+# for every restart after the cycle hour (a wiped database reads as "never
+# ran today").
+#
+# Default False = Cron is the single owner. Set JARVIS_CEO_CYCLE_IN_WEB_SERVICE
+# to true only if the Cron Job is removed, so the web service takes ownership
+# back — the loop itself is still fully wired and tested, just not started.
+# Every other background worker is unaffected by this flag.
+JARVIS_CEO_CYCLE_IN_WEB_SERVICE = _env_bool("JARVIS_CEO_CYCLE_IN_WEB_SERVICE", False)
+
 def summarize() -> dict:
     return {
         "data_dir": str(DATA_DIR),
@@ -147,4 +177,5 @@ def summarize() -> dict:
         "product_data_api_key_env_set": bool(PRODUCT_DATA_API_KEY),
         "product_data_api_provider": PRODUCT_DATA_API_PROVIDER,
         "ceo_cycle_hour_utc": JARVIS_CEO_CYCLE_HOUR_UTC,
+        "ceo_cycle_in_web_service": JARVIS_CEO_CYCLE_IN_WEB_SERVICE,
     }

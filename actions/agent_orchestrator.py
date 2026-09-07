@@ -82,9 +82,48 @@ class TaskStatus(str, Enum):
     PENDING = "pending"                   # queued, will auto-run (OBSERVE/SUGGEST)
     PENDING_APPROVAL = "pending_approval"  # queued, needs Lee's approval (EXECUTE)
     RUNNING = "running"
+    RETRYING = "retrying"                 # transient failure, another bounded attempt is queued
     DONE = "done"
-    FAILED = "failed"
+    FAILED = "failed"                     # terminal failure; see AgentTask.escalated for whether a human is needed
     REJECTED = "rejected"                 # agent stopped, or approval denied
+
+
+# Bounded, and deliberately small. A transient failure deserves a second
+# chance; a failure that survives three attempts is a real problem to be
+# escalated, not something to keep hammering.
+_MAX_TASK_ATTEMPTS = 3
+_RETRY_BACKOFF_SECS = (2.0, 8.0)   # waited before attempt 2 and attempt 3
+
+# Indirection so tests drive the retry path without actually sleeping.
+_retry_sleep = time.sleep
+
+# Exceptions that mean "the world was briefly unavailable" — the only class
+# worth another attempt. Everything else (TypeError, ValueError, KeyError,
+# AttributeError, PermissionError, ImportError …) is a deterministic defect
+# or a policy refusal: a retry would fail identically and only delay the
+# escalation, so those go straight to a human.
+_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    ConnectionError,
+)
+_RETRYABLE_NAME_HINTS = (
+    "timeout", "temporarily", "temporary", "unavailable", "connection",
+    "rate limit", "ratelimit", "too many requests", "503", "502", "504",
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True only for failures that a later identical attempt could plausibly
+    survive. Errs toward False: a wrongly-retried task wastes a cycle and
+    can double a side effect, a wrongly-escalated one just reaches Lee."""
+    if isinstance(exc, (PermissionError, TypeError, ValueError, KeyError, AttributeError, ImportError)):
+        return False
+    if isinstance(exc, _RETRYABLE_EXCEPTIONS):
+        return True
+    if isinstance(exc, OSError):     # socket/DNS/transport-level, after the deterministic subclasses above
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in _RETRYABLE_NAME_HINTS)
 
 
 @dataclass
@@ -112,6 +151,11 @@ class AgentDefinition:
     last_success_ts: Optional[float] = None  # set by run_task only when a run completes with no error
     last_error: Optional[str] = None       # error state — set by run_task on failure, cleared on success
     handler: Optional[Callable[["AgentTask"], dict]] = field(default=None, repr=False)
+    # Explicit override for the task engine's retry policy. None = decide by
+    # permission_level (OBSERVE is read-only, so safe to repeat; SUGGEST and
+    # EXECUTE can leave something durable behind and must not be repeated
+    # blindly). Set True only once a handler is genuinely idempotent.
+    retry_safe: Optional[bool] = None
     # Explicit, auditable opt-in for the autonomous objective loop (below) —
     # separate from `schedule` on purpose. `schedule` means "run on a fixed
     # clock with a generic trigger"; `autonomous_ok` means "safe AND
@@ -154,6 +198,21 @@ class AgentTask:
     updated_ts: float = field(default_factory=time.time)
     result: Any = None
     error: Optional[str] = None
+    # Execution state. `attempt` counts attempts actually STARTED (1 on the
+    # first run), so attempt > 1 is by itself the record that a retry
+    # happened — no separate retry log to drift out of sync.
+    started_ts: Optional[float] = None
+    completed_ts: Optional[float] = None
+    attempt: int = 0
+    max_attempts: int = _MAX_TASK_ATTEMPTS
+    verification: Optional[dict] = None
+    # Escalation is a FLAG on a FAILED task, not a separate status, and
+    # deliberately so: actions/executive_brief.py surfaces overnight
+    # problems by filtering on status == "failed", so moving escalated work
+    # to a status of its own would have quietly removed exactly the failures
+    # most worth a human's attention from the morning brief.
+    escalated: bool = False
+    escalation_reason: Optional[str] = None
 
     def to_public_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -211,6 +270,22 @@ def _connect() -> sqlite3.Connection:
             error TEXT
         )
     """)
+    # Additive migration for the execution-state columns. ALTER TABLE ADD
+    # COLUMN on an existing agent_tasks row-set is safe and preserves every
+    # existing row; a duplicate-column error just means it already ran.
+    for _col, _decl in (
+        ("started_ts", "REAL"),
+        ("completed_ts", "REAL"),
+        ("attempt", "INTEGER NOT NULL DEFAULT 0"),
+        ("max_attempts", f"INTEGER NOT NULL DEFAULT {_MAX_TASK_ATTEMPTS}"),
+        ("verification_json", "TEXT"),
+        ("escalated", "INTEGER NOT NULL DEFAULT 0"),
+        ("escalation_reason", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {_col} {_decl}")
+        except sqlite3.OperationalError:
+            pass   # column already present
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,13 +340,27 @@ def _save_task(task: "AgentTask") -> None:
                 result_json = json.dumps(str(task.result))
         conn = _connect()
         try:
+            verification_json = None
+            if task.verification is not None:
+                try:
+                    verification_json = json.dumps(task.verification)
+                except Exception:
+                    verification_json = json.dumps(str(task.verification))
             conn.execute(
-                "INSERT INTO agent_tasks (id, agent_id, description, status, created_ts, updated_ts, result_json, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO agent_tasks (id, agent_id, description, status, created_ts, updated_ts, "
+                "result_json, error, started_ts, completed_ts, attempt, max_attempts, verification_json, "
+                "escalated, escalation_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET status=excluded.status, updated_ts=excluded.updated_ts, "
-                "result_json=excluded.result_json, error=excluded.error",
+                "result_json=excluded.result_json, error=excluded.error, "
+                "started_ts=excluded.started_ts, completed_ts=excluded.completed_ts, "
+                "attempt=excluded.attempt, max_attempts=excluded.max_attempts, "
+                "verification_json=excluded.verification_json, "
+                "escalated=excluded.escalated, escalation_reason=excluded.escalation_reason",
                 (task.id, task.agent_id, task.description, status,
-                 task.created_ts, task.updated_ts, result_json, task.error),
+                 task.created_ts, task.updated_ts, result_json, task.error,
+                 task.started_ts, task.completed_ts, task.attempt, task.max_attempts,
+                 verification_json, 1 if task.escalated else 0, task.escalation_reason),
             )
             conn.commit()
         finally:
@@ -299,10 +388,27 @@ def _load_tasks() -> dict[str, "AgentTask"]:
             status = TaskStatus(r["status"])
         except ValueError:
             status = TaskStatus.FAILED
+        keys = r.keys()
+
+        def _col(name, default=None):
+            # Tolerates a database written before the execution-state
+            # migration — an older row simply has no such column.
+            return r[name] if name in keys and r[name] is not None else default
+
+        verification = None
+        if "verification_json" in keys and r["verification_json"]:
+            try:
+                verification = json.loads(r["verification_json"])
+            except Exception:
+                verification = None
         tasks[r["id"]] = AgentTask(
             id=r["id"], agent_id=r["agent_id"], description=r["description"] or "",
             status=status, created_ts=r["created_ts"], updated_ts=r["updated_ts"],
             result=result, error=r["error"],
+            started_ts=_col("started_ts"), completed_ts=_col("completed_ts"),
+            attempt=int(_col("attempt", 0)), max_attempts=int(_col("max_attempts", _MAX_TASK_ATTEMPTS)),
+            verification=verification,
+            escalated=bool(_col("escalated", 0)), escalation_reason=_col("escalation_reason"),
         )
     return tasks
 
@@ -1339,7 +1445,8 @@ class AgentOrchestrator:
             if agent.status == AgentStatus.RUNNING:
                 stuck_task = next(
                     (t for t in self._tasks.values()
-                     if t.agent_id == agent_id and t.status == TaskStatus.RUNNING),
+                     if t.agent_id == agent_id
+                     and t.status in (TaskStatus.RUNNING, TaskStatus.RETRYING)),
                     None,
                 )
                 if stuck_task is not None:
@@ -1425,6 +1532,53 @@ class AgentOrchestrator:
         self._log_event(task.agent_id, "log", f"Task {task_id} rejected.")
         return task
 
+    def _retry_safe(self, agent: "AgentDefinition") -> bool:
+        """Whether a failed attempt by this agent may be repeated
+        automatically.
+
+        Default is by permission level, because that IS the codebase's
+        existing statement about side effects: OBSERVE agents only read and
+        monitor, so re-running one is idempotent by contract. SUGGEST and
+        EXECUTE agents can produce something durable — a proposal, a draft,
+        an external write — and repeating that risks a duplicate, so they
+        escalate instead. An individual agent can opt in explicitly by
+        setting retry_safe=True once its handler is genuinely idempotent."""
+        explicit = getattr(agent, "retry_safe", None)
+        if explicit is not None:
+            return bool(explicit)
+        return agent.permission_level == PermissionLevel.OBSERVE
+
+    def _attempt_once(self, task: AgentTask, agent: "AgentDefinition") -> Optional[BaseException]:
+        """One execution attempt. Returns None on success, or the exception
+        that ended it. Handler-reported (non-raising) failures are surfaced
+        the same way they always were — they are not retried, because a
+        handler that caught its own error already decided how to degrade."""
+        result = agent.handler(task) if agent.handler else {"summary": "No handler configured."}
+        task.result = result
+        # 2026-09-02 reliability audit finding: several handlers (the
+        # BuildPro email/candidate/client scans in particular) catch
+        # their own failures and return them as a normal DONE result
+        # rather than raising — necessary so one bad message doesn't
+        # abort the whole scan, but it meant a real Gmail-auth failure
+        # or HubSpot sync failure produced the exact same generic
+        # "completed task" event as a healthy empty run. This surfaces
+        # a handler-reported error/failure the same way an exception
+        # does, instead of only being visible to something that reads
+        # task.result directly.
+        handler_error = result.get("error") if isinstance(result, dict) else None
+        handler_failures = result.get("failed") if isinstance(result, dict) else None
+        result_summary = (result.get("summary") if isinstance(result, dict) else None) or f"{agent.name} completed task {task.id}."
+        if handler_error:
+            agent.last_error = str(handler_error)
+            self._log_event(agent.id, "task_error", f"{agent.name}: {result_summary}")
+        elif handler_failures:
+            agent.last_error = f"{len(handler_failures)} item(s) failed — see task result."
+            self._log_event(agent.id, "task_error", f"{agent.name}: {result_summary}")
+        else:
+            agent.last_error = None
+            self._log_event(agent.id, "task_done", f"{agent.name}: {result_summary}")
+        return None
+
     def run_task(self, task_id: str) -> AgentTask:
         """Executes a PENDING task by calling its agent's handler. Refuses to
         run a PENDING_APPROVAL task directly — only approve_task() may do that.
@@ -1433,13 +1587,28 @@ class AgentOrchestrator:
         assign_task()/approve_task() calls for the same agent (e.g. a
         double-fired scheduler tick, two overlapping Gemini tool calls, or
         an objective manager re-triggering the same agent) can never race
-        into genuinely duplicate concurrent work."""
+        into genuinely duplicate concurrent work.
+
+        A transient failure is retried up to max_attempts with a backoff,
+        but only for agents whose work is safe to repeat (see _retry_safe);
+        anything else, and anything still failing once the attempts run out,
+        ends FAILED with escalated=True so a human sees it rather than the
+        system quietly retrying an irreversible side effect."""
         task = self._require_task(task_id)
         agent = self._require_agent(task.agent_id)
         if task.status == TaskStatus.PENDING_APPROVAL:
             raise PermissionError(
                 f"Task {task_id} requires approval (agent '{agent.name}' is EXECUTE-level)."
             )
+        # A finished task is finished. Re-running one would repeat whatever
+        # its handler already did — the exact duplicate-execution risk a
+        # replayed scheduler tick or a double API call creates.
+        if task.status in (TaskStatus.DONE, TaskStatus.REJECTED):
+            self._log_event(
+                agent.id, "log",
+                f"Refused to re-run task {task_id}: already {task.status.value}.",
+            )
+            return task
         if agent.status == AgentStatus.RUNNING:
             task.status = TaskStatus.REJECTED
             task.error = f"{agent.name} is already running another task — refused to run two at once."
@@ -1452,44 +1621,63 @@ class AgentOrchestrator:
             return task
 
         agent.status = AgentStatus.RUNNING
-        task.status = TaskStatus.RUNNING
-        task.updated_ts = time.time()
+        max_attempts = max(1, int(task.max_attempts or _MAX_TASK_ATTEMPTS))
         try:
-            result = agent.handler(task) if agent.handler else {"summary": "No handler configured."}
-            task.result = result
-            task.status = TaskStatus.DONE
-            # 2026-09-02 reliability audit finding: several handlers (the
-            # BuildPro email/candidate/client scans in particular) catch
-            # their own failures and return them as a normal DONE result
-            # rather than raising — necessary so one bad message doesn't
-            # abort the whole scan, but it meant a real Gmail-auth failure
-            # or HubSpot sync failure produced the exact same generic
-            # "completed task" event as a healthy empty run. This surfaces
-            # a handler-reported error/failure the same way an exception
-            # does, instead of only being visible to something that reads
-            # task.result directly.
-            handler_error = result.get("error") if isinstance(result, dict) else None
-            handler_failures = result.get("failed") if isinstance(result, dict) else None
-            result_summary = (result.get("summary") if isinstance(result, dict) else None) or f"{agent.name} completed task {task_id}."
-            if handler_error:
-                agent.last_error = str(handler_error)
-                self._log_event(agent.id, "task_error", f"{agent.name}: {result_summary}")
-            elif handler_failures:
-                agent.last_error = f"{len(handler_failures)} item(s) failed — see task result."
-                self._log_event(agent.id, "task_error", f"{agent.name}: {result_summary}")
-            else:
-                agent.last_error = None
-                self._log_event(agent.id, "task_done", f"{agent.name}: {result_summary}")
-        except Exception as exc:
-            task.error = str(exc)
-            task.status = TaskStatus.FAILED
-            agent.last_error = str(exc)
-            self._log_event(agent.id, "task_failed", f"{agent.name} failed task {task_id}: {exc}")
+            while True:
+                task.attempt += 1
+                if task.started_ts is None:
+                    task.started_ts = time.time()
+                task.status = TaskStatus.RUNNING
+                task.updated_ts = time.time()
+                _save_task(task)
+
+                try:
+                    self._attempt_once(task, agent)
+                    task.status = TaskStatus.DONE
+                    task.error = None
+                    break
+                except Exception as exc:
+                    task.error = str(exc)
+                    agent.last_error = str(exc)
+                    retryable = _is_retryable(exc) and self._retry_safe(agent)
+                    attempts_left = task.attempt < max_attempts
+                    if retryable and attempts_left:
+                        task.status = TaskStatus.RETRYING
+                        task.updated_ts = time.time()
+                        _save_task(task)
+                        self._log_event(
+                            agent.id, "task_error",
+                            f"{agent.name} attempt {task.attempt}/{max_attempts} failed "
+                            f"({exc}) — retrying.",
+                        )
+                        backoff_idx = min(task.attempt - 1, len(_RETRY_BACKOFF_SECS) - 1)
+                        _retry_sleep(_RETRY_BACKOFF_SECS[backoff_idx])
+                        continue
+                    # Out of attempts, or never safe to repeat in the first
+                    # place. Either way this needs a human, so the task is
+                    # flagged for escalation on top of its FAILED status.
+                    task.status = TaskStatus.FAILED
+                    task.escalated = True
+                    if not _is_retryable(exc):
+                        reason = "not a transient failure"
+                    elif not self._retry_safe(agent):
+                        reason = f"{agent.permission_level.value}-level work is not safe to repeat automatically"
+                    else:
+                        reason = f"failed {task.attempt} of {max_attempts} attempts"
+                    task.escalation_reason = reason
+                    self._log_event(
+                        agent.id, "task_failed",
+                        f"{agent.name} escalated task {task_id} ({reason}): {exc}",
+                    )
+                    break
         finally:
-            task.updated_ts = time.time()
+            task.completed_ts = time.time()
+            task.updated_ts = task.completed_ts
             agent.last_run_ts = task.updated_ts
             if agent.last_error is None:
                 agent.last_success_ts = task.updated_ts
+            # Always returns the agent to a usable state, on every exit path
+            # — success, escalation, or an exception escaping the loop.
             agent.status = AgentStatus.IDLE
             _save_task(task)
             _save_agent_state(agent)
@@ -1556,7 +1744,7 @@ class AgentOrchestrator:
         runs) a default task for every currently-due agent. Call
         periodically from a background loop — see
         main.py::_run_agent_scheduler."""
-        return [self.assign_task(agent.id, task_description) for agent in self.get_due_agents()]
+        return self._dispatch_each(self.get_due_agents(), lambda _a: task_description)
 
     def get_stale_autonomous_agents(
         self, now: Optional[float] = None, staleness_secs: float = 21_600,
@@ -1599,14 +1787,39 @@ class AgentOrchestrator:
         persistent disk and restarts often) — see
         AgentDefinition.autonomous_topics for why this is a fixed rotation
         and not an LLM-invented topic."""
-        results = []
-        for agent in self.get_stale_autonomous_agents():
+        def _describe(agent: AgentDefinition) -> str:
             if agent.autonomous_topics:
                 prior_runs = sum(1 for t in self._tasks.values() if t.agent_id == agent.id)
-                description = agent.autonomous_topics[prior_runs % len(agent.autonomous_topics)]
-            else:
-                description = task_description
-            results.append(self.assign_task(agent.id, description))
+                return agent.autonomous_topics[prior_runs % len(agent.autonomous_topics)]
+            return task_description
+
+        return self._dispatch_each(self.get_stale_autonomous_agents(), _describe)
+
+    def _dispatch_each(self, agents, describe) -> list[AgentTask]:
+        """Assign and run one task per agent, isolating each from the others.
+
+        This used to be a list comprehension, which meant an exception
+        raised while dispatching ONE agent (an unknown-agent KeyError, a
+        persistence error, anything before run_task's own try/except took
+        over) aborted the whole sweep — every agent after the failing one
+        silently never ran, and the scheduler reported nothing amiss. A
+        failure in one agent is now recorded against that agent and the
+        sweep continues, which is the whole point of running a workforce
+        rather than a single job."""
+        results: list[AgentTask] = []
+        for agent in agents:
+            try:
+                results.append(self.assign_task(agent.id, describe(agent)))
+            except Exception as exc:
+                agent.last_error = str(exc)
+                self._log_event(
+                    agent.id, "task_failed",
+                    f"Could not dispatch a task to {agent.name}: {exc}",
+                )
+                try:
+                    _save_agent_state(agent)
+                except Exception:
+                    pass
         return results
 
     # ── internal ───────────────────────────────────────────

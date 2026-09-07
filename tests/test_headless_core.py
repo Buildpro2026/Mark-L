@@ -229,9 +229,15 @@ def test_background_worker_starts_independently_of_gemini_session():
         worker.start()
         try:
             names = {t.get_name() for t in worker._tasks}
+            # The morning CEO cycle is deliberately NOT in this set: the
+            # Render Cron Job owns the scheduled cycle, and running it here
+            # too produced a duplicate wake the two containers' separate
+            # ephemeral databases could not dedupe. See
+            # config.JARVIS_CEO_CYCLE_IN_WEB_SERVICE, and
+            # test_autonomous_wake_system.py for both ownership directions.
             assert names == {
                 "agent_scheduler", "background_monitor", "proactive_observer",
-                "objective_loop", "approval_notifier", "ceo_operating_cycle",
+                "objective_loop", "approval_notifier",
             }
             assert all(isinstance(t, asyncio.Task) for t in worker._tasks)
             assert all(not t.done() for t in worker._tasks)
