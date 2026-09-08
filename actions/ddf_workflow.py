@@ -25,6 +25,7 @@ Two rules that shape the whole file:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -38,6 +39,50 @@ BLOCKED = "BLOCKED"        # a real dependency is missing or failed
 DEFAULT_QUERIES = [
     "best deals today", "top rated tools", "discounted power tools",
 ]
+
+# FIND has two real strategies now, and they answer different questions.
+#
+#   amazon_bestsellers  reads Amazon's own published Best Sellers ranking
+#                       with the browser. Position on that page IS sales
+#                       rank, so this is the right strategy for "find the
+#                       top N selling products".
+#   rainforest          asks a product-data API for keyword matches
+#                       (actions/ddf_discovery.py). Relevance, not rank.
+#
+# Rainforest is unchanged and remains the fallback: the browser strategy
+# needs a browser, and a host without one — or an Amazon that returns a
+# CAPTCHA — must degrade to the API rather than fail the objective.
+STRATEGY_AMAZON = "amazon_bestsellers"
+STRATEGY_RAINFOREST = "rainforest"
+
+# Which objectives mean "read Amazon's ranking". This is the decomposition
+# the user must not have to do by hand: they state the business objective,
+# and JARVIS picks the strategy, opens the site and traverses it himself.
+_AMAZON_INTENT = re.compile(
+    r"(amazon|best[\s-]?sell|bestseller|top[\s-]?\d+\s+(?:selling|sell|product|item)"
+    r"|top\s+selling|highest[\s-]?selling)", re.I)
+
+# "Find the top 10 selling products" — the number in the objective is the
+# number the user wants, so it is read from the objective rather than fixed.
+_TOP_N = re.compile(r"top\s+(\d{1,3})\b", re.I)
+DEFAULT_TOP_N = 10
+
+
+def select_find_strategy(objective: str, strategy: str = "auto") -> str:
+    """The FIND strategy for this objective. An explicit strategy always
+    wins; "auto" reads the objective."""
+    choice = (strategy or "auto").strip().lower()
+    if choice in (STRATEGY_AMAZON, STRATEGY_RAINFOREST):
+        return choice
+    return STRATEGY_AMAZON if _AMAZON_INTENT.search(objective or "") else STRATEGY_RAINFOREST
+
+
+def requested_top_n(objective: str, default: int = DEFAULT_TOP_N) -> int:
+    match = _TOP_N.search(objective or "")
+    if not match:
+        return default
+    value = int(match.group(1))
+    return value if 1 <= value <= 100 else default
 
 
 class _Run:
@@ -71,15 +116,80 @@ class _Run:
         return None
 
 
-def _find(run: _Run, queries: Optional[list[str]]) -> list[dict[str, Any]]:
+def _find_amazon(run: _Run, top_n: int) -> list[dict[str, Any]]:
+    """FIND by reading Amazon's Best Sellers ranking with the browser.
+
+    Returns the catalogue rows for the products it saved, so the rest of the
+    pipeline works on the same records everything else does. An empty list
+    means this strategy did not produce candidates — the caller then falls
+    back to Rainforest, which is the point of having two."""
+    from actions import amazon_bestsellers, daily_deal_finders as ddf
+
+    try:
+        result = amazon_bestsellers.discover_top_sellers(limit=top_n)
+    except Exception as exc:
+        run.record("find", BLOCKED, tool="amazon_bestsellers.discover_top_sellers",
+                   args={"limit": top_n}, error=str(exc)[:300])
+        return []
+
+    detail = {
+        "state": result.get("state"),
+        "categories_discovered": result.get("categories_discovered"),
+        "categories_processed": result.get("categories_processed"),
+        "categories_failed": result.get("categories_failed"),
+        "selected": len(result.get("products") or []),
+        "log": result.get("log"),
+    }
+    if not result.get("ok"):
+        # ACCESS_BLOCKED / UNAVAILABLE / FAILED. Recorded with the exact
+        # reason: a scrape Amazon refused must never read as "found nothing".
+        run.record("find", BLOCKED, tool="amazon_bestsellers.discover_top_sellers",
+                   args={"limit": top_n}, result_count=0, detail=detail,
+                   error=str(result.get("detail") or result.get("state"))[:300])
+        return []
+
+    saved = result.get("discovered") or []
+    run.record("find", OK if saved else SKIPPED,
+               tool="amazon_bestsellers.discover_top_sellers",
+               args={"limit": top_n}, result_count=len(saved), detail=detail)
+
+    rows: list[dict[str, Any]] = []
+    for entry in saved:
+        try:
+            row = ddf.get_product(entry.get("id") or entry.get("product_id"))
+        except Exception:
+            row = None
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _find(run: _Run, queries: Optional[list[str]], objective: str = "",
+          strategy: str = "auto", top_n: int = DEFAULT_TOP_N) -> list[dict[str, Any]]:
     """FIND, with the fallback the objective implies.
 
-    Live discovery needs PRODUCT_DATA_API_KEY. When that is absent — or
-    returns nothing — the already-tracked catalogue is the configured
-    fallback, not an error: a deal worth posting may already be on file."""
+    Strategy order: the objective picks one (Amazon Best Sellers for a
+    "top N selling products" objective, Rainforest otherwise); if it yields
+    nothing, the other one is not silently substituted — Rainforest is the
+    declared fallback for the Amazon path, and the already-tracked catalogue
+    is the fallback for both. A deal worth posting may already be on file.
+
+    Live API discovery needs PRODUCT_DATA_API_KEY. When that is absent the
+    catalogue fallback carries the run, which is a legitimate result."""
     from actions import ddf_discovery, daily_deal_finders as ddf
 
     used = queries or DEFAULT_QUERIES
+    if select_find_strategy(objective, strategy) == STRATEGY_AMAZON:
+        amazon_rows = _find_amazon(run, top_n)
+        if amazon_rows:
+            run.record("find_fallback", SKIPPED,
+                       tool="daily_deal_finders.get_top_products",
+                       result_count=len(amazon_rows),
+                       detail="Amazon Best Sellers supplied the candidate set")
+            return amazon_rows
+        run.record("find_strategy_fallback", OK, tool="ddf_discovery.discover_new_products",
+                   detail="Amazon Best Sellers produced no candidates — falling back to the product-data API.")
+
     if ddf_discovery.is_configured():
         try:
             result = ddf_discovery.discover_new_products(queries=used)
@@ -259,20 +369,33 @@ def _report(run: _Run, product: Optional[dict[str, Any]], published: bool) -> st
 
 def run_objective(objective: str = "Find today's best deal and post it",
                   queries: Optional[list[str]] = None,
-                  approved: bool = False) -> dict[str, Any]:
+                  approved: bool = False,
+                  strategy: str = "auto",
+                  top_n: Optional[int] = None) -> dict[str, Any]:
     """The whole DDF objective, decomposed and executed here.
+
+    The decomposition includes choosing HOW to find, not just running a
+    fixed pipeline: "find the top 10 selling products on Amazon" routes
+    FIND through the browser and Amazon's own Best Sellers ranking, while
+    "find today's best deal" routes it through the product-data API. The
+    user states the objective; nobody has to tell JARVIS to open a site,
+    click a category, and then ask for the products.
 
     `approved` defaults to False and must stay that way for anything the
     model can invoke: it is the existing approval boundary, and a natural
     language request is not an approval."""
     run = _Run(objective)
+    chosen = select_find_strategy(objective, strategy)
+    wanted = requested_top_n(objective) if top_n is None else int(top_n)
     run.record("decompose", OK, detail={
         "plan": ["find", "evaluate", "verify+affiliate", "catalog",
                  "content", "publish", "log", "report"],
+        "find_strategy": chosen,
+        "top_n": wanted,
         "approved": approved,
     })
 
-    candidates = _find(run, queries)
+    candidates = _find(run, queries, objective=objective, strategy=chosen, top_n=wanted)
     product = _evaluate(run, candidates)
 
     published = False
@@ -288,6 +411,8 @@ def run_objective(objective: str = "Find today's best deal and post it",
     outcome = {
         "ok": True,
         "objective": objective,
+        "find_strategy": chosen,
+        "candidates": [{"id": c.get("id"), "name": c.get("name")} for c in candidates],
         "selected_product": ({"id": product.get("id"), "name": product.get("name")}
                              if product else None),
         "published": published,

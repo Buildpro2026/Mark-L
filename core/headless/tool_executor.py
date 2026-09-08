@@ -1191,6 +1191,9 @@ class ToolExecutor:
                 outcome = await loop.run_in_executor(
                     None, lambda: ddf_workflow.run_objective(objective=objective, queries=queries))
                 lines = [outcome["summary"]]
+                if outcome.get("find_strategy"):
+                    found = len(outcome.get("candidates") or [])
+                    lines.append(f"  find strategy: {outcome['find_strategy']} ({found} candidate(s))")
                 for step in outcome["steps"]:
                     lines.append(f"  - {step['step']}: {step['status']}"
                                  + (f" ({step['error']})" if step.get("error") else ""))

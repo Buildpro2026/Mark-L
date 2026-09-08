@@ -1150,3 +1150,89 @@ def _log(player, text: str):
     print(f"[Browser] {short}")
     if player:
         player.write_log(f"[browser] {short[:60]}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Structured automation surface
+# ══════════════════════════════════════════════════════════════════════════
+# _BrowserSession above is the CONVERSATIONAL driver: it launches headed, on
+# the user's real browser profile, and every method returns a human sentence
+# ("Opened: ...", "Clicked ..."). That is exactly right for "JARVIS, open my
+# email" and exactly wrong for reading structured data off a page — a
+# sentence cannot carry a product's ASIN, price and rank.
+#
+# automation_page() is the same framework (the same Playwright, the same
+# module, the same user-agent), exposed differently: it yields the raw Page
+# so a caller can pull real HTML out of it. It is deliberately NOT a second
+# browser stack, and it deliberately does not touch _BrowserSession — the
+# two run side by side without fighting over the real profile's lock file,
+# because this one uses its own throwaway profile directory.
+#
+# Headless is auto-detected with the module's existing
+# _is_headless_cloud_environment(): headed on a desktop where someone can
+# actually watch it work, headless on a server where nobody can.
+
+_AUTOMATION_PROFILE = ".jarvis_profiles/automation"
+
+
+def automation_available() -> tuple[bool, Optional[str]]:
+    """(usable, reason_if_not). Checked before a scrape claims it can run,
+    so an unavailable browser is reported as a missing dependency rather
+    than surfacing as an opaque exception mid-navigation."""
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        return False, "playwright is not installed"
+    return True, None
+
+
+class automation_page:
+    """Async context manager yielding a Playwright Page for structured
+    extraction.
+
+        async with automation_page() as page:
+            await page.goto(url)
+            html = await page.content()
+
+    Cleans up the context and the Playwright driver on the way out, on the
+    success path and the exception path alike — a leaked browser process on
+    a long-lived Render worker is a slow memory leak, not a cosmetic one."""
+
+    def __init__(self, headless: Optional[bool] = None, timeout_ms: int = 30_000):
+        self._headless = _is_headless_cloud_environment() if headless is None else headless
+        self._timeout_ms = timeout_ms
+        self._pw: Playwright | None = None
+        self._context: BrowserContext | None = None
+
+    async def __aenter__(self) -> Page:
+        self._pw = await async_playwright().start()
+        profile = str(Path.home() / _AUTOMATION_PROFILE)
+        Path(profile).mkdir(parents=True, exist_ok=True)
+        self._context = await self._pw.chromium.launch_persistent_context(
+            profile,
+            headless=self._headless,
+            user_agent=_user_agent(),
+            viewport={"width": 1440, "height": 900},
+            locale="en-US",
+            timeout=self._timeout_ms,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--disable-default-apps",
+                "--no-default-browser-check",
+            ],
+        )
+        self._context.set_default_timeout(self._timeout_ms)
+        pages = self._context.pages
+        return pages[0] if pages else await self._context.new_page()
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        for closer in (self._context, self._pw):
+            if closer is None:
+                continue
+            try:
+                await (closer.close() if closer is self._context else closer.stop())
+            except Exception:
+                pass
+        self._context = self._pw = None
+        return False

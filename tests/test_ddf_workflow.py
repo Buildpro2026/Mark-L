@@ -205,3 +205,141 @@ def test_a_logging_failure_does_not_break_the_run(monkeypatch):
     monkeypatch.setattr(mem, "record", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db gone")))
     out = wf.run_objective()
     assert out["ok"] is True and out["selected_product"]["id"] == "p-1"
+
+
+# ══ AMAZON BEST SELLERS AS A FIND STRATEGY ═══════════════════════════════
+# The objective "find the top 10 selling products on Amazon" is not a
+# keyword search, and must not be answered with one. These guard that the
+# workflow picks the browser strategy itself — the user states the business
+# objective and never has to say "open Amazon", "go to Best Sellers",
+# "click this category", "now get the products".
+
+AMAZON_ROW = {"id": "B0TOOL0001", "name": "Rotary Hammer XR", "price": 429.0,
+              "affiliate_url": "https://www.amazon.com/dp/B0TOOL0001",
+              "retailer": "amazon", "source": "amazon_bestsellers"}
+
+
+def _stub_amazon(monkeypatch, *, result=None, raises=None, rows=None):
+    from actions import amazon_bestsellers as ab, daily_deal_finders as ddf
+
+    calls: list[dict] = []
+
+    def _discover(**kwargs):
+        calls.append(kwargs)
+        if raises is not None:
+            raise raises
+        return result
+
+    monkeypatch.setattr(ab, "discover_top_sellers", _discover)
+    lookup = {r["id"]: r for r in (rows or [])}
+    monkeypatch.setattr(ddf, "get_product", lambda pid: lookup.get(pid))
+    return calls
+
+
+def _ok_result(n=10):
+    return {"ok": True, "state": "RAN", "provider": "amazon_bestsellers",
+            "discovered": [{"id": AMAZON_ROW["id"], "product_id": AMAZON_ROW["id"],
+                            "name": AMAZON_ROW["name"]}] * 1,
+            "products": [{"asin": AMAZON_ROW["id"]}] * n, "saved": 1,
+            "categories_discovered": 12, "categories_processed": 6,
+            "categories_failed": 0, "log": []}
+
+
+def test_a_top_selling_objective_routes_to_the_amazon_browser_strategy():
+    assert wf.select_find_strategy("Find the top 10 selling products on Amazon "
+                                   "for Daily Deal Finders") == wf.STRATEGY_AMAZON
+    assert wf.select_find_strategy("What are Amazon's best sellers today?") == wf.STRATEGY_AMAZON
+    assert wf.select_find_strategy("find the top 20 selling products") == wf.STRATEGY_AMAZON
+
+
+def test_an_ordinary_deal_objective_still_uses_the_product_data_api():
+    assert wf.select_find_strategy("Find today's best deal and post it") == wf.STRATEGY_RAINFOREST
+
+
+def test_an_explicit_strategy_overrides_what_the_objective_implies():
+    assert wf.select_find_strategy("Find today's best deal",
+                                   strategy="amazon_bestsellers") == wf.STRATEGY_AMAZON
+    assert wf.select_find_strategy("Amazon best sellers please",
+                                   strategy="rainforest") == wf.STRATEGY_RAINFOREST
+
+
+def test_the_requested_count_is_read_out_of_the_objective():
+    assert wf.requested_top_n("Find the top 10 selling products on Amazon") == 10
+    assert wf.requested_top_n("Find the top 25 selling products") == 25
+    assert wf.requested_top_n("Find a good deal") == wf.DEFAULT_TOP_N
+    # A nonsense count falls back rather than driving a 900-page traversal.
+    assert wf.requested_top_n("top 9999 products") == wf.DEFAULT_TOP_N
+
+
+def test_the_amazon_objective_runs_the_whole_pipeline_in_one_call(monkeypatch):
+    _stub(monkeypatch)
+    calls = _stub_amazon(monkeypatch, result=_ok_result(), rows=[AMAZON_ROW])
+
+    out = wf.run_objective("Find the top 10 selling products on Amazon for Daily Deal Finders")
+
+    assert out["find_strategy"] == wf.STRATEGY_AMAZON
+    assert calls == [{"limit": 10}], "the objective's own count was not passed through"
+    find = next(s for s in out["steps"] if s["step"] == "find")
+    assert find["status"] == wf.OK
+    assert find["tool"] == "amazon_bestsellers.discover_top_sellers"
+    assert find["detail"]["categories_discovered"] == 12
+    # The user is never told to decompose it themselves.
+    assert "smaller" not in out["summary"].lower()
+    assert "break" not in out["summary"].lower()
+    # And it reaches the existing evaluate/content stages unchanged.
+    steps = [s["step"] for s in out["steps"]]
+    for expected in ("evaluate", "affiliate_link", "catalog", "content", "publish_lifecycle"):
+        assert expected in steps
+
+
+def test_amazon_candidates_feed_the_existing_evaluation_workflow(monkeypatch):
+    _stub(monkeypatch)
+    _stub_amazon(monkeypatch, result=_ok_result(), rows=[AMAZON_ROW])
+    out = wf.run_objective("Find the top 10 selling products on Amazon")
+    assert out["selected_product"]["id"] == AMAZON_ROW["id"]
+    assert out["candidates"] == [{"id": AMAZON_ROW["id"], "name": AMAZON_ROW["name"]}]
+
+
+def test_the_catalogue_fallback_is_not_re_run_when_amazon_supplied_candidates(monkeypatch):
+    _stub(monkeypatch, tracked=[PRODUCT])
+    _stub_amazon(monkeypatch, result=_ok_result(), rows=[AMAZON_ROW])
+    out = wf.run_objective("Find the top 10 selling products on Amazon")
+    fallback = next(s for s in out["steps"] if s["step"] == "find_fallback")
+    assert fallback["status"] == wf.SKIPPED
+    assert "Amazon" in fallback["detail"]
+
+
+def test_an_amazon_access_block_is_reported_and_falls_back_to_the_api(monkeypatch):
+    _stub(monkeypatch, configured=True, discovered=2, tracked=[PRODUCT])
+    _stub_amazon(monkeypatch, result={
+        "ok": False, "state": "ACCESS_BLOCKED", "block_kind": "CAPTCHA",
+        "detail": "Amazon returned a CAPTCHA on the Best Sellers page. "
+                  "Discovery stopped — no attempt was made to bypass it.",
+        "products": [], "saved": 0, "log": []})
+
+    out = wf.run_objective("Find the top 10 selling products on Amazon")
+
+    find = next(s for s in out["steps"] if s["step"] == "find" and s["status"] == wf.BLOCKED)
+    assert "CAPTCHA" in find["error"]
+    assert "bypass" in find["error"].lower()
+    # Rainforest is still the declared fallback, so the objective survives.
+    assert any(s["step"] == "find_strategy_fallback" for s in out["steps"])
+    assert out["selected_product"] is not None
+
+
+def test_an_amazon_crash_is_recorded_as_blocked_not_swallowed(monkeypatch):
+    _stub(monkeypatch, tracked=[PRODUCT])
+    _stub_amazon(monkeypatch, raises=RuntimeError("browser died"))
+    out = wf.run_objective("Find the top 10 selling products on Amazon")
+    find = next(s for s in out["steps"] if s["step"] == "find")
+    assert find["status"] == wf.BLOCKED
+    assert "browser died" in find["error"]
+
+
+def test_the_existing_rainforest_path_is_untouched_by_the_new_strategy(monkeypatch):
+    _stub(monkeypatch, configured=True, discovered=3, tracked=[PRODUCT])
+    out = wf.run_objective("Find today's best deal and post it")
+    assert out["find_strategy"] == wf.STRATEGY_RAINFOREST
+    find = next(s for s in out["steps"] if s["step"] == "find")
+    assert find["tool"] == "ddf_discovery.discover_new_products"
+    assert find["result_count"] == 3

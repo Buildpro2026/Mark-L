@@ -844,7 +844,15 @@ TOOL_DECLARATIONS = [
         "name": "daily_deal_finders",
         "description": (
             "USE action='run_workflow' FOR ANY WHOLE-OBJECTIVE REQUEST like "
-            "'find today's best deal and post it'. It runs the complete "
+            "'find today's best deal and post it' or 'find the top 10 "
+            "selling products on Amazon for Daily Deal Finders'. Pass the "
+            "user's objective through verbatim in 'objective' — the tool "
+            "picks the discovery strategy from it, opening Amazon and "
+            "traversing its Best Sellers categories with the browser for a "
+            "top-selling objective, and using the product-data API for a "
+            "keyword one. Never ask the user to open a site, pick a "
+            "category, or fetch the products; that decomposition is the "
+            "tool's job. It runs the complete "
             "pipeline in ONE call — find, evaluate, verify, affiliate link, "
             "catalog, social content, publish gate, log — and returns a "
             "factual report of what actually happened. Never ask the user to "
