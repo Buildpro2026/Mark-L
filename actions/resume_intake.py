@@ -306,6 +306,18 @@ def process_upload(data: bytes, filename: str, uploads_dir: Path,
         )
         result["candidate_id"] = candidate_id
         result["candidate_action"] = action
+
+        # MATCH. buildpro_matching already scores and explains matches;
+        # nothing connected intake to it, so a candidate who uploaded a
+        # resume sat there unmatched. The count is whatever the matcher
+        # actually returned — never a claim of matches that do not exist.
+        try:
+            from actions import cross_system
+            matched = cross_system.match_new_candidate(candidate_id)
+            result["matches"] = matched.get("matches", [])
+            result["match_count"] = matched.get("match_count", 0)
+        except Exception:
+            logger.debug("could not match the new candidate", exc_info=True)
     except Exception as exc:
         # The file IS stored, so this is not a failed upload — it is a
         # stored resume whose record could not be written. Saying "upload

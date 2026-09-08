@@ -8,6 +8,8 @@ an existing recommendation) produced it.
 """
 from __future__ import annotations
 
+import logging
+
 import time
 from typing import Any
 
@@ -19,6 +21,8 @@ from actions import buildpro_intelligence
 from actions import calendar_integration
 from actions import executive_brief
 from actions import google_auth
+
+logger = logging.getLogger("jarvis.priorities_engine")
 
 # How stale an agent's last activity can be and still count as "active"
 # for the executive view — matches the agent scheduler's own 5-minute
@@ -89,6 +93,20 @@ def get_todays_priorities(limit: int = 8, min_severity: int = 1) -> list[dict[st
         if rec.startswith("No urgent"):
             continue
         items.append({"kind": "recommendation", "severity": 1, "title": rec, "source": "buildpro"})
+
+    # CROSS-SYSTEM SIGNALS (2026-09-08). get_calendar_snapshot() below has
+    # computed real scheduling conflicts since it was written and nothing
+    # in this function ever called it, so a double-booking at 09:00 could
+    # not become a priority at 08:00. Overdue Google Tasks were in the
+    # same position. cross_system collects both, each source isolated, and
+    # emits them in the shape this list already uses.
+    try:
+        from actions import cross_system
+        items.extend(cross_system.collect_signals()["items"])
+    except Exception:
+        # A failure here must never cost the priorities that were already
+        # gathered — fewer signals is a degraded list, not a broken one.
+        logger.debug("cross-system signals unavailable", exc_info=True)
 
     items = [i for i in items if i["severity"] >= min_severity]
     items.sort(key=lambda i: (-i["severity"], -i.get("waited_hours", 0)))

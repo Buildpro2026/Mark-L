@@ -2062,12 +2062,34 @@ class DashboardServer:
                 direction="inbound", kind="sms", sid=form.get("MessageSid"),
                 from_number=form.get("From"), to_number=form.get("To"), body=form.get("Body"),
             )
+            # THE APPROVAL ROUND TRIP (2026-09-08). The inbound reply was
+            # logged and broadcast and then went nowhere, so the approval
+            # cycle stopped at "SMS sent" and Lee's "yes" did nothing.
+            # cross_system routes it through the orchestrator's existing
+            # approve/reject — it cannot decide anything itself and cannot
+            # bypass the gate. An ambiguous reply, or one that does not say
+            # which of several approvals it answers, changes nothing.
+            decision = {"state": "NOT_APPLIED"}
+            try:
+                from actions import cross_system
+                decision = await asyncio.to_thread(
+                    cross_system.apply_sms_decision,
+                    form.get("Body") or "", form.get("From") or "")
+            except Exception as exc:
+                decision = {"ok": False, "state": "FAILED", "detail": str(exc)[:200]}
+
+            note = f"New SMS from {form.get('From', 'unknown')}: {(form.get('Body') or '')[:80]}"
+            if decision.get("applied"):
+                note += f" — {decision['state'].lower()} task {decision.get('task_id')}"
+            elif decision.get("state") in ("AMBIGUOUS", "UNCLEAR"):
+                note += f" — not applied: {decision.get('detail')}"
+
             asyncio.create_task(self._broadcast_3d({
-                "type": "notification",
-                "text": f"New SMS from {form.get('From', 'unknown')}: {(form.get('Body') or '')[:80]}",
-                "ts": time.time(),
+                "type": "notification", "text": note, "ts": time.time(),
             }))
-            return JSONResponse({"ok": True})
+            # The reply is always acknowledged to Twilio; whether it
+            # changed an approval is reported separately and honestly.
+            return JSONResponse({"ok": True, "approval": decision})
 
         @app.post("/twilio/status")
         async def twilio_status(req: Request):
