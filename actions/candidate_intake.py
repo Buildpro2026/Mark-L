@@ -32,7 +32,7 @@ from typing import Any
 
 from actions import agreement_signing
 from actions import buildpro_data
-from actions import gmail_integration
+from actions import email_forwarding, gmail_integration
 from actions import hubspot_integration
 
 _SENDER_RE = re.compile(r'^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$')
@@ -99,9 +99,29 @@ def process_candidate_email(message: dict[str, Any], auto_send_welcome: bool = F
     degrades gracefully rather than blocking the rest of the chain."""
     from core.headless.config import PUBLIC_BASE_URL
 
-    name, email = _parse_sender(message.get("sender") or "")
+    # FORWARDING (2026-09-08). info@buildprorecruiters.com forwards into
+    # Gmail, so message["sender"] can be the FORWARDING address rather
+    # than the person who wrote the message. Taking it at face value is
+    # how a candidate's application became "Lee is the candidate" and got
+    # a welcome email drafted back to Lee. email_forwarding.resolve_sender
+    # returns the ORIGINAL author, and deliberately blanks `sender` when
+    # the author cannot be recovered — an undetermined forward must stop
+    # here rather than fall back to the envelope, which IS the bug.
+    resolved = email_forwarding.resolve_sender(message)
+    forwarding = resolved["forwarding"]
+    name, email = _parse_sender(resolved.get("sender") or "")
     if not email:
-        return {"ok": False, "detail": "Could not determine a sender email address from this message."}
+        return {"ok": False, "state": "UNKNOWN_NEEDS_REVIEW",
+                "detail": (forwarding["reason"] or
+                           "Could not determine a sender email address from this message."),
+                "forwarded": forwarding["is_forwarded"],
+                "forwarder_email": forwarding["forwarder_email"],
+                "needs_review": True}
+    if email_forwarding.is_own_address(email):
+        return {"ok": False, "state": "UNKNOWN_NEEDS_REVIEW",
+                "detail": (f"The only recoverable sender was {email}, which is our own "
+                           f"address — this is the forwarding hop, not a correspondent."),
+                "forwarded": forwarding["is_forwarded"], "needs_review": True}
 
     # 1. Resume attachment (best-effort — optional, never blocks the chain).
     resume_bytes: bytes | None = None

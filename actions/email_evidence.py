@@ -293,6 +293,11 @@ def _relationship_evidence(message: dict[str, Any]) -> dict[str, list[str]]:
 
 def classify(message: dict[str, Any], known_contact: bool = False,
              thread_is_ours: bool = False) -> dict[str, Any]:
+    return _classify_inner(message, known_contact, thread_is_ours)
+
+
+def _classify_inner(message: dict[str, Any], known_contact: bool = False,
+                    thread_is_ours: bool = False) -> dict[str, Any]:
     """Full contextual classification.
 
     known_contact: this sender already exists in HubSpot/candidate records.
@@ -304,10 +309,32 @@ def classify(message: dict[str, Any], known_contact: bool = False,
 
     Absence of a HubSpot record is never used as evidence FOR anything;
     an unknown sender is unknown, not a prospect."""
+    # FORWARDING FIRST (2026-09-08). info@buildprorecruiters.com forwards
+    # into Gmail, so the envelope sender can be our own alias rather than
+    # the author. Classifying the envelope makes every forwarded candidate
+    # look like mail from Lee. resolve_sender() puts the ORIGINAL author in
+    # `sender`, and blanks it when the author cannot be recovered — which
+    # lands below as UNKNOWN_NEEDS_REVIEW rather than a confident wrong
+    # answer about the wrong person.
+    from actions import email_forwarding
+
+    forwarding = email_forwarding.analyse(message)
+    if forwarding["is_forwarded"] and not forwarding["determined"]:
+        return _result(UNKNOWN_NEEDS_REVIEW, 0.0,
+                       ["message arrived by forwarding"],
+                       [forwarding["reason"]],
+                       {"kind": SENDER_UNKNOWN, "domain": "", "evidence": []},
+                       {"candidate": [], "client": []}) | {"forwarding": forwarding}
+    message = email_forwarding.resolve_sender(message) if forwarding["is_forwarded"] else message
+
     identity = sender_identity(message)
     text = _text_of(message)
     evidence: list[str] = list(identity["evidence"])
     against: list[str] = []
+    if forwarding["is_forwarded"]:
+        evidence.append(
+            f"forwarded by {forwarding['forwarder_email']}; classified on the "
+            f"original sender {forwarding['original_sender_email']}")
     relationship = _relationship_evidence(message)
 
     # ── Machine and bulk senders resolve on identity alone ───────────────
@@ -408,6 +435,7 @@ def _result(category: str, confidence: float, evidence: list[str],
         "sender_domain": identity["domain"],
         "downgraded_from": downgraded_from,
         "relationship_evidence": relationship,
+        "forwarding": None,   # replaced by classify() when relevant
     }
 
 

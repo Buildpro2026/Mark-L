@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from actions import email_evidence, gmail_integration
+from actions import email_evidence, email_forwarding, gmail_integration
 from actions import business_intelligence as biz_intel
 
 # Only these two classifications represent a real recruiting-relevant
@@ -121,8 +121,20 @@ def scan_inbox(
                     "confidence": verdict["confidence"],
                 })
                 continue
-            sender = (message.get("sender") or "").strip()
-            reply_to = sender.split("<")[-1].rstrip(">") if "<" in sender else sender
+            # The reply goes to the ORIGINAL author, never to the
+            # forwarding envelope. safe_reply_address() refuses an
+            # undetermined forward and refuses our own addresses, so a
+            # message relayed through info@buildprorecruiters.com can
+            # never produce a draft addressed back to Lee.
+            reply_to, why = email_forwarding.safe_reply_address(message)
+            if not reply_to:
+                drafts_blocked.append({
+                    "message_id": message.get("id"),
+                    "sender": message.get("sender"),
+                    "reason": why, "category": verdict["category"],
+                    "confidence": verdict["confidence"],
+                })
+                continue
             if reply_to:
                 subject = message.get("subject") or ""
                 reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
