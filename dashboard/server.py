@@ -614,26 +614,44 @@ class DashboardServer:
             "ts": time.time(),
         }
 
-    async def _broadcast_3d(self, payload: dict) -> None:
+    async def _broadcast_3d(self, payload: dict) -> int:
         """Push to every connected /3d/ws client — used for navigation
         pushes and (see dashboard_bridge.py / twilio webhooks) toast
-        notifications. Best-effort: a dead socket is dropped, never
-        allowed to break the broadcast for everyone else."""
+        notifications. Best-effort per socket: a dead one is dropped, never
+        allowed to break the broadcast for everyone else.
+
+        Returns the number of clients that ACTUALLY received the payload.
+        That return value is the fix for JARVIS saying "Opened BuildPro"
+        when nothing opened: apply_navigation() happily mutates
+        server-side state whether or not a screen is listening, and this
+        function used to swallow the difference. Zero here means the
+        navigation reached no window, and the caller must say so rather
+        than reporting success."""
         dead = set()
+        delivered = 0
         for ws in self._3d_ws_clients:
             try:
                 await ws.send_json(payload)
+                delivered += 1
             except Exception:
                 dead.add(ws)
         self._3d_ws_clients -= dead
+        return delivered
 
-    async def broadcast_nav(self, payload: dict) -> None:
+    async def broadcast_nav(self, payload: dict) -> int:
         """Public alias for _broadcast_3d — the name main.py's
         navigate_command_center tool and _broadcast_orb_state call,
         matching what a live desktop/voice session (this dashboard's
         actual caller) conceptually does: push a navigation or state
-        event to the spatial scene."""
-        await self._broadcast_3d(payload)
+        event to the spatial scene. Returns the delivered-client count."""
+        return await self._broadcast_3d(payload)
+
+    @property
+    def command_center_viewers(self) -> int:
+        """How many Command Center windows are actually connected right
+        now. A navigation command with no viewer is a no-op on screen, and
+        callers use this to avoid claiming otherwise."""
+        return len(self._3d_ws_clients)
 
     # ── /3d spatial command center — the real chat bridge ──────────
     # Root-cause fix (Phase 2, priority 1): dashboard_bridge.py drains

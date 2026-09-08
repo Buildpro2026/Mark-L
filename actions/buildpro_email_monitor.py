@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from actions import gmail_integration
+from actions import email_evidence, gmail_integration
 from actions import business_intelligence as biz_intel
 
 # Only these two classifications represent a real recruiting-relevant
@@ -79,11 +79,12 @@ def scan_inbox(
     if not r["ok"]:
         return {
             "ok": False, "state": r.get("state"), "detail": r.get("detail"),
-            "scanned": 0, "relevant": [], "drafts_created": [],
+            "scanned": 0, "relevant": [], "drafts_created": [], "drafts_blocked": [],
         }
 
     relevant: list[dict[str, Any]] = []
     drafts_created: list[dict[str, Any]] = []
+    drafts_blocked: list[dict[str, Any]] = []
 
     for message in r["messages"]:
         classification = gmail_integration.classify_message(message)
@@ -101,6 +102,25 @@ def scan_inbox(
         )
 
         if draft_replies:
+            # SAFETY GATE (2026-09-08). classify_message() alone was never
+            # a sufficient basis for emailing a human being: it reports
+            # what a message is about, and a false positive here becomes a
+            # real draft addressed to a real stranger under Lee's name.
+            # email_evidence.can_act_autonomously() requires an actual
+            # person as sender, affirmative relationship evidence, and a
+            # confidence floor. Blocked drafts are recorded, not silently
+            # dropped, so a wrongly-withheld reply is still visible.
+            verdict = email_evidence.classify(message)
+            allowed, reason = email_evidence.can_act_autonomously(verdict)
+            if not allowed:
+                drafts_blocked.append({
+                    "message_id": message.get("id"),
+                    "sender": message.get("sender"),
+                    "reason": reason,
+                    "category": verdict["category"],
+                    "confidence": verdict["confidence"],
+                })
+                continue
             sender = (message.get("sender") or "").strip()
             reply_to = sender.split("<")[-1].rstrip(">") if "<" in sender else sender
             if reply_to:
@@ -117,9 +137,12 @@ def scan_inbox(
         "scanned": len(r["messages"]),
         "relevant": relevant,
         "drafts_created": drafts_created,
+        "drafts_blocked": drafts_blocked,
         "summary": (
             f"Scanned {len(r['messages'])} message(s); {len(relevant)} relevant "
             f"(candidate/client) message(s) found and logged to business intelligence"
-            + (f"; {len(drafts_created)} acknowledgment draft(s) created." if draft_replies else ".")
+            + (f"; {len(drafts_created)} acknowledgment draft(s) created"
+               + (f", {len(drafts_blocked)} withheld for lack of evidence." if drafts_blocked else ".")
+               if draft_replies else ".")
         ),
     }

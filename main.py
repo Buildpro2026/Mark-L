@@ -57,6 +57,8 @@ from actions.background_monitor import (
 )
 from core.headless.context import ToolContext
 from core.headless.tool_executor import ToolExecutor, UnknownToolError
+from core.conversation import ConversationManager, SOURCE_BACKGROUND
+from core import conversation as _cv
 from actions import nucleus_hierarchy
 # Same module objects core/headless/tool_executor.py imports (Python
 # caches modules in sys.modules, so this is the identical object, not a
@@ -155,6 +157,15 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._audio_generation     = None    # conversation generation the in-flight audio belongs to
+        # Single owner of the response channel (core/conversation.py). The
+        # bare _is_speaking flag below stays because the mic callback reads
+        # it on a hot path, but it is now a mirror of the manager's state,
+        # not the source of truth. The manager is what makes cancellation
+        # atomic and stale audio unplayable.
+        self._conversation = ConversationManager(
+            on_state_change=lambda old_state, new_state: self._broadcast_orb_state(
+                new_state.lower()))
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
@@ -214,14 +225,21 @@ class JarvisLive:
         )
 
     def set_speaking(self, value: bool):
+        """Still the hot-path flag the mic callback reads, but the
+        conversation manager is now the authority — so the UI can never
+        show a state the turn machinery disagrees with."""
         with self._speaking_lock:
             self._is_speaking = value
         if value:
+            self._conversation.set_state(_cv.SPEAKING, reason="audio playback")
             self.ui.set_state("SPEAKING")
             self._broadcast_orb_state("speaking")
         elif not self.ui.muted:
+            self._conversation.to_listening("playback finished")
             self.ui.set_state("LISTENING")
             self._broadcast_orb_state("listening")
+        else:
+            self._conversation.to_idle("muted")
 
     def _broadcast_orb_state(self, state: str) -> None:
         """Cosmetic push to the /3d spatial scene reflecting JARVIS's
@@ -241,7 +259,14 @@ class JarvisLive:
             pass
 
     def interrupt(self) -> None:
-        """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
+        """Stop JARVIS mid-speech: drain queued audio and open mic immediately.
+
+        barge_in() bumps the generation BEFORE the queue is drained, so a
+        chunk arriving during the drain is already stale and cannot be
+        replayed. The old code set a bare bool that the ending response's
+        own turn_complete then cleared — which is how an interrupted answer
+        could pick itself back up mid-sentence."""
+        self._conversation.barge_in("user interrupted JARVIS")
         self._interrupted = True
         q = self.audio_in_queue
         if q:
@@ -382,6 +407,21 @@ class JarvisLive:
                     target = (args.get("target") or "").strip()
                     if not action:
                         action = "back" if target.lower() == "go back" else ("open" if target else "status")
+                    # Every branch below reports what the navigation
+                    # ACTUALLY did. apply_navigation() mutates server-side
+                    # state whether or not a Command Center window is open,
+                    # and broadcast_nav() used to return nothing — so with
+                    # no window connected JARVIS still said "Opened
+                    # BuildPro" while nothing moved on any screen. It now
+                    # returns a delivered-client count, and zero is
+                    # reported as the no-op it is.
+                    def _navigated(nav, delivered, phrase):
+                        if delivered:
+                            return f"{phrase} in the command center."
+                        return (f"I set the command center to {nav['name']}, but no "
+                                f"Command Center window is open to show it — "
+                                f"open the command center and it will be there.")
+
                     if action == "open":
                         node = nucleus_hierarchy.find_node_by_name(target) if target else None
                         if node is None:
@@ -391,16 +431,16 @@ class JarvisLive:
                             )
                         else:
                             nav = self._dashboard.apply_navigation("open", node["id"])
-                            await self._dashboard.broadcast_nav(nav)
-                            result = f"Opened {nav['name']} in the command center."
+                            delivered = await self._dashboard.broadcast_nav(nav)
+                            result = _navigated(nav, delivered, f"Opened {nav['name']}")
                     elif action == "back":
                         nav = self._dashboard.apply_navigation("back", "")
-                        await self._dashboard.broadcast_nav(nav)
-                        result = f"Went back to {nav['name']} in the command center."
+                        delivered = await self._dashboard.broadcast_nav(nav)
+                        result = _navigated(nav, delivered, f"Went back to {nav['name']}")
                     elif action == "home":
                         nav = self._dashboard.apply_navigation("home", "")
-                        await self._dashboard.broadcast_nav(nav)
-                        result = "Back at the command center home."
+                        delivered = await self._dashboard.broadcast_nav(nav)
+                        result = _navigated(nav, delivered, "Back at the command center home")
                     else:
                         nav = self._dashboard.apply_navigation("status", "")
                         result = f"You're currently looking at {nav['name']} in the command center."
@@ -478,14 +518,24 @@ class JarvisLive:
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
+        self._audio_generation = None
 
         try:
             while True:
                 async for response in self.session.receive():
 
                     if response.data:
-                        if self._interrupted:
-                            pass  # discard: interrupted
+                        # Latch the generation this response belongs to on
+                        # its first chunk. After a barge-in the generation
+                        # has moved on, so every remaining chunk of the old
+                        # response fails this test and is dropped — even
+                        # after turn_complete clears _interrupted, which is
+                        # precisely when the old answer used to resume.
+                        if self._audio_generation is None:
+                            self._audio_generation = self._conversation.generation
+                        if self._interrupted or not self._conversation.is_current(
+                                self._audio_generation):
+                            pass  # discard: interrupted, or belongs to a superseded turn
                         else:
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
@@ -511,6 +561,7 @@ class JarvisLive:
                                 self._last_user_speech = time.monotonic()
 
                         if sc.turn_complete:
+                            self._audio_generation = None
                             if self._turn_done_event:
                                 self._turn_done_event.set()
 
@@ -807,10 +858,16 @@ class JarvisLive:
             alert = await asyncio.to_thread(self._sys_monitor.check)
             if not alert or not self.session:
                 continue
-            # Don't interrupt an active conversation
-            with self._speaking_lock:
-                speaking = self._is_speaking
-            if speaking or (time.monotonic() - self._last_user_speech) < 10:
+            # Claim the channel instead of checking whether it looks free.
+            # The old shape read _is_speaking, released the lock, and only
+            # then sent — so a user could start talking in that gap and get
+            # a system alert dropped into the middle of their sentence.
+            # try_claim() decides and takes ownership under one lock.
+            if (time.monotonic() - self._last_user_speech) < 10:
+                continue
+            turn = self._conversation.try_claim(SOURCE_BACKGROUND, label="system alert")
+            if turn is None:
+                self._conversation.defer(alert, kind="system_alert")
                 continue
             try:
                 await self.session.send_client_content(
@@ -819,6 +876,8 @@ class JarvisLive:
                 )
             except Exception as e:
                 print(f"[Monitor] ⚠️ Could not send alert: {e}")
+            finally:
+                self._conversation.complete(turn)
 
     # ── Background monitor ──────────────────────────────────────────────────────
 
@@ -827,11 +886,14 @@ class JarvisLive:
         await asyncio.sleep(300)          # wait 5 min after startup before first check
         while True:
             if self.session:
-                # Don't interrupt if user spoke recently or JARVIS is mid-sentence
-                with self._speaking_lock:
-                    speaking = self._is_speaking
+                # Same fix as the system monitor: claim, don't peek. Anything
+                # refused is deferred and replayed when the user is free —
+                # a topic alert is worth saying late, never worth saying over.
                 recent_speech = (time.monotonic() - self._last_user_speech) < 30
-                if not speaking and not recent_speech:
+                monitor_turn = (None if recent_speech else
+                                self._conversation.try_claim(SOURCE_BACKGROUND,
+                                                             label="topic monitor"))
+                if monitor_turn is not None:
                     try:
                         alerts = await asyncio.to_thread(monitor_check_all)
                         memory = load_memory()
@@ -851,6 +913,8 @@ class JarvisLive:
                             await asyncio.sleep(6)   # gap between consecutive alerts
                     except Exception as e:
                         print(f"[Monitor] ⚠️ Background check error: {e}")
+                    finally:
+                        self._conversation.complete(monitor_turn)
             await asyncio.sleep(1800)     # check every 30 minutes
 
     # ── Proactive mode ──────────────────────────────────────────────────────────
@@ -867,12 +931,16 @@ class JarvisLive:
             if not self.session:
                 continue
 
-            with self._speaking_lock:
-                speaking = self._is_speaking
-            if speaking:
+            if not self._proactive.should_trigger(self._last_user_speech):
                 continue
 
-            if not self._proactive.should_trigger(self._last_user_speech):
+            # Proactive speech is the lowest-priority writer of the three,
+            # so it is the one that most needed to stop barging in. Refused
+            # means skipped, not deferred: a check-in whose whole premise is
+            # "the user has gone quiet" is void the moment they have not.
+            proactive_turn = self._conversation.try_claim(SOURCE_BACKGROUND,
+                                                          label="proactive check-in")
+            if proactive_turn is None:
                 continue
 
             self._proactive.mark_triggered()
@@ -893,6 +961,8 @@ class JarvisLive:
                 self.ui.write_log("SYS: Proactive check-in.")
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
+            finally:
+                self._conversation.complete(proactive_turn)
 
     # ── Phone audio relay ────────────────────────────────────────────────────────
 

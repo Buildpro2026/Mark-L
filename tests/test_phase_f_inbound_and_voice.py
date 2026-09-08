@@ -19,19 +19,22 @@ from core.headless import config
 
 # ══ VOICE CONFIGURATION ══════════════════════════════════════════════════
 
-def test_the_free_gemini_voice_is_preferred_over_the_paid_providers():
-    """The robotic voice was the browser's own speechSynthesis fallback:
-    the chain offered only Cartesia and ElevenLabs, neither is configured,
-    so it honestly returned configured=false. Gemini must come first."""
-    import inspect
+def test_the_free_gemini_voice_is_the_only_provider_for_the_ui():
+    """Originally: Gemini merely had to come FIRST in a chain that still
+    ended at Cartesia/ElevenLabs. That chain is gone (2026-09-08, Lee's
+    explicit instruction) because a transient Gemini failure would silently
+    move JARVIS's voice onto a metered provider — billing is not an
+    acceptable outcome for a rate limit. The property is now stronger than
+    ordering: there is no paid provider in this path at all.
+
+    The phone line is unaffected; actions/cartesia_calls.py still owns it."""
+    import ast, inspect, textwrap
     from core.headless import ui
-    src = inspect.getsource(ui.synthesize_reply_audio)
-    order = re.search(r"providers = \[p for p in \(([^)]+)\)", src)
-    assert order, "provider chain not found"
-    names = [n.strip() for n in order.group(1).split(",")]
-    assert names[0] == "gemini_tts", f"Gemini must be first, got {names}"
-    # The paid providers stay: the phone line is a Cartesia agent.
-    assert "cartesia_tts" in names and "elevenlabs_tts" in names
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ui.synthesize_reply_audio)))
+    imported = {alias.name for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) for alias in node.names}
+    assert imported == {"gemini_tts"}, f"the UI voice path imports {imported}"
 
 
 def test_the_selected_voice_is_the_deep_male_voice_the_original_jarvis_used():

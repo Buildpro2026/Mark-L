@@ -283,31 +283,40 @@ def synthesize_reply_audio(text: str) -> dict:
     wearing the same name. ElevenLabs stays as a real fallback rather than
     being ripped out — if the Cartesia key is missing or its API is down,
     the caller keeps a human-sounding voice."""
-    from actions import gemini_tts, cartesia_tts, elevenlabs_tts
+    from actions import gemini_tts
 
-    # Gemini first, and deliberately: it is free, it is already configured
-    # via GEMINI_API_KEY, and it is the voice ("Charon") the desktop app has
-    # always used — so the browser now sounds like the same assistant
-    # instead of falling through to the OS speechSynthesis voice, which is
-    # what "JARVIS sounds robotic" actually was. Cartesia and ElevenLabs
-    # remain in the chain untouched: the phone line is a Cartesia agent, and
-    # removing them would leave that surface without a voice.
-    providers = [p for p in (gemini_tts, cartesia_tts, elevenlabs_tts) if p.is_configured()]
-    if not providers:
-        return {"configured": False}
+    # GEMINI ONLY (2026-09-08, Lee's explicit instruction). Gemini is free,
+    # already configured via GEMINI_API_KEY, and "Charon" is the voice the
+    # desktop app has always used.
+    #
+    # Cartesia and ElevenLabs were previously chained after it as
+    # fallbacks. That chain was the problem, not a safety net: a transient
+    # Gemini failure — a rate limit, a network blip — silently moved
+    # JARVIS's voice onto a metered paid provider with no signal that it
+    # had happened. Billing is not an acceptable failure mode for a
+    # hiccup. If Gemini cannot speak, this now says so plainly and the
+    # caller falls back to the browser's own speechSynthesis, which costs
+    # nothing.
+    #
+    # This is the /ui browser voice only. actions/cartesia_calls.py still
+    # owns the phone line, which is a Cartesia agent by design and is not
+    # touched here.
+    if not gemini_tts.is_configured():
+        return {"configured": False,
+                "detail": "GEMINI_API_KEY is not set — Gemini is the only permitted "
+                          "voice provider, so there is no synthesized audio."}
 
-    last_detail = None
-    for provider in providers:
-        result = provider.synthesize_speech(text)
-        if result.get("ok"):
-            return {
-                "configured": True, "ok": True,
-                "audio_base64": result["audio_base64"],
-                "mime_type": result["mime_type"],
-                "provider": provider.__name__.rsplit(".", 1)[-1].replace("_tts", ""),
-            }
-        last_detail = result.get("detail")
-    return {"configured": True, "ok": False, "detail": last_detail}
+    result = gemini_tts.synthesize_speech(text)
+    if result.get("ok"):
+        return {
+            "configured": True, "ok": True,
+            "audio_base64": result["audio_base64"],
+            "mime_type": result["mime_type"],
+            "provider": "gemini",
+        }
+    return {"configured": True, "ok": False, "provider": "gemini",
+            "detail": result.get("detail"),
+            "paid_fallback_suppressed": True}
 
 
 @api.post("/tts/speak")

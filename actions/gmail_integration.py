@@ -291,16 +291,41 @@ def classify_message(message: dict[str, Any]) -> str:
     body = (message.get("body") or "")[:2000].lower()
     haystack = f"{subject} {sender} {snippet} {body}"
 
-    is_automated_sender = any(k in sender for k in ("no-reply", "noreply", "do-not-reply"))
-    if not is_automated_sender:
+    # PRECEDENCE GATE (2026-09-08). The keyword rules below decide what an
+    # email is ABOUT. They were also, wrongly, allowed to decide WHO sent
+    # it — so a GitHub notification titled "Re: [Mark-L] Add candidate
+    # matching for construction project managers" matched the
+    # client_inquiry rule on the bare word "project", and
+    # buildpro_client_intake drafted a business reply to
+    # notifications@github.com. The old guard here only caught
+    # "no-reply"/"noreply"/"do-not-reply", none of which GitHub's address
+    # contains.
+    #
+    # Excluding github.com would have fixed GitHub and nothing else. The
+    # real defect is precedence: content cannot establish a relationship
+    # that the sender contradicts. actions/email_evidence.py decides
+    # sender identity from structure (List-Unsubscribe and friends, role
+    # local-parts, generated-body markers) rather than from a list of
+    # company names, so this holds for platforms nobody has met yet.
+    from actions import email_evidence
+
+    identity = email_evidence.sender_identity(message)
+    sender_is_machine = identity["kind"] in (email_evidence.SENDER_MACHINE,
+                                             email_evidence.SENDER_BULK)
+
+    if not sender_is_machine:
         attachments = message.get("attachments") or []
         if any(is_likely_resume(a.get("filename") or "") for a in attachments):
             return "candidate_reply"
 
     for label, keywords in _CLASSIFICATION_RULES:
         if any(keyword in haystack for keyword in keywords):
+            # A machine sender is never a candidate or a client, whatever
+            # vocabulary its body happens to contain.
+            if sender_is_machine and label in ("candidate_reply", "client_inquiry"):
+                return "notification"
             return label
-    return "uncategorized"
+    return "notification" if sender_is_machine else "uncategorized"
 
 
 def create_draft(to: str, subject: str, body: str) -> dict[str, Any]:

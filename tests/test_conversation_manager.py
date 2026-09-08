@@ -1,0 +1,271 @@
+"""Conversation turn ownership.
+
+Each test here corresponds to a way JARVIS actually misbehaved: talking
+over itself, changing topic mid-sentence when a monitor fired, resuming a
+response the user had already interrupted, and going permanently deaf
+after an exception left it stuck in SPEAKING.
+"""
+import threading
+import time
+
+import pytest
+
+from core import conversation as cv
+
+
+def _mgr(**kw):
+    return cv.ConversationManager(**kw)
+
+
+# ══ ONE OWNER ════════════════════════════════════════════════════════════
+
+def test_only_one_turn_owns_the_channel_at_a_time():
+    m = _mgr()
+    m.claim(cv.SOURCE_USER)
+    assert m.state == cv.USER_TURN
+    with pytest.raises(cv.TurnRejected):
+        m.claim(cv.SOURCE_BACKGROUND)
+
+
+def test_a_background_turn_is_refused_while_jarvis_is_speaking():
+    m = _mgr()
+    m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    assert m.try_claim(cv.SOURCE_BACKGROUND) is None
+
+
+def test_a_background_turn_is_allowed_when_the_channel_is_free():
+    m = _mgr()
+    m.to_listening()
+    assert m.try_claim(cv.SOURCE_BACKGROUND) is not None
+
+
+def test_the_user_always_preempts_background_work():
+    m = _mgr()
+    background = m.claim(cv.SOURCE_BACKGROUND, preempt=True)
+    user = m.claim(cv.SOURCE_USER)
+    assert user.generation > background.generation
+    assert not background.is_current
+    assert user.is_current
+
+
+def test_concurrent_claims_produce_exactly_one_winner_per_generation():
+    # The check-then-act race, run for real: many threads claiming at once
+    # must never be handed the same generation.
+    m = _mgr()
+    m.to_listening()
+    generations, lock = [], threading.Lock()
+
+    def _worker():
+        try:
+            turn = m.claim(cv.SOURCE_USER)
+        except cv.TurnRejected:
+            return
+        with lock:
+            generations.append(turn.generation)
+
+    threads = [threading.Thread(target=_worker) for _ in range(40)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert len(generations) == len(set(generations)), "two turns shared a generation"
+
+
+# ══ STALE WORK CANNOT SPEAK ══════════════════════════════════════════════
+
+def test_a_cancelled_turn_is_immediately_stale():
+    m = _mgr()
+    turn = m.claim(cv.SOURCE_USER)
+    assert turn.is_current
+    m.cancel("user interrupted")
+    assert not turn.is_current
+
+
+def test_a_stale_turn_cannot_complete_over_a_newer_one():
+    m = _mgr()
+    old = m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    new = m.barge_in()
+    m.set_state(cv.SPEAKING, "answering the new command")
+
+    m.complete(old)                       # the old response finally finishes
+    assert m.state == cv.SPEAKING, "a stale turn dragged the manager out of the live turn"
+    assert new.is_current
+
+
+def test_a_stale_turn_cannot_fail_the_newer_one():
+    m = _mgr()
+    old = m.claim(cv.SOURCE_USER)
+    m.barge_in()
+    m.set_state(cv.SPEAKING)
+    m.fail(old, reason="old error arriving late")
+    assert m.state == cv.SPEAKING
+
+
+def test_audio_from_a_previous_response_is_rejected_after_barge_in():
+    # The exact resume bug: audio produced for generation N arriving after
+    # the user has already started turn N+2.
+    m = _mgr()
+    speaking = m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    late_audio_generation = speaking.generation
+
+    m.barge_in()
+    assert not m.is_current(late_audio_generation)
+
+
+# ══ BARGE-IN ═════════════════════════════════════════════════════════════
+
+def test_barge_in_cancels_and_opens_a_new_user_turn_atomically():
+    m = _mgr()
+    old = m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    new = m.barge_in()
+
+    assert m.state == cv.USER_TURN
+    assert new.generation > old.generation
+    assert not old.is_current and new.is_current
+    # The old generation is skipped entirely — nothing can claim it in the gap.
+    assert new.generation - old.generation >= 2
+
+
+def test_barge_in_records_the_interrupting_state_in_order():
+    m = _mgr()
+    m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    m.barge_in()
+    states = [h["to"] for h in m.history]
+    assert cv.INTERRUPTING in states
+    assert states.index(cv.INTERRUPTING) < len(states) - 1
+    assert states[-1] == cv.USER_TURN
+
+
+def test_the_old_response_can_never_resume_after_barge_in():
+    m = _mgr()
+    old = m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    m.barge_in()
+    m.set_state(cv.SPEAKING, "new answer")
+    # Even after the new turn finishes, the old generation stays dead.
+    m.complete()
+    assert not old.is_current
+
+
+# ══ NOTHING GETS STUCK ═══════════════════════════════════════════════════
+
+def test_an_exception_inside_a_turn_does_not_leave_jarvis_speaking():
+    m = _mgr()
+    with pytest.raises(RuntimeError):
+        with m.turn(cv.SOURCE_USER):
+            m.set_state(cv.SPEAKING)
+            raise RuntimeError("tool blew up mid-response")
+    assert m.state not in (cv.SPEAKING, cv.USER_TURN, cv.THINKING, cv.TOOL_EXECUTING)
+
+
+def test_a_normal_turn_releases_the_channel():
+    m = _mgr()
+    with m.turn(cv.SOURCE_USER):
+        m.set_state(cv.SPEAKING)
+    assert m.state not in cv._BUSY_STATES
+    assert m.try_claim(cv.SOURCE_BACKGROUND) is not None
+
+
+def test_the_channel_is_reusable_after_a_failed_turn():
+    m = _mgr()
+    with pytest.raises(ValueError):
+        with m.turn(cv.SOURCE_USER):
+            raise ValueError("boom")
+    assert m.claim(cv.SOURCE_USER) is not None
+
+
+# ══ BACKGROUND WORK DEFERS, IT DOES NOT HIJACK ═══════════════════════════
+
+def test_a_refused_background_alert_is_deferred_not_dropped():
+    m = _mgr()
+    m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    if m.try_claim(cv.SOURCE_BACKGROUND) is None:
+        m.defer("CPU is at 96%")
+    assert m.deferred_count == 1
+    assert m.take_deferred() == ["CPU is at 96%"]
+
+
+def test_deferred_alerts_replay_in_order_once_the_user_is_free():
+    m = _mgr()
+    m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    for alert in ("first", "second", "third"):
+        if m.try_claim(cv.SOURCE_BACKGROUND) is None:
+            m.defer(alert)
+    m.complete()
+    m.to_listening()
+    assert m.take_deferred() == ["first", "second", "third"]
+    assert m.deferred_count == 0
+
+
+def test_a_stale_deferred_alert_is_discarded_rather_than_said_late():
+    m = _mgr(defer_ttl=0.01)
+    m.defer("this was urgent 20 minutes ago")
+    time.sleep(0.02)
+    assert m.take_deferred() == []
+
+
+def test_a_startup_briefing_defers_rather_than_colliding_with_speech():
+    m = _mgr()
+    m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    briefing = m.try_claim(cv.SOURCE_BACKGROUND, label="startup briefing")
+    assert briefing is None
+    m.defer("good morning briefing", kind="briefing")
+    m.complete()
+    m.to_listening()
+    assert m.try_claim(cv.SOURCE_BACKGROUND) is not None
+    assert m.take_deferred() == ["good morning briefing"]
+
+
+# ══ DUPLICATE SESSIONS AND LISTENERS ═════════════════════════════════════
+
+def test_a_second_live_session_is_refused_while_one_is_active():
+    m = _mgr()
+    assert m.register_session("session-1") is True
+    assert m.register_session("session-2") is False
+    assert m.active_session == "session-1"
+
+
+def test_a_session_can_be_replaced_after_it_is_released():
+    m = _mgr()
+    m.register_session("session-1")
+    m.release_session("session-1")
+    assert m.register_session("session-2") is True
+
+
+def test_releasing_a_stale_session_does_not_evict_the_live_one():
+    m = _mgr()
+    m.register_session("session-1")
+    m.release_session("session-0")          # a late cleanup from an old loop
+    assert m.active_session == "session-1"
+
+
+# ══ STATE REPORTING ══════════════════════════════════════════════════════
+
+def test_state_changes_are_reported_to_the_ui():
+    seen = []
+    m = _mgr(on_state_change=lambda old, new: seen.append((old, new)))
+    m.claim(cv.SOURCE_USER)
+    m.set_state(cv.SPEAKING)
+    m.complete()
+    assert (cv.IDLE, cv.USER_TURN) in seen
+    assert (cv.USER_TURN, cv.SPEAKING) in seen
+
+
+def test_a_broken_ui_callback_cannot_break_the_conversation():
+    def _explode(old, new):
+        raise RuntimeError("UI thread died")
+    m = _mgr(on_state_change=_explode)
+    m.claim(cv.SOURCE_USER)          # must not raise
+    assert m.state == cv.USER_TURN
+
+
+def test_an_unknown_state_is_rejected_rather_than_silently_stored():
+    m = _mgr()
+    with pytest.raises(ValueError):
+        m.set_state("VIBING")
