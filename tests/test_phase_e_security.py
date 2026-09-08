@@ -40,6 +40,16 @@ PUBLIC_PATHS = {
     "/ui/session",      # reports whether a session exists
     "/agreement/{token}",        # capability URL held by an external signer
     "/agreement/{token}/sign",
+    # A candidate uploading a resume has no JARVIS account and no
+    # capability token — there is nothing to authenticate them with, the
+    # same situation /agreement/{token} solves with a link. Because it is
+    # genuinely open, the protections are in the handler rather than in
+    # front of it: content-based type validation (the extension is a
+    # claim, the magic bytes are evidence), a hard size ceiling, a
+    # derived filename that cannot escape the upload directory, and a
+    # per-IP rate limit so an open write endpoint cannot fill the disk.
+    # It reads nothing and returns nothing about any other candidate.
+    "/api/public/resume",
 }
 
 

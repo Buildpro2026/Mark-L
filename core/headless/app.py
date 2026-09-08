@@ -19,7 +19,7 @@ import time
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from core.headless import agreement_routes
+from core.headless import agreement_routes, resume_routes
 from core.headless import config
 from core.headless import dashboard_bridge
 from core.headless import orchestrator_api
@@ -148,6 +148,7 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
     app.include_router(ui.router)
     app.include_router(ui.api)
     app.include_router(agreement_routes.router)
+    app.include_router(resume_routes.router)
 
     # The orb-first executive surface is the primary browser entry point.
     # It is independent of the optional legacy dashboard.
