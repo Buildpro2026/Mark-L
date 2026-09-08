@@ -646,6 +646,53 @@ class DashboardServer:
         event to the spatial scene. Returns the delivered-client count."""
         return await self._broadcast_3d(payload)
 
+    async def execute_destination(self, destination: dict | None) -> int:
+        """Perform one resolved destination and report how many Command
+        Center windows actually received it.
+
+        This is the single executor. Voice reaches it through main.py's
+        navigate_command_center tool and a click reaches it through the
+        /3d websocket, so both go through the same state mutation and the
+        same broadcast — there is no second navigation path to drift.
+
+        Zero means nothing moved on any screen. Callers must say so
+        rather than reporting a successful navigation, which is exactly
+        the "JARVIS said it opened but nothing opened" bug."""
+        from actions import workspace_navigation as wn
+
+        if destination is None:
+            return 0
+
+        action = destination.get("action")
+        if action == wn.ACTION_OPEN_NUCLEUS:
+            nav = self.apply_navigation("open", destination["destination_id"])
+        elif action == wn.ACTION_BACK:
+            nav = self.apply_navigation("back", "")
+        elif action == wn.ACTION_HOME:
+            nav = self.apply_navigation("home", "")
+        elif action == wn.ACTION_CLOSE:
+            # Closing the workspace returns the scene to whatever nucleus
+            # is already current; it is not a navigation of its own.
+            nav = self.apply_navigation("status", "")
+        else:
+            # A record or an external page: the scene state does not
+            # change, the client opens it alongside JARVIS.
+            nav = self.apply_navigation("status", "")
+
+        payload = dict(nav)
+        payload.update({
+            "type": "navigate",
+            "destination_type": destination.get("destination_type"),
+            "destination_id": destination.get("destination_id"),
+            "destination_route": destination.get("destination_route"),
+            "external_url": destination.get("external_url"),
+            "nav_action": action,
+            "embeddable": destination.get("embeddable"),
+            "label": destination.get("label"),
+            "detail": destination.get("detail"),
+        })
+        return await self.broadcast_nav(payload)
+
     @property
     def command_center_viewers(self) -> int:
         """How many Command Center windows are actually connected right

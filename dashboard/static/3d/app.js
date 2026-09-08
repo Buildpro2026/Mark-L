@@ -113,7 +113,19 @@ const STATE_COLORS = {
   error:       0xff4d4d,
   offline:     0x555b66,
   interrupted: 0xff6b7a,
+  // The conversation manager (core/conversation.py) broadcasts its own
+  // state names. Without these the orb fell through to "idle" for every
+  // one of them — so the UI showed idle while JARVIS was mid-sentence,
+  // which is the decorative-state problem: the indicator was not lying
+  // on purpose, it simply did not know these words.
+  user_turn:      0x4fd6ff,   // the user has the floor — same as listening
+  tool_executing: 0xffb454,   // same as executing
+  cancelled:      0xff6b7a,   // same as interrupted
+  completed:      0x4b6b7c,   // back to idle
 };
+// States that must show immediately and must not be held back by the
+// interrupted-state hold below: a cancellation has to be visible at once.
+const STATE_IMMEDIATE = new Set(["cancelled", "interrupted", "user_turn", "listening"]);
 const STATE_PULSE_SPEED = {
   idle: 0.6, listening: 1.2, thinking: 2.4, executing: 2.8, speaking: 2.0,
   waiting_for_approval: 1.5, success: 1.0, warning: 1.4, error: 3.2, offline: 0.15,
@@ -1087,7 +1099,11 @@ let _transientRevertTimer = null;
 
 function setOrbState(state, opts = {}) {
   const now = performance.now();
-  if (currentOrbState === "interrupted" && now < stateHoldUntil && !opts.force) return;
+  // An interrupt briefly holds the indicator so it is actually seen, but a
+  // newer interrupt or a fresh user turn must never be suppressed by it —
+  // that is how the indicator used to get stuck after a cancellation.
+  if (currentOrbState === "interrupted" && now < stateHoldUntil
+      && !opts.force && !STATE_IMMEDIATE.has(state)) return;
   currentOrbState = STATE_COLORS[state] ? state : "idle";
   if (currentOrbState === "interrupted") stateHoldUntil = now + 550;
   const color = STATE_COLORS[currentOrbState];
@@ -1811,6 +1827,81 @@ function postNavigate(navAction, nucleusId) {
   }).catch(() => { /* mouse nav must keep working even if the backend call fails */ });
 }
 
+
+// ── Workspace: a page opened BESIDE JARVIS, never instead of him ────────
+// The 3D scene keeps its single canvas and its single voice session; the
+// stage yields width and JARVIS stays visible and listening. Nothing here
+// creates a second JARVIS or a second audio path.
+const workspaceEl = document.getElementById("workspace");
+const wsFrameEl   = document.getElementById("wsFrame");
+const wsTitleEl   = document.getElementById("wsTitle");
+const wsNoteEl    = document.getElementById("wsNote");
+const shellEl     = document.querySelector(".shell");
+let _wsProbeTimer = null;
+
+function openWorkspace(msg) {
+  const url = msg.external_url || msg.destination_route || "";
+  if (!url) return;
+  wsTitleEl.textContent = msg.label || url;
+  workspaceEl.classList.add("is-open");
+  shellEl.classList.add("workspace-open");
+
+  const cannotEmbed = msg.embeddable === false || msg.nav_action === "open_external_tab";
+  if (cannotEmbed) {
+    // The site refuses framing. JARVIS still EXECUTES the navigation —
+    // window.open is a real action, not a URL handed over to be clicked —
+    // and the panel says plainly that the page is in its own tab rather
+    // than showing an empty frame and implying it was embedded.
+    workspaceEl.classList.add("cannot-embed");
+    wsFrameEl.removeAttribute("src");
+    wsNoteEl.textContent = msg.detail
+      || `${msg.label || url} does not allow being embedded, so it opened in its own tab. JARVIS is still listening.`;
+    window.open(url, "_blank", "noopener");
+    onResize();
+    return;
+  }
+
+  workspaceEl.classList.remove("cannot-embed");
+  wsNoteEl.textContent = "";
+  wsFrameEl.src = url;
+
+  // Some hosts refuse framing without advertising it. If the frame never
+  // signals a load, fall back to a real tab rather than leaving a blank
+  // panel that looks like JARVIS failed.
+  clearTimeout(_wsProbeTimer);
+  let loaded = false;
+  wsFrameEl.onload = () => { loaded = true; };
+  _wsProbeTimer = setTimeout(() => {
+    if (loaded) return;
+    workspaceEl.classList.add("cannot-embed");
+    wsNoteEl.textContent =
+      `${msg.label || url} did not load in the workspace — it opened in its own tab instead.`;
+    window.open(url, "_blank", "noopener");
+  }, 4000);
+  onResize();
+}
+
+function closeWorkspace() {
+  clearTimeout(_wsProbeTimer);
+  workspaceEl.classList.remove("is-open", "cannot-embed");
+  shellEl.classList.remove("workspace-open");
+  wsFrameEl.removeAttribute("src");
+  wsTitleEl.textContent = "";
+  onResize();
+}
+
+document.getElementById("wsClose").addEventListener("click", closeWorkspace);
+document.getElementById("wsBack").addEventListener("click", () => {
+  closeWorkspace();
+  goBack();
+  postNavigate("back", "");
+});
+document.getElementById("wsHome").addEventListener("click", () => {
+  closeWorkspace();
+  goHome();
+  postNavigate("home", "");
+});
+
 function _redirectToLogin() {
   location.replace("/login?next=" + encodeURIComponent(location.pathname));
 }
@@ -1849,9 +1940,20 @@ function connectWS() {
     let msg;
     try { msg = JSON.parse(evt.data); } catch { return; }
     if (msg.type === "navigate") {
-      if (msg.action === "home") goHome({ fromServer: true });
-      else if (msg.action === "back") goBack({ fromServer: true });
-      else if (msg.nucleus_id && msg.nucleus_id !== currentNucleusId) {
+      // nav_action is the resolved destination from
+      // actions/workspace_navigation.py. Voice and clicks both arrive
+      // here, so there is one handler rather than two that can drift.
+      const navAction = msg.nav_action || msg.action;
+      if (navAction === "open_workspace" || navAction === "open_external_tab") {
+        openWorkspace(msg);
+      } else if (navAction === "close") {
+        closeWorkspace();
+      } else if (navAction === "home" || msg.action === "home") {
+        closeWorkspace(); goHome({ fromServer: true });
+      } else if (navAction === "back" || msg.action === "back") {
+        if (workspaceEl.classList.contains("is-open")) closeWorkspace();
+        else goBack({ fromServer: true });
+      } else if (msg.nucleus_id && msg.nucleus_id !== currentNucleusId) {
         focusNucleus(msg.nucleus_id, { fromServer: true });
       }
     } else if (msg.type === "jarvis_state") {

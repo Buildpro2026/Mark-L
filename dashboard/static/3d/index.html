@@ -528,6 +528,44 @@
     /* Nothing may push the document sideways at any width — a 3D stage
        that scrolls horizontally is a broken stage, not a wide one. */
     html, body { max-width: 100%; overflow-x: hidden; }
+
+    /* ── Workspace: an external/record page opened BESIDE JARVIS ────────
+       The scene is never replaced and never duplicated — the stage keeps
+       its single canvas and simply yields width, so JARVIS stays visible
+       and voice-active while a page is open. That is the whole point:
+       "move JARVIS to the side", not "swap JARVIS out for a browser". */
+    .shell.workspace-open .spatial-stage { width: 38%; min-width: 260px; }
+    .workspace {
+      position: fixed; top: var(--topbar-h); right: 0; bottom: 0;
+      width: 62%; display: none; flex-direction: column;
+      background: #070b10; border-left: 1px solid rgba(120,180,255,.18);
+      z-index: 40;
+    }
+    .shell.workspace-open .workspace { display: flex; }
+    .workspace-bar {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      border-bottom: 1px solid rgba(120,180,255,.15); flex-shrink: 0;
+    }
+    .workspace-bar button {
+      background: rgba(90,150,220,.14); color: #cfe4ff;
+      border: 1px solid rgba(120,180,255,.28); border-radius: 7px;
+      padding: 5px 11px; font-size: 12px; cursor: pointer;
+    }
+    .workspace-bar button:hover { background: rgba(90,150,220,.26); }
+    .workspace-title {
+      flex: 1; min-width: 0; font-size: 12px; color: #8fb4d8;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .workspace-frame { flex: 1; border: 0; width: 100%; background: #0a0f16; }
+    .workspace-note {
+      display: none; padding: 18px; font-size: 13px; color: #9fc0e0; line-height: 1.6;
+    }
+    .workspace.cannot-embed .workspace-frame { display: none; }
+    .workspace.cannot-embed .workspace-note { display: block; }
+    @media (max-width: 900px) {
+      .shell.workspace-open .spatial-stage { width: 100%; }
+      .workspace { width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -583,6 +621,19 @@
       </div>
     </nav>
 
+
+    <section class="workspace" id="workspace" aria-label="Workspace">
+      <div class="workspace-bar">
+        <button type="button" id="wsBack" title="Back">&larr; Back</button>
+        <button type="button" id="wsHome" title="Command Center home">Home</button>
+        <span class="workspace-title" id="wsTitle"></span>
+        <button type="button" id="wsClose" title="Close workspace">Close</button>
+      </div>
+      <iframe class="workspace-frame" id="wsFrame" title="Workspace content"
+              referrerpolicy="no-referrer"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+      <div class="workspace-note" id="wsNote"></div>
+    </section>
     <div class="spatial-stage" id="stage">
       <canvas id="three-canvas"></canvas>
       <div class="no-webgl" id="no-webgl">

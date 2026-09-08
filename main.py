@@ -59,6 +59,7 @@ from core.headless.context import ToolContext
 from core.headless.tool_executor import ToolExecutor, UnknownToolError
 from core.conversation import ConversationManager, SOURCE_BACKGROUND
 from core import conversation as _cv
+from actions import workspace_navigation
 from actions import nucleus_hierarchy
 # Same module objects core/headless/tool_executor.py imports (Python
 # caches modules in sys.modules, so this is the identical object, not a
@@ -415,35 +416,21 @@ class JarvisLive:
                     # BuildPro" while nothing moved on any screen. It now
                     # returns a delivered-client count, and zero is
                     # reported as the no-op it is.
-                    def _navigated(nav, delivered, phrase):
-                        if delivered:
-                            return f"{phrase} in the command center."
-                        return (f"I set the command center to {nav['name']}, but no "
-                                f"Command Center window is open to show it — "
-                                f"open the command center and it will be there.")
-
-                    if action == "open":
-                        node = nucleus_hierarchy.find_node_by_name(target) if target else None
-                        if node is None:
-                            result = (
-                                f"I don't see a '{target}' area in the command center — "
-                                f"try a business or module name like BuildPro or Email."
-                            )
-                        else:
-                            nav = self._dashboard.apply_navigation("open", node["id"])
-                            delivered = await self._dashboard.broadcast_nav(nav)
-                            result = _navigated(nav, delivered, f"Opened {nav['name']}")
-                    elif action == "back":
-                        nav = self._dashboard.apply_navigation("back", "")
-                        delivered = await self._dashboard.broadcast_nav(nav)
-                        result = _navigated(nav, delivered, f"Went back to {nav['name']}")
-                    elif action == "home":
-                        nav = self._dashboard.apply_navigation("home", "")
-                        delivered = await self._dashboard.broadcast_nav(nav)
-                        result = _navigated(nav, delivered, "Back at the command center home")
-                    else:
+                    # Voice and clicks now resolve through the SAME
+                    # resolver (actions/workspace_navigation.py) and the
+                    # same apply_navigation() mutator, so the two can no
+                    # longer disagree about what "open BuildPro" means.
+                    # The resolver also handles external pages, which used
+                    # to fall out of the system entirely and get read
+                    # aloud as a URL for Lee to click himself.
+                    if action == "status":
                         nav = self._dashboard.apply_navigation("status", "")
                         result = f"You're currently looking at {nav['name']} in the command center."
+                    else:
+                        destination = workspace_navigation.resolve(
+                            target, action=action, target=target)
+                        delivered = await self._dashboard.execute_destination(destination)
+                        result = workspace_navigation.describe(destination, delivered)
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
