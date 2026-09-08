@@ -60,6 +60,7 @@ from actions import jarvis_brain
 from actions import operating_memory
 from actions import business_state
 from actions import ceo_report
+from actions import ceo_decision
 from actions import ddf_discovery
 from actions import executive_brief
 from actions import priorities_engine
@@ -157,7 +158,25 @@ def _gather() -> dict[str, Any]:
 
 
 def _prioritize() -> list[dict[str, Any]]:
-    return priorities_engine.get_todays_priorities(limit=20, min_severity=1)
+    """PRIORITIZE — real ranking, not a fixed severity tier.
+
+    priorities_engine still produces the signals; replacing it would be a
+    second source of the same facts. What changed is what orders them:
+    get_todays_priorities() sorted by a fixed tier (risk=4, approval=3,
+    stale=2, recommendation=1), so revenue, deadlines, dependencies and —
+    most importantly — prior failures never entered the ordering, and an
+    item that had failed four times ranked exactly where it did the first
+    time. ceo_decision.plan() retrieves the relevant memory for each item
+    and reranks on it, attaching the reasoning and the disposition.
+
+    Falls back to the raw list if the decision layer fails: an unranked
+    priority list is worse than a ranked one and far better than none."""
+    raw = priorities_engine.get_todays_priorities(limit=20, min_severity=1)
+    try:
+        return ceo_decision.plan(raw, limit=20)
+    except Exception:
+        logger.exception("decision layer failed; using unranked priorities")
+        return raw
 
 
 def _decide_and_execute() -> dict[str, Any]:
@@ -209,6 +228,22 @@ def _verify_and_followup(execution: dict[str, Any]) -> list[dict[str, Any]]:
             external_system="agent_orchestrator", follow_up_required=not ok, follow_up_reason=reason,
         )
         records.append(rec)
+
+        # LEARN. The verification above establishes what actually happened;
+        # this is what makes the next cycle any wiser for it.
+        # record_outcome() drives operating_memory.failure_streak(), which
+        # ceo_decision.score_item() reads to demote a repeatedly-failing
+        # source and decide() reads to escalate one. Without this write the
+        # loop verifies honestly and then forgets, which is why an agent
+        # could fail every morning and rank identically every morning.
+        try:
+            ceo_decision.record_outcome(
+                {"source": task.agent_id, "title": f"agent {task.agent_id}",
+                 "kind": "agent_task", "business": "general"},
+                ok=ok, detail=reason or f"task {task.id} completed", verified=ok)
+        except Exception:
+            logger.debug("could not record the outcome for task %s", task.id, exc_info=True)
+
         if not ok:
             try:
                 biz_intel.add_entry(

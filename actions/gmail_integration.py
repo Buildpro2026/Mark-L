@@ -389,3 +389,149 @@ def send_email(to: str, subject: str, body: str, approved: bool = False) -> dict
         return {"ok": False, "state": "NOT_AUTHORIZED", "detail": str(exc)}
     except Exception as exc:
         return {"ok": False, "state": "ERROR", "detail": str(exc)}
+
+# ── Labels and mailbox filing (2026-09-08, BuildPro resume pipeline) ─────
+# A Gmail label is not a folder on disk: it is an object with an id, and a
+# message is "in" it only because that id appears in the message's
+# labelIds. So filing a resume under "Candidate Resumes" means resolving
+# (or creating) the label, then attaching its id — there is no path to
+# write to.
+#
+# SCOPES. actions/google_auth.py currently requests gmail.readonly,
+# gmail.compose, calendar.events and tasks. Creating a label needs
+# gmail.labels (or gmail.modify) and inserting a message needs
+# gmail.insert. Those are deliberately NOT appended to SCOPES here:
+# loading an existing token against a widened SCOPES list makes the
+# refresh fail with invalid_scope and takes Gmail down entirely until
+# someone re-authorises interactively. That failure has already happened
+# once on this project. Instead the calls are attempted and a refusal is
+# reported precisely, naming the scope, so re-authorisation is a decision
+# rather than an outage.
+RESUME_LABEL = "Candidate Resumes"
+LABEL_SCOPE = "https://www.googleapis.com/auth/gmail.labels"
+INSERT_SCOPE = "https://www.googleapis.com/auth/gmail.insert"
+
+
+def _scope_failure(detail: str, scope: str) -> dict[str, Any] | None:
+    """A scope refusal, classified from what Google actually said.
+
+    Kept separate from the exception type on purpose: _service() raises
+    RuntimeError for an auth problem while the API client raises its own
+    error class, and an earlier version caught RuntimeError first — so a
+    missing-scope failure surfaced as a bare NOT_AUTHORIZED and named
+    nothing Lee could act on."""
+    lowered = (detail or "").lower()
+    if "insufficient" in lowered or "scope" in lowered or "403" in lowered:
+        return {"ok": False, "state": "INSUFFICIENT_SCOPE", "detail": detail,
+                "required_scope": scope,
+                "remedy": (f"Gmail refused this for lack of scope. Grant {scope} "
+                           f"and re-authorise Google access once.")}
+    return None
+
+
+def ensure_label(name: str = RESUME_LABEL) -> dict[str, Any]:
+    """The id of a Gmail label, creating it if it does not exist.
+
+    Idempotent: an existing label is reused, never duplicated. Gmail
+    treats label names case-sensitively but rejects a near-duplicate, so
+    the lookup is case-insensitive to match what a person means."""
+    try:
+        service = _service()
+        existing = service.users().labels().list(userId="me").execute()
+        wanted = (name or "").strip().lower()
+        for label in existing.get("labels", []):
+            if str(label.get("name", "")).strip().lower() == wanted:
+                return {"ok": True, "label_id": label["id"], "name": label["name"],
+                        "created": False}
+        created = service.users().labels().create(userId="me", body={
+            "name": name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        }).execute()
+        return {"ok": True, "label_id": created["id"], "name": created.get("name", name),
+                "created": True}
+    except Exception as exc:
+        return (_scope_failure(str(exc), LABEL_SCOPE)
+                or {"ok": False, "state": "NOT_AUTHORIZED"
+                    if isinstance(exc, RuntimeError) else "ERROR", "detail": str(exc)})
+
+
+def _attachment_message(to: str, subject: str, body: str,
+                        filename: str, data: bytes, mime_type: str) -> str:
+    """A base64url RFC-822 message carrying one attachment."""
+    import base64 as _b64
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.base import MIMEBase
+    from email.mime.text import MIMEText as _MIMEText
+    from email import encoders
+
+    outer = MIMEMultipart()
+    outer["to"] = to
+    outer["subject"] = subject
+    outer.attach(_MIMEText(body))
+
+    main, _, sub = (mime_type or "application/octet-stream").partition("/")
+    part = MIMEBase(main or "application", sub or "octet-stream")
+    part.set_payload(data)
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", "attachment", filename=filename)
+    outer.attach(part)
+    return _b64.urlsafe_b64encode(outer.as_bytes()).decode()
+
+
+def file_resume_in_mailbox(filename: str, data: bytes, mime_type: str,
+                           candidate_email: str = "", candidate_name: str = "",
+                           to: str = "buildprorecruiters@gmail.com",
+                           label_name: str = RESUME_LABEL) -> dict[str, Any]:
+    """Put one resume into the mailbox, labelled.
+
+    messages.insert rather than send: the destination IS the authenticated
+    mailbox, so this files a message that is already there rather than
+    transmitting mail out of the system. Nothing leaves, which is why this
+    does not need — and does not touch — the send approval gate in
+    send_email().
+
+    Returns ok=True only when Gmail confirmed the insert with a message
+    id. Every failure names what actually went wrong, including the exact
+    scope to grant when that is the cause, because "resume delivery
+    failed" with no reason is not something Lee can act on."""
+    label = ensure_label(label_name)
+    label_ids = ["INBOX", "UNREAD"]
+    if label.get("ok"):
+        label_ids.append(label["label_id"])
+
+    who = candidate_name or candidate_email or "a candidate"
+    subject = f"Resume — {who}"
+    body_lines = [f"Resume submitted through the BuildPro site by {who}."]
+    if candidate_email:
+        body_lines.append(f"Email: {candidate_email}")
+    body_lines.append(f"File: {filename}")
+
+    try:
+        service = _service()
+        raw = _attachment_message(to, subject, "\n".join(body_lines),
+                                  filename, data, mime_type)
+        inserted = service.users().messages().insert(
+            userId="me", body={"raw": raw, "labelIds": label_ids},
+            internalDateSource="dateHeader").execute()
+    except Exception as exc:
+        scoped = _scope_failure(str(exc), INSERT_SCOPE)
+        if scoped:
+            return {**scoped, "label": label}
+        return {"ok": False, "label": label, "detail": str(exc),
+                "state": "NOT_AUTHORIZED" if isinstance(exc, RuntimeError) else "ERROR"}
+
+    message_id = inserted.get("id")
+    if not message_id:
+        return {"ok": False, "state": "ERROR", "label": label,
+                "detail": "Gmail accepted the request but returned no message id."}
+    return {
+        "ok": True, "state": "FILED", "message_id": message_id,
+        "thread_id": inserted.get("threadId"),
+        "label": label.get("name") if label.get("ok") else None,
+        "labelled": bool(label.get("ok")),
+        "permalink": build_message_url(inserted.get("threadId"), message_id),
+        "detail": (f"Filed under {label.get('name')}." if label.get("ok") else
+                   "Filed in the mailbox, but the label could not be applied: "
+                   + str(label.get("detail") or label.get("state"))),
+    }

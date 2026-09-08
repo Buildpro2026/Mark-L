@@ -190,9 +190,40 @@ def store_resume(data: bytes, filename: str, uploads_dir: Path) -> Path:
     return path
 
 
+_MIME_BY_KIND = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "doc": "application/msword",
+    "rtf": "application/rtf",
+    "txt": "text/plain",
+}
+
+
+def deliver_to_mailbox(data: bytes, filename: str, kind: str,
+                       candidate_email: str = "", candidate_name: str = "",
+                       stored_name: str = "") -> dict[str, Any]:
+    """File the resume in buildprorecruiters@gmail.com under the
+    "Candidate Resumes" label.
+
+    Separate from storage on purpose: the bytes are already safe on disk
+    by the time this runs, so a Gmail failure is a delivery problem, not a
+    lost resume. It is reported as exactly that rather than turning the
+    whole upload into a failure the candidate would respond to by
+    uploading again."""
+    from actions import gmail_integration
+    try:
+        return gmail_integration.file_resume_in_mailbox(
+            filename=stored_name or filename, data=data,
+            mime_type=_MIME_BY_KIND.get(kind, "application/octet-stream"),
+            candidate_email=candidate_email, candidate_name=candidate_name)
+    except Exception as exc:
+        logger.exception("resume delivery to the mailbox raised")
+        return {"ok": False, "state": "ERROR", "detail": str(exc)[:300]}
+
+
 def process_upload(data: bytes, filename: str, uploads_dir: Path,
                    submitted_email: str = "", submitted_name: str = "",
-                   create_record: bool = True) -> dict[str, Any]:
+                   create_record: bool = True, deliver: bool = True) -> dict[str, Any]:
     """Validate, store, parse, and record one uploaded resume.
 
     Returns exactly what happened. A caller rendering this must show
@@ -233,6 +264,25 @@ def process_upload(data: bytes, filename: str, uploads_dir: Path,
         "detail": ("Resume received." if text else
                    "Resume received. No text could be read from it — a person will review it."),
     }
+
+    # DELIVER. The resume goes into the recruiting mailbox under its label
+    # whether or not a candidate record could be created — the file is the
+    # thing a person needs to see, and it must not be gated on parsing.
+    if deliver:
+        delivery = deliver_to_mailbox(
+            data, filename, kind, candidate_email=email, candidate_name=name,
+            stored_name=result["stored_name"])
+        result["delivery"] = delivery
+        result["delivered"] = bool(delivery.get("ok"))
+        if delivery.get("ok"):
+            result["detail"] += " It has been filed in the recruiting mailbox."
+        else:
+            # Honest, and specifically NOT a failed upload: the bytes are
+            # on disk and a person can still retrieve them.
+            result["detail"] += (" It is saved, but could not be filed in the "
+                                 "recruiting mailbox yet — that has been logged.")
+    else:
+        result["delivered"] = False
 
     if not create_record or not email:
         if not email:
