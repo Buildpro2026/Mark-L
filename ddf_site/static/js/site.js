@@ -176,3 +176,62 @@ async function renderMissedStrip(currentProductId) {
     // silent — this is a supplementary strip, never blocks the main page
   }
 }
+
+function initContactForm(formId, statusId) {
+  const form = document.getElementById(formId);
+  const statusEl = document.getElementById(statusId);
+  if (!form) return;
+
+  const submitBtn = form.querySelector('button[type="submit"]');
+
+  function showStatus(kind, text) {
+    if (!statusEl) return;
+    statusEl.hidden = false;
+    statusEl.className = "form-status " + kind;
+    statusEl.textContent = text;
+  }
+
+  form.addEventListener("submit", async (evt) => {
+    evt.preventDefault();
+    if (submitBtn.disabled) return; // guards against double-submit from a repeated click while a request is in flight
+
+    const name = form.elements.name.value.trim();
+    const email = form.elements.email.value.trim();
+    const message = form.elements.message.value.trim();
+
+    submitBtn.disabled = true;
+    const originalLabel = submitBtn.textContent;
+    submitBtn.textContent = "Sending…";
+    showStatus("pending", "Sending your message…");
+
+    try {
+      const resp = await fetch("/api/contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, message }),
+      });
+      const data = await resp.json();
+
+      if (resp.ok && data.ok) {
+        showStatus("success", data.message || "Thanks — we've received your message.");
+        form.reset();
+        submitBtn.textContent = "Sent";
+        // Stays disabled after a real success — nothing further to submit
+        // until the visitor edits the form again.
+        form.addEventListener("input", () => {
+          submitBtn.disabled = false;
+          submitBtn.textContent = originalLabel;
+          statusEl.hidden = true;
+        }, { once: true });
+      } else {
+        showStatus("error", data.message || "Something went wrong — please try again.");
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalLabel;
+      }
+    } catch (err) {
+      showStatus("error", "Couldn't reach the server — please check your connection and try again.");
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalLabel;
+    }
+  });
+}
