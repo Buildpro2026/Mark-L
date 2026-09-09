@@ -38,7 +38,7 @@ def test_priority_order_matches_the_required_ranking(monkeypatch):
     # OFFLINE leads even ERROR: nothing else means anything while the
     # backend itself is unreachable. SUCCESS sits right after TOOL since
     # it only ever fires the instant a real tool_end frame reports ok:true.
-    assert 'const PRIORITY = ["offline", "error", "speaking", "tool", "success", "thinking", "listening"];' in html
+    assert 'const PRIORITY = ["offline", "degraded", "error", "speaking", "tool", "warning", "success", "thinking", "listening", "approval_required"];' in html
 
 
 def test_set_orb_reason_is_the_single_real_bridge_for_every_caller(monkeypatch):
@@ -131,7 +131,7 @@ def test_a_tool_call_outranks_the_generic_thinking_state_while_it_runs(monkeypat
     # Real product requirement: once a tool actually starts, the orb must
     # show that specific activity, not keep showing generic "thinking."
     html = _html(monkeypatch)
-    priority_line = 'const PRIORITY = ["offline", "error", "speaking", "tool", "success", "thinking", "listening"];'
+    priority_line = 'const PRIORITY = ["offline", "degraded", "error", "speaking", "tool", "warning", "success", "thinking", "listening", "approval_required"];'
     assert priority_line in html
     assert html.index('"tool"') < html.index('"thinking"', html.index(priority_line))
 
@@ -140,7 +140,7 @@ def test_an_error_outranks_a_reply_already_being_spoken(monkeypatch):
     # The one deliberate deviation from a naive FIFO: ERROR must win even
     # over SPEAKING, per the explicit product requirement.
     html = _html(monkeypatch)
-    priority_line = 'const PRIORITY = ["offline", "error", "speaking", "tool", "success", "thinking", "listening"];'
+    priority_line = 'const PRIORITY = ["offline", "degraded", "error", "speaking", "tool", "warning", "success", "thinking", "listening", "approval_required"];'
     assert priority_line in html
     assert html.index('"error"', html.index(priority_line)) < html.index('"speaking"', html.index(priority_line))
 

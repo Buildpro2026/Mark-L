@@ -116,14 +116,20 @@ def test_served_page_contains_real_settings_controls(monkeypatch):
     assert "set-alert-sensitivity" in html
 
 
-def test_served_page_does_not_use_the_old_breathing_orb_language(monkeypatch):
+def test_served_page_does_not_use_the_old_orb_stage_markup(monkeypatch):
     # Confirms this is an actual structural change, not a palette tweak —
-    # the old page's signature visual language (a pulsing orb + generic
-    # "AI assistant" framing) is gone, replaced with the CEO console layout.
+    # the old page's signature visual language (a free-floating .orb-stage
+    # widget + generic "AI assistant" framing) is gone, replaced with the
+    # CEO console layout. "breathe" itself is no longer a banned word here:
+    # the 2026-09-09 orb rebuild (see test_orb_avatar.py) legitimately
+    # reintroduces a real breathing/pulsing idle animation, on the new
+    # canvas-based OrbRenderer docked inside #orb-widget — a different,
+    # much later implementation from the one this test originally guarded
+    # against, which is exactly why "orb-stage" (that old implementation's
+    # own class name) is still the thing actually being checked here.
     client = _client(monkeypatch)
     html = client.get("/ui").text
     assert "orb-stage" not in html
-    assert "breathe" not in html
 
 
 def test_served_page_has_the_floating_orb_wired_into_the_chat_lifecycle(monkeypatch):

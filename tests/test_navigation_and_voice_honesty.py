@@ -137,7 +137,69 @@ def test_a_working_gemini_still_returns_audio(monkeypatch):
                                            "mime_type": "audio/wav"})
     result = ui.synthesize_reply_audio("hello")
     assert result == {"configured": True, "ok": True, "audio_base64": "QUJD",
-                      "mime_type": "audio/wav", "provider": "gemini"}
+                      "mime_type": "audio/wav", "provider": "gemini", "voice": "Charon"}
+
+
+def test_the_selected_voice_is_actually_used_not_just_the_default(monkeypatch):
+    # The voice dropdown's whole point: passing a different voice_id must
+    # reach gemini_tts.synthesize_speech, not be silently ignored in favor
+    # of DEFAULT_VOICE.
+    from core.headless import ui
+    from actions import gemini_tts
+
+    seen = {}
+    monkeypatch.setattr(gemini_tts, "is_configured", lambda: True)
+    def _fake_synth(text, voice_id=None):
+        seen["voice_id"] = voice_id
+        return {"ok": True, "audio_base64": "QUJD", "mime_type": "audio/wav", "voice": voice_id}
+    monkeypatch.setattr(gemini_tts, "synthesize_speech", _fake_synth)
+
+    result = ui.synthesize_reply_audio("hello", voice_id="Puck")
+    assert seen["voice_id"] == "Puck"
+    assert result["voice"] == "Puck"
+
+
+def test_the_tts_endpoint_uses_lees_stored_voice_selection(monkeypatch):
+    # This is the actual bug report: the dropdown persisted a choice that
+    # /ui/api/tts/speak never read, so every reply spoke in DEFAULT_VOICE
+    # regardless of what Settings said was selected.
+    from core.headless import ui
+    from actions import gemini_tts, voice_manager
+
+    monkeypatch.setattr(voice_manager, "get_voice_provider_config",
+                        lambda: {"provider": "gemini", "voice": "Kore", "speed": 1.0})
+    monkeypatch.setattr(gemini_tts, "is_configured", lambda: True)
+    seen = {}
+    def _fake_synth(text, voice_id=None):
+        seen["voice_id"] = voice_id
+        return {"ok": True, "audio_base64": "QUJD", "mime_type": "audio/wav", "voice": voice_id}
+    monkeypatch.setattr(gemini_tts, "synthesize_speech", _fake_synth)
+
+    result = ui.ui_tts_speak(ui.SpeakRequest(text="hello"))
+    assert seen["voice_id"] == "Kore"
+    assert result["voice"] == "Kore"
+
+
+def test_the_tts_endpoint_ignores_a_non_gemini_stored_provider(monkeypatch):
+    # If the stored provider isn't gemini (local/elevenlabs), there is no
+    # gemini voice_id to honor — synthesize_reply_audio must fall through
+    # to its own DEFAULT_VOICE rather than passing a foreign voice name
+    # (e.g. an ElevenLabs voice id) straight into the Gemini API call.
+    from core.headless import ui
+    from actions import gemini_tts, voice_manager
+
+    monkeypatch.setattr(voice_manager, "get_voice_provider_config",
+                        lambda: {"provider": "elevenlabs", "voice": "Rachel", "speed": 1.0})
+    monkeypatch.setattr(gemini_tts, "is_configured", lambda: True)
+    seen = {}
+    def _fake_synth(text, voice_id=None):
+        seen["voice_id"] = voice_id
+        return {"ok": True, "audio_base64": "QUJD", "mime_type": "audio/wav", "voice": voice_id or gemini_tts.DEFAULT_VOICE}
+    monkeypatch.setattr(gemini_tts, "synthesize_speech", _fake_synth)
+
+    result = ui.ui_tts_speak(ui.SpeakRequest(text="hello"))
+    assert seen["voice_id"] is None
+    assert result["voice"] == gemini_tts.DEFAULT_VOICE
 
 
 def test_no_gemini_key_reports_unconfigured_rather_than_paying(monkeypatch):

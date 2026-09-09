@@ -45,6 +45,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -60,6 +61,8 @@ from core.headless import status_api
 from core.headless import tools_api
 from core.headless.orchestrator_api import CreateTaskRequest
 from core.headless.tools_api import ExecuteToolRequest
+
+logger = logging.getLogger("jarvis.ui")
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "core" / "prompt.txt"
 CHAT_MODEL = "gemini-flash-latest"   # same model main.py's own text-only Gemini calls use (see _save_session_summary)
@@ -279,28 +282,26 @@ class SpeakRequest(BaseModel):
     text: str
 
 
-def synthesize_reply_audio(text: str) -> dict:
+def synthesize_reply_audio(text: str, voice_id: str | None = None) -> dict:
     """Real neural TTS — shared by /ui/api/tts/speak (cookie-auth browser
     UI) and the 3D Command Center's /3d/api/command 'speak' action (which
     accepts the pairing-token/Bearer credentials _3d_auth allows, not just
     the /ui cookie). Extracted here so both surfaces call the exact same
-    Cartesia/ElevenLabs logic instead of dashboard/server.py re-implementing
-    a second TTS provider chain (2026-09, Lee's /3d spec: 'no duplicate
-    voice provider under any circumstance').
+    logic instead of dashboard/server.py re-implementing a second TTS path
+    (2026-09, Lee's /3d spec: 'no duplicate voice provider under any
+    circumstance').
+
+    Gemini only (see the GEMINI ONLY comment below for why) — voice_id
+    overrides the default voice ("Charon") for this one call; omit it and
+    the caller gets gemini_tts.DEFAULT_VOICE. ui_tts_speak() below passes
+    Lee's actual stored Settings selection; the 3D Command Center's 'speak'
+    action does not currently pass one, so it always speaks in the default.
 
     Returns base64 audio for the caller to play through a real <audio>
     element; never plays anything server-side (no speakers on this
     container). Honest {"configured": false} when no TTS provider is
     configured, rather than a fake 200 — callers fall back to
-    speechSynthesis themselves.
-
-    Provider order is Cartesia first, ElevenLabs second, and that order is
-    not arbitrary: the phone line is a Cartesia Line agent speaking with
-    CARTESIA_VOICE_ID, so preferring Cartesia here is what makes the
-    browser/3D and the phone the same voice instead of two assistants
-    wearing the same name. ElevenLabs stays as a real fallback rather than
-    being ripped out — if the Cartesia key is missing or its API is down,
-    the caller keeps a human-sounding voice."""
+    speechSynthesis themselves."""
     from actions import gemini_tts
 
     # GEMINI ONLY (2026-09-08, Lee's explicit instruction). Gemini is free,
@@ -324,13 +325,14 @@ def synthesize_reply_audio(text: str) -> dict:
                 "detail": "GEMINI_API_KEY is not set — Gemini is the only permitted "
                           "voice provider, so there is no synthesized audio."}
 
-    result = gemini_tts.synthesize_speech(text)
+    result = gemini_tts.synthesize_speech(text, voice_id=voice_id)
     if result.get("ok"):
         return {
             "configured": True, "ok": True,
             "audio_base64": result["audio_base64"],
             "mime_type": result["mime_type"],
             "provider": "gemini",
+            "voice": result.get("voice") or voice_id or gemini_tts.DEFAULT_VOICE,
         }
     return {"configured": True, "ok": False, "provider": "gemini",
             "detail": result.get("detail"),
@@ -339,7 +341,27 @@ def synthesize_reply_audio(text: str) -> dict:
 
 @api.post("/tts/speak")
 def ui_tts_speak(body: SpeakRequest):
-    return synthesize_reply_audio(body.text)
+    # The voice dropdown's whole point: whatever Lee last selected in
+    # Settings (persisted by voice_manager.save_voice_config(), called from
+    # POST /ui/api/settings) is what the NEXT reply actually speaks with —
+    # not whatever DEFAULT_VOICE happens to be. Previously this endpoint
+    # never read that stored selection at all, so changing the dropdown
+    # updated the setting but never touched a single generated reply;
+    # Charon spoke regardless of what the UI claimed was selected. Reading
+    # it here, at the one place synthesis actually happens, means every
+    # caller of synthesize_reply_audio() (this endpoint and the 3D Command
+    # Center's own 'speak' action) can still ask for an explicit voice_id
+    # override, and a caller that doesn't pass one gets Lee's real current
+    # selection, not a hard-coded default.
+    from actions import voice_manager
+    selected = None
+    try:
+        cfg = voice_manager.get_voice_provider_config()
+        if cfg.get("provider") == "gemini":
+            selected = cfg.get("voice")
+    except Exception:
+        logger.debug("could not read the stored voice selection", exc_info=True)
+    return synthesize_reply_audio(body.text, voice_id=selected)
 
 
 class ChatRequest(BaseModel):

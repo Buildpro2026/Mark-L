@@ -564,6 +564,18 @@
   @keyframes orb-error-flash { 0%, 100% { box-shadow: 0 0 0 2px var(--bad), inset 0 0 0 1px rgba(255,255,255,.05); } 50% { box-shadow: 0 0 0 2px transparent, inset 0 0 0 1px rgba(255,255,255,.05); } }
   #orb-widget.orb-state-success #orb-face-frame { box-shadow: 0 0 0 2px #34d17c, inset 0 0 0 1px rgba(255,255,255,.05); }
   #orb-widget.orb-state-offline #orb-face-frame { box-shadow: 0 0 0 2px #5a6470, inset 0 0 0 1px rgba(255,255,255,.05); filter: grayscale(0.6) brightness(0.8); }
+  /* Three additions to the original six states (2026-09-09): a failed
+     tool call, a pending decision, and a reachable-but-unhealthy backend
+     (real /health status:"degraded", not the same as fully offline) each
+     need their own honest, restrained cue — never the same red flash as
+     a hard error, never invisible. */
+  #orb-widget.orb-state-warning #orb-face-frame { box-shadow: 0 0 0 2px #ff7a45, inset 0 0 0 1px rgba(255,255,255,.05); animation: orb-warning-breathe 1.8s ease-in-out infinite; }
+  @keyframes orb-warning-breathe { 0%, 100% { box-shadow: 0 0 0 2px #ff7a45, inset 0 0 0 1px rgba(255,255,255,.05); } 50% { box-shadow: 0 0 0 2px color-mix(in srgb, #ff7a45 55%, transparent), inset 0 0 0 1px rgba(255,255,255,.05); } }
+  /* Approval-required must never read as an error — a steady gold edge,
+     no flashing, no urgency cue beyond the deliberate slow pulse ring
+     (.orb-pulse-ring below) already shared with listening/thinking. */
+  #orb-widget.orb-state-approval #orb-face-frame { box-shadow: 0 0 0 2px #d9a441, inset 0 0 0 1px rgba(255,255,255,.05); }
+  #orb-widget.orb-state-degraded #orb-face-frame { box-shadow: 0 0 0 2px #8a95a6, inset 0 0 0 1px rgba(255,255,255,.05); filter: grayscale(0.35) brightness(0.92); }
   /* A soft ambient presence bleeding into the panel behind the frame — the
      one piece of motion that's always on, even at idle, so JARVIS reads as
      alive rather than a static image. Rectangular now, not a circular glow. */
@@ -626,45 +638,43 @@
   #orb-widget.orb-state-thinking .orb-pulse-ring { animation: orb-pulse-ring-loop 2s ease-out infinite; }
   #orb-widget.orb-state-speaking .orb-pulse-ring { animation: orb-pulse-ring-loop 1.6s ease-out infinite; }
   #orb-widget.orb-state-success .orb-pulse-ring { animation: orb-pulse-ring-flash .9s ease-out 1; }
+  /* Approval-required gets the slowest loop of any of them — deliberate
+     and important, per the product requirement, not another attention-
+     grabbing pulse racing the others. */
+  #orb-widget.orb-state-approval .orb-pulse-ring { animation: orb-pulse-ring-loop 3.2s ease-out infinite; }
   @keyframes orb-pulse-ring-loop { 0% { opacity: .5; transform: scale(1); } 100% { opacity: 0; transform: scale(1.055); } }
   @keyframes orb-pulse-ring-flash { 0% { opacity: .8; transform: scale(1); } 100% { opacity: 0; transform: scale(1.09); } }
-  /* Speaking: a very subtle brightness "breathing" on the feed itself —
-     an honest stand-in for true audio-reactivity (there is no live
-     waveform analysis here) rather than a fabricated one. */
-  #orb-widget.orb-state-speaking #orb-face-video { animation: orb-speaking-glow 1.3s ease-in-out infinite; }
-  @keyframes orb-speaking-glow { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.08); } }
-  /* The old canvas sphere is retired from view (Lee: keep JARVIS out of
-     any orb/circular frame) but stays in the DOM, hidden, rather than
-     removed: the orb script's guard (`if (!widget || !canvas) return`)
-     and its per-frame draw() loop — which is also what drives
-     FaceRenderer.update() every tick — both still expect it to exist.
-     Removing it outright means re-plumbing that guard and the animation
-     loop for near-zero visual gain, since nothing here is rendered. */
+  /* Speaking is now driven by OrbRenderer itself (real audio-level
+     modulation of the core/rings when neural audio is playing, an honest
+     smooth pulse when it isn't — see OrbRenderer.draw() below) rather
+     than a fixed-period CSS brightness keyframe on a video element. */
+  /* #orb-canvas: the ambient particle field behind the presence on Home
+     only (see body:has(#page-home.active) #orb-canvas further down) —
+     distinct from #orb-face-canvas below, which is JARVIS's own rendered
+     presence and appears on every page. */
   #orb-canvas { display: none; }
-  /* ── JARVIS's avatar ──────────────────────────────────────────────────
-     Today: a real, locally-generated video (SadTalker for idle/listening/
-     thinking/tool/error/success/offline motion, MuseTalk for audio-driven
-     speaking) — never the raw reference photo, never a live camera feed.
-     Assets are pre-generated offline and served as static files (see
-     AVATAR_CONFIG in the orb script block below and /ui/api/avatar/asset/*
-     in ui.py) — nothing here calls a model at request time. AVATAR_CONFIG
-     is the single drop-in point for the future full-body asset: its
-     `shape` (aspect ratio / corner radius, applied below as
-     --avatar-aspect/--avatar-radius — a tall panel by default now, not a
-     circle, precisely so a future full-body clip is a config change, not
-     a layout rewrite) and `assets` map are the only things that need to
-     change when that clip replaces today's headshot-crop placeholder.
-     No ring/halo circling it and nothing calls this an "orb" on every
-     OTHER page — corner brackets (.hud-corner below) mark it as an
-     instrument readout there instead. On Home specifically (2026-08-31,
-     Lee's explicit direction: follow the supplied Aegis Command Deck
-     reference's actual presentation rather than an inferred rule against
-     it) --avatar-aspect/--avatar-radius switch to 1/1 and 50% and the new
-     .orb-portrait-ring/.orb-portrait-halo below take over — see the Home
-     stage rules further down. Deliberately no Three.js/GLTF here — the
-     earlier rigged 3D face was reported "creepy" (see
-     test_ui_command_center.py) and explicitly replaced with the plain
-     (now-hidden) canvas this used to sit on top of. */
+  /* ── JARVIS's presence: the orb ──────────────────────────────────────
+     2026-09-09, Lee's explicit direction, reversing the 2026-08-29/31
+     avatar-video phase this comment used to describe: JARVIS is an
+     abstract AI presence again, never a rendering of a human face. The
+     video element and its SadTalker/MuseTalk asset-swapping are gone from
+     this page; OrbRenderer (in the script block below) draws directly
+     onto #orb-face-canvas every frame instead — layered radial-gradient
+     glow, rotating/pulsing rings and a small particle field, all driven
+     by the exact same currentState the video used to key off, through
+     the exact same priority-arbitrated reasons/PRIORITY system (nothing
+     about that state machine changed, only what renders it). Plain
+     canvas 2D, not WebGL/Three.js: the same reasoning as the original
+     ambient #orb-canvas field below — no GPU/driver compatibility
+     surface, no bundler/import-map step needed in this single-file page,
+     and an abstract orb carries none of the "rigged face" risk that got
+     the earlier literal 3D face pulled (see test_ui_command_center.py).
+     --avatar-aspect/--avatar-radius still control the container: a tall
+     rounded rectangle on every page except Home, where the Home stage
+     rules further down switch it to 1/1 and 50% and the
+     .orb-portrait-ring/.orb-portrait-halo ring/halo treatment (built for
+     the earlier "Aegis Command Deck" pass and unchanged here) frames the
+     circular orb the same way it used to frame the circular portrait. */
   /* The screen housing (2026-08-31 stage rebuild): a passthrough wrapper
      everywhere except Home, where it becomes the big instrument-panel
      "monitor" JARVIS's own frame sits inside — see the Home stage rules
@@ -697,7 +707,7 @@
     box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 14px 34px rgba(0,0,0,.5);
     transition: box-shadow .3s ease;
   }
-  #orb-face-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #orb-face-canvas { width: 100%; height: 100%; display: block; }
   #orb-face-frame::after {
     content: ""; position: absolute; inset: 0; pointer-events: none;
     background: linear-gradient(135deg, rgba(255,255,255,.08), transparent 42%, transparent 68%, rgba(0,0,0,.22)),
@@ -1937,13 +1947,12 @@
           <span class="orb-hud-text"><span class="orb-hud-tag">Active Agents</span><span class="orb-hud-val" id="orb-hud-agents">—</span></span>
         </div>
         <div id="orb-face-frame">
-          <!-- JARVIS's rendered likeness: a real, locally-generated video
-               (SadTalker for idle/listening/thinking/tool/error/success/
-               offline, MuseTalk for audio-driven speaking) — never a raw
-               photo displayed directly. Source swapped by FaceRenderer
-               based on currentState; see AVATAR_CONFIG below and
-               /ui/api/avatar/asset/* in ui.py. -->
-          <video id="orb-face-video" muted playsinline loop autoplay></video>
+          <!-- JARVIS's presence: an abstract AI orb, drawn every frame by
+               OrbRenderer (see the script block below) — layered glow,
+               rotating rings and particles, never a rendering of a human
+               face. Driven by the same currentState/reasons/PRIORITY
+               state machine every other cue on this page already reads. -->
+          <canvas id="orb-face-canvas"></canvas>
           <div class="orb-scan" aria-hidden="true"></div>
           <div class="orb-exec-bar" aria-hidden="true"></div>
         </div>
@@ -2074,7 +2083,16 @@ async function pollHealth() {
       $('home-tel-ai').textContent = 'AI ' + (h.provider_selected ? h.provider_selected.toUpperCase() : '—');
       $('home-tel-uptime').textContent = 'UPTIME ' + formatUptime(h.uptime_seconds);
     }
-    if (window.setOrbReason) window.setOrbReason('offline', false);
+    if (window.setOrbReason) {
+      window.setOrbReason('offline', false);
+      // The same /health payload already carries a real status field
+      // (app.py's health() — "degraded" when the database itself isn't
+      // reachable, distinct from this whole request failing). Previously
+      // nothing on this page looked at it once the request itself
+      // succeeded; "reachable but unhealthy" and "fully healthy" read
+      // identically. Not invented for the orb — reused as-is.
+      window.setOrbReason('degraded', h.status === 'degraded');
+    }
   } catch (e) {
     $('conn-dot').className = 'dot bad';
     $('conn-text').textContent = 'disconnected';
@@ -2091,7 +2109,10 @@ async function pollHealth() {
     // second, separately-invented signal. Outranks every other orb state
     // (see PRIORITY): none of them mean anything while the backend is
     // actually unreachable.
-    if (window.setOrbReason) window.setOrbReason('offline', true);
+    if (window.setOrbReason) {
+      window.setOrbReason('offline', true);
+      window.setOrbReason('degraded', false);   // unknowable right now — offline already covers it
+    }
   }
 }
 
@@ -2426,13 +2447,25 @@ function resolveToolChip(ok) {
   // particular call had no visible chip host, so multi-tool turns never
   // leave the orb stuck showing a tool that already finished.
   if (window.setOrbReason) window.setOrbReason('tool', false);
-  if (ok && window.setOrbReason) {
-    // Real outcome, not a fabricated timer: this only ever runs from an
-    // actual tool_end frame that reported ok:true. Brief, self-clearing —
-    // a receipt that the action landed, not a state anyone has to notice.
-    window.setOrbReason('success', true);
-    clearTimeout(window._orbSuccessFallback);
-    window._orbSuccessFallback = setTimeout(() => window.setOrbReason('success', false), 1200);
+  if (window.setOrbReason) {
+    if (ok) {
+      // Real outcome, not a fabricated timer: this only ever runs from an
+      // actual tool_end frame that reported ok:true. Brief, self-clearing —
+      // a receipt that the action landed, not a state anyone has to notice.
+      window.setOrbReason('success', true);
+      clearTimeout(window._orbSuccessFallback);
+      window._orbSuccessFallback = setTimeout(() => window.setOrbReason('success', false), 1200);
+    } else {
+      // 2026-09-09: previously a failed tool call (ok:false) produced no
+      // distinct cue at all — the orb just fell back to whatever the next
+      // reason in PRIORITY was, silently. "warning" rather than "error":
+      // diagnostic, not panicked — a tool that reported its own failure
+      // cleanly is not the same severity as an unhandled chat-level
+      // exception (see appendError's 'error' reason below).
+      window.setOrbReason('warning', true);
+      clearTimeout(window._orbWarningFallback);
+      window._orbWarningFallback = setTimeout(() => window.setOrbReason('warning', false), 2200);
+    }
   }
   if (!_activeToolChip) return;
   _activeToolChip.classList.remove('tool-chip-active');
@@ -3022,6 +3055,10 @@ async function loadTasksAndApprovals() {
     const badgeWrap = $('approval-badge');
     if (approvals.length) { countBadge.textContent = approvals.length; badgeWrap.style.display = 'flex'; }
     else { badgeWrap.style.display = 'none'; }
+    // Real count, already fetched for the sidebar badge above — not a
+    // second poll. Lowest-priority reason (see PRIORITY): a calm, steady
+    // reminder that only shows once nothing more immediate is happening.
+    if (window.setOrbReason) window.setOrbReason('approval_required', approvals.length > 0);
 
     const objective = brief.strategic_objective || {};
     const objEl = $('header-objective-pct');
@@ -3274,12 +3311,25 @@ checkSession();
    compatibility surface, matches the original orb's own reasoning for
    staying off a 3D engine. */
 (function () {
-  const STATE_COLORS = { idle: "#4b6b7c", listening: "#00d4ff", thinking: "#b98bff", tool: "#ffb454", speaking: "#5cffc4", error: "#ff5c6c", interrupted: "#ff5c6c", success: "#34d17c", offline: "#5a6470" };
+  const STATE_COLORS = {
+    idle: "#4b6b7c", listening: "#00d4ff", thinking: "#b98bff", tool: "#ffb454",
+    speaking: "#5cffc4", error: "#ff5c6c", interrupted: "#ff5c6c", success: "#34d17c",
+    offline: "#5a6470",
+    // Three additions (2026-09-09) to the original nine: a failed tool
+    // call (distinct from a hard chat-level error — "diagnostic, not
+    // panicked"), a real pending decision, and a reachable-but-unhealthy
+    // backend distinct from fully offline.
+    warning: "#ff7a45", approval_required: "#d9a441", degraded: "#8a95a6",
+  };
   // Executive-facing labels — the internal reason name ("tool") stays as-is
   // everywhere it's already wired (SSE handlers, tests); only the text a
   // person reads changes, so "JARVIS is executing" replaces "Tool" without
   // touching any of the event plumbing above.
-  const STATE_LABELS = { idle: "Ready", tool: "Executing", offline: "Offline", success: "Success" };
+  const STATE_LABELS = {
+    idle: "Ready", tool: "Executing", offline: "Offline", success: "Success",
+    interrupted: "Interrupting", warning: "Attention", approval_required: "Awaiting approval",
+    degraded: "Degraded",
+  };
   const widget = document.getElementById("orb-widget");
   const canvas = document.getElementById("orb-canvas");
   const stateLabel = document.getElementById("orb-state-text");
@@ -3287,12 +3337,19 @@ checkSession();
 
   let currentState = "idle";
   let stateHoldUntil = 0;
+  // When currentState last actually CHANGED (seconds, performance.now()
+  // scale) — OrbRenderer reads this for transition-relative effects (the
+  // success flash's one-shot expanding ring) rather than tracking its own
+  // separate copy of "how long have we been in this state."
+  window._orbStateChangedAt = 0;
 
   window.setOrbState = function setOrbState(state) {
     const now = performance.now();
     if (currentState === "interrupted" && now < stateHoldUntil) return;
     if (currentState === "error" && now < stateHoldUntil && state !== "error") return;
-    currentState = STATE_COLORS[state] ? state : "idle";
+    const nextState = STATE_COLORS[state] ? state : "idle";
+    if (nextState !== currentState) window._orbStateChangedAt = now / 1000;
+    currentState = nextState;
     if (currentState === "interrupted") stateHoldUntil = now + 600;
     if (currentState === "error") stateHoldUntil = now + 1400;
     if (stateLabel) stateLabel.textContent = STATE_LABELS[currentState] || (currentState.charAt(0).toUpperCase() + currentState.slice(1));
@@ -3303,6 +3360,9 @@ checkSession();
     widget.classList.toggle("orb-state-error", currentState === "error");
     widget.classList.toggle("orb-state-success", currentState === "success");
     widget.classList.toggle("orb-state-offline", currentState === "offline");
+    widget.classList.toggle("orb-state-warning", currentState === "warning");
+    widget.classList.toggle("orb-state-approval", currentState === "approval_required");
+    widget.classList.toggle("orb-state-degraded", currentState === "degraded");
     document.documentElement.style.setProperty("--orb-state-color", STATE_COLORS[currentState]);
     // Always clear first: this same function is also what a real TTS
     // onstart event calls (see speakReply below) — without clearing here,
@@ -3332,9 +3392,10 @@ checkSession();
   // Real states only: every reason flag below is flipped by an actual event
   // — SpeechRecognition start/end, a genuine tool_start/tool_end SSE frame
   // from POST /ui/api/chat, speechSynthesis start/end, an error the backend
-  // actually returned — never a timer that fabricates activity. When more
-  // than one reason is true at once (JARVIS is still "thinking" when a tool
-  // call begins, say), the highest-priority one wins the visual; the loser
+  // actually returned, the real /health payload, the real pending-approvals
+  // count — never a timer that fabricates activity. When more than one
+  // reason is true at once (JARVIS is still "thinking" when a tool call
+  // begins, say), the highest-priority one wins the visual; the loser
   // simply resumes once the winner clears. Order is the product
   // requirement: an error always outranks everything, even a reply already
   // being spoken; a running tool call outranks the generic "thinking" spinner
@@ -3343,10 +3404,23 @@ checkSession();
   // information the moment the connection itself is down (see pollHealth's
   // setOrbReason('offline', ...) below — driven by the same real /health
   // check the Command page's connection dot already used, not a new signal
-  // invented for this). "success" sits right after "tool" since it only
-  // ever fires the instant a real tool_end frame reports ok:true.
-  const PRIORITY = ["offline", "error", "speaking", "tool", "success", "thinking", "listening"];
-  const reasons = { offline: false, error: false, speaking: false, tool: false, success: false, thinking: false, listening: false };
+  // invented for this). "degraded" (2026-09-09: the same /health payload's
+  // real status:"degraded" field, previously read by nothing) sits right
+  // under offline for the same reason, one notch down — reachable but
+  // unhealthy is less absolute than unreachable, but still more
+  // foundational than one turn's activity. "success" sits right after
+  // "tool" since it only ever fires the instant a real tool_end frame
+  // reports ok:true; "warning" sits next to it for the same event's
+  // ok:false branch — a failed tool call previously produced no distinct
+  // cue at all. "approval_required" (2026-09-09: the real pending-approvals
+  // count already tracked for the sidebar badge) sits lowest of the
+  // reasons — a persistent, calm reminder that surfaces only once nothing
+  // more immediate is happening, never interrupting active work.
+  const PRIORITY = ["offline", "degraded", "error", "speaking", "tool", "warning", "success", "thinking", "listening", "approval_required"];
+  const reasons = {
+    offline: false, degraded: false, error: false, speaking: false, tool: false,
+    warning: false, success: false, thinking: false, listening: false, approval_required: false,
+  };
   let activeToolLabel = "";
   function applyPriority() {
     const winner = PRIORITY.find((r) => reasons[r]);
@@ -3372,47 +3446,12 @@ checkSession();
   const reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const motionScale = reducedMotion ? 0.08 : 1;
 
-  // ── FaceRenderer: JARVIS's own rendered likeness of Lee — a real,
-  // locally-generated video (no photo pixels or synthetic drawing), swapped
-  // by currentState. idle/listening/thinking/tool/error/interrupted all
-  // share one SadTalker-generated natural-motion loop today (the ring/halo
-  // color+speed below already carries the per-state visual distinction,
-  // same as before); speaking swaps to a MuseTalk audio-driven clip. Both
-  // are pre-generated offline and served as static files — nothing here
-  // calls a model at request time, so switching states never blocks the
-  // UI. AVATAR_ASSETS + this object are the single seam for a future
-  // upgrade (distinct per-state loops, true on-demand live lip sync):
-  // everything else (ring/halo/canvas, currentState, priority engine)
-  // keeps working unchanged. Deliberately no Three.js/GLTF: the earlier
-  // rigged 3D face was reported "creepy" (see test_ui_command_center.py)
-  // and pulled for the plain canvas orb this sits on top of.
-  // Single config object for the whole avatar — this is the drop-in point
-  // for the future full-body asset. `shape` controls the container's
-  // aspect ratio/corner treatment (today: a tall rounded rectangle, no
-  // circular framing — see .hud-corner in the CSS above) as CSS custom
-  // properties, never hard-coded pixel sizes, so a future full-body clip
-  // is a config change (e.g. aspect: "9 / 16") not a markup/CSS rewrite.
-  // `assets` maps currentState -> a video URL; any state without its own
-  // clip falls back to idle (see assetForState) rather than erroring.
-  const AVATAR_CONFIG = {
-    shape: { aspect: "3 / 4", radius: "10px" },
-    assets: {
-      idle: "/ui/api/avatar/asset/idle_loop.mp4",
-      speaking: "/ui/api/avatar/asset/speaking_sample.mp4",
-    },
-  };
-  // Whole-presence motion (2026-08-31, reference-driven): translated from
-  // the "Aegis Command Deck" reference's updatePortrait(), which found the
-  // same limitation this codebase already documented above — real per-
-  // pixel face animation (blink/lip-sync) on a static/near-static asset
-  // needs ML-grade landmark alignment that isn't available here — and
-  // solved it the same honest way: animate the whole presence as a unit
-  // (a real behavior; heads move as a unit while listening/thinking) via
-  // CSS transforms driven by state, instead of faking facial detail. Kept
-  // to translateY/scale/rotateZ (in-plane) rather than the reference's
-  // rotateX/Y 3D tilt: JARVIS's frame shows a real rectangular video, and
-  // 3D perspective tilt on rectangular video content reads as the footage
-  // itself warping, not a head turning — rotateZ has no such distortion.
+  // ── PresenceMotion: JARVIS's whole-frame motion (2026-08-31, reference-
+  // driven, kept unchanged by the 2026-09-09 orb rebuild below): a subtle
+  // translateY/rotateZ drift on #orb-face-frame itself, driven by state,
+  // giving the presence a physical "weight" without faking facial detail.
+  // rotateZ rather than a 3D tilt: kept in-plane so it composites cheaply
+  // and never reads as the canvas content itself warping.
   const STATE_MOTION = {
     idle:      { bobAmp: 3,   bobSpeed: 0.5,  swayDeg: 0.3, swaySpeed: 0.6 },
     listening: { bobAmp: 2,   bobSpeed: 0.85, swayDeg: 0.6, swaySpeed: 0.9 },
@@ -3421,63 +3460,234 @@ checkSession();
     speaking:  { bobAmp: 2.5, bobSpeed: 2.1,  swayDeg: 0.4, swaySpeed: 1.6 },
     error:     { bobAmp: 1,   bobSpeed: 3.2,  swayDeg: 0.8, swaySpeed: 3.0 },
     interrupted: { bobAmp: 1, bobSpeed: 3.2,  swayDeg: 0.8, swaySpeed: 3.0 },
+    warning:   { bobAmp: 1.2, bobSpeed: 2.0,  swayDeg: 0.6, swaySpeed: 2.2 },
+    approval_required: { bobAmp: 1, bobSpeed: 0.4, swayDeg: 0.2, swaySpeed: 0.5 },
     success:   { bobAmp: 1,   bobSpeed: 1.8,  swayDeg: 0.3, swaySpeed: 1.0 },
+    degraded:  { bobAmp: 0.5, bobSpeed: 0.2,  swayDeg: 0,   swaySpeed: 0 },
     offline:   { bobAmp: 0,   bobSpeed: 0,    swayDeg: 0,   swaySpeed: 0 },
   };
-  const FaceRenderer = (() => {
-    const wrap = document.getElementById("orb-face-wrap");
-    const video = document.getElementById("orb-face-video");
+  const PresenceMotion = (() => {
     const frame = document.getElementById("orb-face-frame");
-    let currentAsset = null;
-
-    if (wrap) {
-      wrap.style.setProperty("--avatar-aspect", AVATAR_CONFIG.shape.aspect);
-      wrap.style.setProperty("--avatar-radius", AVATAR_CONFIG.shape.radius);
-    }
-
-    function assetForState(state) {
-      return AVATAR_CONFIG.assets[state] || AVATAR_CONFIG.assets.idle;
-    }
-
-    function syncVideo() {
-      if (!video) return;
-      const wanted = assetForState(currentState);
-      if (wanted === currentAsset) return;
-      currentAsset = wanted;
-      video.src = wanted;
-      video.play().catch(() => {}); // autoplay can be blocked pre-gesture; retried on next state change
-    }
-
     function update(t) {
-      syncVideo();
-      if (frame) {
-        const m = STATE_MOTION[currentState] || STATE_MOTION.idle;
-        const bob = Math.sin(t * m.bobSpeed) * m.bobAmp * motionScale;
-        const sway = Math.sin(t * m.swaySpeed + 0.6) * m.swayDeg * motionScale;
-        // No continuous scale() here anymore (2026-08-31, sharpness pass):
-        // a per-frame fractional scale forces the browser to re-filter the
-        // ENTIRE video texture every frame, which is a real, avoidable
-        // source of softness on top of the source video's own resolution
-        // (see AVATAR_CONFIG.assets — idle_loop.mp4 is 256x256, already
-        // rendered close to native size on Home's circular portrait, so
-        // continuous magnification/minification filtering was pure loss).
-        // translateY/rotateZ don't have the same cost — GPU compositing
-        // can translate/rotate a rasterized layer without re-filtering its
-        // pixel content the way a scale change requires.
-        frame.style.transform = `translateY(${bob.toFixed(2)}px) rotateZ(${sway.toFixed(2)}deg)`;
-      }
+      if (!frame) return;
+      const m = STATE_MOTION[currentState] || STATE_MOTION.idle;
+      const bob = Math.sin(t * m.bobSpeed) * m.bobAmp * motionScale;
+      const sway = Math.sin(t * m.swaySpeed + 0.6) * m.swayDeg * motionScale;
+      frame.style.transform = `translateY(${bob.toFixed(2)}px) rotateZ(${sway.toFixed(2)}deg)`;
     }
-
     return { update };
   })();
 
+  // ── OrbRenderer: JARVIS's actual presence (2026-09-09 rebuild) ─────────
+  // Draws directly onto #orb-face-canvas every frame: a layered glow, a
+  // small set of rotating/pulsing rings and an inner particle field — an
+  // abstract AI presence, never a face. Plain canvas 2D (see the file-
+  // level comment above this IIFE for why: no WebGL/Three.js here, same
+  // reasoning the ambient #orb-canvas field below already used). Reads
+  // exactly the same currentState/STATE_COLORS/window._orbStateChangedAt
+  // the rest of this file already maintains — this is a renderer, not a
+  // second state machine.
+  const OrbRenderer = (() => {
+    const canvasEl = document.getElementById("orb-face-canvas");
+    if (!canvasEl) return { update() {} };
+    const ctx = canvasEl.getContext("2d");
+    let particles = null, poolSeed = 0;
+
+    // One number per state: how much energy the orb visibly carries.
+    // Everything else (ring count, particle count/speed, glow pulse) is
+    // derived from this plus a couple of per-state flags, so adding a
+    // twelfth state later is one line, not a new drawing routine.
+    const ENERGY = {
+      idle:        { level: 0.18, rings: 1, ringSpeed: 0.05, particles: 5  },
+      listening:   { level: 0.55, rings: 2, ringSpeed: 0.4,  particles: 10, inward: true  },
+      thinking:    { level: 0.62, rings: 3, ringSpeed: 0.8,  particles: 14 },
+      tool:        { level: 0.60, rings: 1, ringSpeed: 2.4,  particles: 9,  sweep: true   },
+      speaking:    { level: 0.58, rings: 2, ringSpeed: 0.35, particles: 9,  audio: true   },
+      interrupted: { level: 0.85, rings: 1, ringSpeed: 0,    particles: 4,  flashFrom: "#ffffff" },
+      success:     { level: 0.40, rings: 1, ringSpeed: 0.1,  particles: 6,  ringBurst: true },
+      warning:     { level: 0.48, rings: 1, ringSpeed: 0.25, particles: 6  },
+      error:       { level: 0.52, rings: 1, ringSpeed: 0.2,  particles: 5  },
+      approval_required: { level: 0.24, rings: 1, ringSpeed: 0.07, particles: 5 },
+      degraded:    { level: 0.10, rings: 1, ringSpeed: 0.02, particles: 3  },
+      offline:     { level: 0.05, rings: 0, ringSpeed: 0,    particles: 0  },
+    };
+
+    function ensureParticles(seed) {
+      if (particles && poolSeed === seed) return;
+      poolSeed = seed;
+      particles = Array.from({ length: 16 }, () => ({
+        angle: Math.random() * Math.PI * 2,
+        radiusFrac: 0.35 + Math.random() * 0.55,
+        speed: 0.15 + Math.random() * 0.35,
+        r: 0.6 + Math.random() * 1.3,
+        phase: Math.random() * Math.PI * 2,
+      }));
+    }
+    ensureParticles(1);
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(1, Math.round(canvasEl.offsetWidth));
+      const h = Math.max(1, Math.round(canvasEl.offsetHeight));
+      const wantW = Math.round(w * dpr), wantH = Math.round(h * dpr);
+      if (canvasEl.width !== wantW || canvasEl.height !== wantH) {
+        canvasEl.width = wantW;
+        canvasEl.height = wantH;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { w, h };
+    }
+
+    function draw(t) {
+      if (canvasEl.offsetWidth === 0) return; // not currently laid out — skip
+      const { w, h } = resize();
+      ctx.clearRect(0, 0, w, h);
+      const cx = w / 2, cy = h / 2;
+      const baseR = Math.min(w, h) * 0.30;
+      const energy = ENERGY[currentState] || ENERGY.idle;
+      const age = t - (window._orbStateChangedAt || 0);   // seconds since currentState last changed
+      const color = STATE_COLORS[currentState] || STATE_COLORS.idle;
+
+      // Breathing scale — always present, even at idle ("alive without
+      // demanding attention"), amplitude scaled by how much energy this
+      // state carries so idle stays genuinely subtle and thinking/tool
+      // read as active.
+      const breatheSpeed = 0.5 + energy.level * 1.3;
+      let breathe = 1 + Math.sin(t * breatheSpeed) * (0.02 + energy.level * 0.05) * motionScale;
+
+      // Speaking: real audio-level modulation when neural playback is
+      // live (see attachAudioAnalyser/currentAudioLevel below), an honest
+      // smooth pulse otherwise — never a fabricated waveform pretending
+      // to be real. Deliberately restrained (max +12%), not "exaggerated
+      // bouncing."
+      if (energy.audio) {
+        const level = typeof currentAudioLevel === "function" ? currentAudioLevel() : null;
+        const boost = level === null ? (0.5 + 0.5 * Math.sin(t * 3.2)) * 0.08 : level * 0.12;
+        breathe += boost * motionScale;
+      }
+      // Interrupting: one sharp bright pulse that decays across its
+      // ~600ms hold (see setOrbState) rather than a steady state — reads
+      // as "stopped, right now," not a fourth flavor of idle.
+      if (energy.flashFrom) breathe += Math.max(0, 1 - age / 0.6) * 0.16 * motionScale;
+
+      const r = baseR * breathe;
+
+      // ── outer bloom ──────────────────────────────────────────────────
+      const bloomR = r * (2.4 + energy.level * 0.6);
+      const bloomAlpha = 0.16 + energy.level * 0.16;
+      const bloom = ctx.createRadialGradient(cx, cy, r * 0.3, cx, cy, bloomR);
+      bloom.addColorStop(0, hexAlpha(color, bloomAlpha));
+      bloom.addColorStop(1, hexAlpha(color, 0));
+      ctx.fillStyle = bloom;
+      ctx.beginPath();
+      ctx.arc(cx, cy, bloomR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ── rings: layered geometry, one arc pass per ring ────────────────
+      for (let i = 0; i < energy.rings; i++) {
+        const dir = i % 2 === 0 ? 1 : -1;
+        const speed = energy.ringSpeed * (1 + i * 0.35) * dir;
+        const ringR = r * (1.18 + i * 0.24);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(t * speed);
+        ctx.beginPath();
+        if (energy.sweep) {
+          // A single sweeping arc (radar-style) rather than a full ring —
+          // "purposeful movement," matching TOOL EXECUTING's "I am
+          // working on that" rather than a generic spin.
+          ctx.strokeStyle = hexAlpha(color, 0.75 - i * 0.15);
+          ctx.lineWidth = 2;
+          ctx.arc(0, 0, ringR, 0, Math.PI * 0.55);
+        } else {
+          ctx.strokeStyle = hexAlpha(color, 0.30 - i * 0.06);
+          ctx.lineWidth = 1.1;
+          ctx.setLineDash([ringR * 0.18, ringR * 0.30]);
+          ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // ── success: one expanding, fading ring — a receipt, not a loop ──
+      if (energy.ringBurst && age < 0.9) {
+        const burstR = r * (1.1 + (age / 0.9) * 0.8);
+        ctx.beginPath();
+        ctx.strokeStyle = hexAlpha(color, Math.max(0, 0.7 * (1 - age / 0.9)));
+        ctx.lineWidth = 2;
+        ctx.arc(cx, cy, burstR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // ── core: a lit sphere, not a flat disc ───────────────────────────
+      ctx.save();
+      ctx.shadowColor = hexAlpha(color, 0.9);
+      ctx.shadowBlur = 18 + energy.level * 22;
+      const core = ctx.createRadialGradient(
+        cx - r * 0.32, cy - r * 0.38, r * 0.05,
+        cx, cy, r,
+      );
+      core.addColorStop(0, hexAlpha("#ffffff", 0.85));
+      core.addColorStop(0.28, hexAlpha(color, 0.95));
+      core.addColorStop(1, hexAlpha(shade(color, -0.35), 0.9));
+      ctx.fillStyle = core;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      // A thin darker rim for depth/edge definition, drawn after the glow
+      // shadow (which would otherwise blur the rim into the bloom).
+      ctx.beginPath();
+      ctx.strokeStyle = hexAlpha(shade(color, -0.5), 0.5);
+      ctx.lineWidth = 1;
+      ctx.arc(cx, cy, r * 0.985, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // ── particles: fine energy detail close to the core ───────────────
+      ensureParticles(energy.particles);
+      const activeCount = Math.round(particles.length * Math.min(1, energy.particles / 16));
+      for (let i = 0; i < activeCount; i++) {
+        const p = particles[i];
+        const pull = energy.inward ? 0.55 : 1;
+        const orbitR = r * p.radiusFrac * pull;
+        const ang = p.angle + t * p.speed * (energy.inward ? 1.6 : 1);
+        const px = cx + Math.cos(ang) * orbitR;
+        const py = cy + Math.sin(ang) * orbitR;
+        const twinkle = 0.35 + 0.35 * Math.sin(t * 1.6 + p.phase);
+        ctx.beginPath();
+        ctx.arc(px, py, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = hexAlpha("#ffffff", Math.max(0, twinkle) * 0.5);
+        ctx.fill();
+      }
+    }
+
+    return { update: draw };
+  })();
+
+  // hexAlpha("#00d4ff", 0.4) -> "rgba(0,212,255,0.4)". shade() darkens
+  // (negative amt) or lightens (positive) a hex color by a 0..1 fraction —
+  // both small, dependency-free helpers so the renderer above never needs
+  // color-mix()/CSS custom-property reads mid-canvas-path (canvas fill/
+  // stroke styles need a real color string, not a CSS token).
+  function hexToRgb(hex) {
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || "");
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [75, 107, 124];
+  }
+  function hexAlpha(hex, alpha) {
+    const [r, g, b] = hexToRgb(hex);
+    return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, alpha)).toFixed(3)})`;
+  }
+  function shade(hex, amt) {
+    const [r, g, b] = hexToRgb(hex);
+    const f = (c) => Math.max(0, Math.min(255, Math.round(c + (amt < 0 ? c : 255 - c) * amt)));
+    return `rgb(${f(r)},${f(g)},${f(b)})`;
+  }
+
   // #orb-canvas stays display:none on every page except Home (see the
-  // Home stage rules) — JARVIS's presence is the real video +
-  // FaceRenderer's whole-frame motion, not a canvas-drawn sphere, on the
-  // other 12 pages. On Home it's reused for one thing only: a subtle
-  // ambient particle field behind the portrait (2026-08-31, matching the
-  // reference's #orb-canvas). Deliberately NOT the reference's literal
-  // pointer-tracked particle sim — a small drifting/twinkling dot field
+  // Home stage rules) — a subtle ambient particle field behind the
+  // presence, distinct from #orb-face-canvas/OrbRenderer above which is
+  // the presence itself and appears on every page. Deliberately NOT a
+  // pointer-tracked simulation — a small drifting/twinkling dot field
   // colored from the same --orb-state-color every other cue uses, cheap
   // enough to run every frame and skipped entirely (one property read)
   // when the canvas isn't actually visible.
@@ -3535,7 +3745,8 @@ checkSession();
   })();
 
   function draw(t) {
-    FaceRenderer.update(t);
+    PresenceMotion.update(t);
+    OrbRenderer.update(t);
     particleField.draw(t);
     requestAnimationFrame((t2) => draw(t2 / 1000));
   }
@@ -3844,6 +4055,12 @@ checkSession();
       // A real person is talking over JARVIS. Cancel cleanly and invalidate
       // the response in flight so it cannot resume behind the new one.
       window.__jarvisTurnEpoch = (window.__jarvisTurnEpoch || 0) + 1;
+      // A real, detected interruption — not a guess. setOrbState's own
+      // 600ms hold (see currentState === "interrupted" above) keeps this
+      // visible for one clean beat before the "listening" reason below
+      // is allowed to take over, rather than the two states flickering
+      // past each other on the same frame.
+      if (window.setOrbState) window.setOrbState("interrupted");
       stopSpeaking();
       resetTurn();
       setVoiceState(VoiceState.LISTENING);
@@ -3993,7 +4210,9 @@ checkSession();
 
     micBtn.addEventListener("click", () => {
       unlockSpeechSynthesis();
-      if (voiceState === VoiceState.SPEAKING) { stopSpeaking(); }
+      // A manual mic click while JARVIS is talking is a real, deliberate
+      // interruption too — same cue as the automatic barge-in above.
+      if (voiceState === VoiceState.SPEAKING) { if (window.setOrbState) window.setOrbState("interrupted"); stopSpeaking(); }
       if (recognizerRunning && micMode === "command") {
         // Second click = "I'm done talking, go" rather than a dead stop,
         // which is what a user pressing it mid-directive actually means.
@@ -4139,11 +4358,44 @@ checkSession();
   // real human executive assistant, not OS-default robotic speechSynthesis).
   // null = not checked yet this session, true/false = known, so a
   // configured-off backend only ever costs one request, not one per reply.
-  // Server-side this is Cartesia Sonic first, ElevenLabs as fallback (see
-  // core/headless/ui.py's /tts/speak) — the browser just asks for "the
-  // real voice" and plays whatever comes back, which is why nothing here
-  // is named after a provider any more.
+  // Server-side this is Gemini only (core/headless/ui.py's
+  // synthesize_reply_audio() — Cartesia/ElevenLabs are not in this path;
+  // see that function's own docstring) — the browser just asks for "the
+  // real voice" and plays whatever comes back.
   let neuralTtsAvailable = null;
+
+  // Real audio-level analysis for the orb's SPEAKING state (OrbRenderer
+  // above reads currentAudioLevel() every frame) — one AudioContext,
+  // reused across replies; a fresh AnalyserNode per <audio> element since
+  // createMediaElementSource can only be called once per element. Every
+  // step here is wrapped: a browser that blocks/lacks Web Audio, or an
+  // autoplay-policy hiccup, must never stop the reply from actually
+  // playing — analyserNode simply stays null and OrbRenderer falls back
+  // to its own honest smooth pulse instead of fabricating a waveform.
+  let audioCtx = null, analyserNode = null, analyserData = null;
+  function attachAudioAnalyser(audioEl) {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+      const src = audioCtx.createMediaElementSource(audioEl);
+      analyserNode = audioCtx.createAnalyser();
+      analyserNode.fftSize = 64;
+      analyserData = new Uint8Array(analyserNode.frequencyBinCount);
+      src.connect(analyserNode);
+      analyserNode.connect(audioCtx.destination);   // required — createMediaElementSource reroutes output through this graph
+    } catch (e) {
+      analyserNode = null;
+      analyserData = null;
+    }
+  }
+  function currentAudioLevel() {
+    if (!analyserNode || !analyserData || !_speaking) return null;
+    analyserNode.getByteFrequencyData(analyserData);
+    let sum = 0;
+    for (let i = 0; i < analyserData.length; i++) sum += analyserData[i];
+    return Math.min(1, (sum / analyserData.length) / 130);
+  }
+
   async function speakWithNeuralVoice(cleanText) {
     try {
       const r = await api("/ui/api/tts/speak", { method: "POST", body: JSON.stringify({ text: cleanText }) });
@@ -4154,6 +4406,7 @@ checkSession();
       if (currentAudioEl) { currentAudioEl.pause(); }
       const audio = new Audio(`data:${r.mime_type};base64,${r.audio_base64}`);
       currentAudioEl = audio;
+      attachAudioAnalyser(audio);
       audio.onplay = () => { _speaking = true; window.setOrbReason("speaking", true); onSpeakingStarted(); };
       audio.onended = () => { _speaking = false; currentAudioEl = null; window.setOrbReason("speaking", false); onSpeakingEnded(); };
       audio.onerror = () => {

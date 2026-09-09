@@ -1,12 +1,13 @@
-"""JARVIS orb avatar — real, locally-generated video (SadTalker for
-idle/listening/thinking/tool/error motion, MuseTalk for audio-driven
-speaking) swapped by FaceRenderer based on currentState. Covers the served
-markup/script (no photo, no SVG-drawn face, no Three.js/GLTF) and the
-/ui/api/avatar/asset/* endpoint that serves the pre-generated clips.
+"""JARVIS's presence: the orb.
 
-Generation itself (SadTalker/MuseTalk, run locally and offline) is out of
-scope for this suite — these assets are static files by the time the app
-serves them, exactly like any other file in ui_static/.
+2026-09-09, Lee's explicit direction, reversing the 2026-08-29/31 avatar-
+video phase this suite used to cover: JARVIS is drawn as an abstract AI
+orb again (OrbRenderer, canvas 2D, in the orb script block of
+core/headless/ui_static/index.html) — never a rendering of a human face.
+Covers the served markup/script (no video element, no photo, no SVG-drawn
+face, no Three.js/GLTF) and confirms the dormant /ui/api/avatar/asset/*
+endpoint (unused by the page now, left in place rather than torn out) still
+behaves correctly on its own terms.
 """
 from fastapi.testclient import TestClient
 
@@ -27,31 +28,38 @@ def _logged_in_client(monkeypatch):
     return client
 
 
-def test_served_page_uses_a_video_element_not_svg_or_photo(monkeypatch):
+def test_served_page_uses_a_canvas_not_a_video_svg_or_photo(monkeypatch):
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert '<video id="orb-face-video"' in html
+    assert '<canvas id="orb-face-canvas">' in html
     # The rejected approaches must actually be gone, not just unused.
+    assert '<video id="orb-face-video"' not in html
     assert "data:image/jpeg;base64" not in html
     assert "orb-face-svg" not in html
     assert "GLTFLoader" not in html
     assert '"three":' not in html
 
 
-def test_face_renderer_maps_states_to_the_two_generated_assets(monkeypatch):
+def test_orb_renderer_draws_a_layered_presence_not_a_flat_circle(monkeypatch):
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert "/ui/api/avatar/asset/idle_loop.mp4" in html
-    assert "/ui/api/avatar/asset/speaking_sample.mp4" in html
-    # idle/listening/thinking/tool/error/success/offline/interrupted all
-    # share the idle loop today (ring/halo color+speed carries the
-    # per-state distinction); only speaking swaps the video source. Any
-    # state without its own entry in AVATAR_CONFIG.assets — which is every
-    # state except speaking, today — falls back to idle rather than erroring,
-    # which is what makes a future full-body asset a config change instead
-    # of a per-state rewrite.
-    assert "function assetForState(state) {" in html
-    assert "return AVATAR_CONFIG.assets[state] || AVATAR_CONFIG.assets.idle;" in html
+    # Real layered rendering, not a single filled circle: an outer bloom, a
+    # lit core with a highlight-offset gradient (depth), rotating rings,
+    # and an orbiting particle field — checked as code, not prose.
+    assert "const OrbRenderer = (() => {" in html
+    assert 'const canvasEl = document.getElementById("orb-face-canvas");' in html
+    assert "ctx.createRadialGradient(" in html
+    assert "ctx.shadowBlur" in html
+    assert "for (let i = 0; i < energy.rings; i++) {" in html
+    assert "ensureParticles(energy.particles);" in html
+
+
+def test_every_required_state_has_its_own_energy_recipe(monkeypatch):
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    for state in ("idle", "listening", "thinking", "tool", "speaking", "interrupted",
+                  "approval_required", "success", "warning", "error", "degraded", "offline"):
+        assert f"{state}:" in html, f"OrbRenderer has no ENERGY entry for {state!r}"
 
 
 def test_avatar_asset_requires_a_session(monkeypatch):
@@ -61,6 +69,10 @@ def test_avatar_asset_requires_a_session(monkeypatch):
 
 
 def test_avatar_asset_served_after_login(monkeypatch):
+    # The endpoint itself is unused by the served page now (see
+    # test_served_page_uses_a_canvas_not_a_video_svg_or_photo), but it is
+    # untouched, dormant infrastructure, not deleted — still expected to
+    # behave correctly on its own terms.
     client = _logged_in_client(monkeypatch)
     for name in ("idle_loop.mp4", "speaking_sample.mp4"):
         r = client.get(f"/ui/api/avatar/asset/{name}")
@@ -84,35 +96,31 @@ def test_avatar_asset_files_actually_exist_on_disk():
         assert path.stat().st_size > 0
 
 
-def test_avatar_is_not_framed_in_a_circular_orb(monkeypatch):
-    # 2026-08-29: Lee's explicit direction — the avatar itself must never
-    # read as a face floating inside an orb. The circular ring/halo/canvas-
-    # sphere framing is gone (not just visually hidden by chance); the
-    # avatar's default shape is a rounded rectangle, not a circle; and the
-    # panel is a docked layout element, not a free-floating widget.
+def test_orb_is_not_a_human_avatar(monkeypatch):
+    # The explicit product requirement this whole rebuild exists to satisfy:
+    # never a rendering of a human face, never a photo. OrbRenderer draws
+    # geometry (gradients/rings/particles) only — no asset path a human
+    # face clip could still be flowing through.
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert 'id="orb-face-ring"' not in html
-    assert 'id="orb-face-halo"' not in html
-    assert '--avatar-aspect: 3 / 4; --avatar-radius: 10px;' in html
-    assert "hud-corner" in html  # the instrument-panel framing that replaced the ring
+    assert '<video id="orb-face-video"' not in html
+    assert "idle_loop.mp4" not in html
+    assert "speaking_sample.mp4" not in html
 
 
-def test_avatar_container_shape_is_config_driven_not_hard_coded(monkeypatch):
-    # The future full-body asset needs an even taller container than
-    # today's placeholder. Swapping AVATAR_CONFIG.shape must be enough —
-    # no markup/CSS rewrite — so the container's aspect ratio and corner
-    # radius must come from CSS custom properties JS sets from that one
-    # config object, not literal values baked into the stylesheet. Default
-    # shape is a rounded rectangle, not a circle — see
-    # test_avatar_is_not_framed_in_a_circular_orb for why that matters.
+def test_avatar_container_shape_is_still_config_driven_on_home(monkeypatch):
+    # Home's circular presentation (the ring/halo/ticks/segments treatment
+    # built for the earlier "Aegis Command Deck" pass) is preserved
+    # unchanged by the orb rebuild — this file doesn't own that CSS, it
+    # only needs the container's own default shape to still be a real CSS
+    # custom property (not a hard-coded pixel size baked into the
+    # stylesheet), same contract as before.
     client = _client(monkeypatch)
     html = client.get("/ui").text
     assert "aspect-ratio: var(--avatar-aspect)" in html
     assert "border-radius: var(--avatar-radius)" in html
-    assert 'shape: { aspect: "3 / 4", radius: "10px" }' in html
-    assert 'wrap.style.setProperty("--avatar-aspect", AVATAR_CONFIG.shape.aspect);' in html
-    assert 'wrap.style.setProperty("--avatar-radius", AVATAR_CONFIG.shape.radius);' in html
+    assert "--avatar-aspect: 3 / 4; --avatar-radius: 10px;" in html
+    assert "--avatar-aspect: 1 / 1 !important; --avatar-radius: 50% !important;" in html
 
 
 def test_offline_state_is_driven_by_the_real_health_check_not_a_fake_signal(monkeypatch):
@@ -120,8 +128,17 @@ def test_offline_state_is_driven_by_the_real_health_check_not_a_fake_signal(monk
     # already made — not a second, independently-invented offline probe.
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert "if (window.setOrbReason) window.setOrbReason('offline', false);" in html
-    assert "if (window.setOrbReason) window.setOrbReason('offline', true);" in html
+    assert "window.setOrbReason('offline', false);" in html
+    assert "window.setOrbReason('offline', true);" in html
+
+
+def test_degraded_state_is_driven_by_the_real_health_status_field(monkeypatch):
+    # 2026-09-09 addition: the same /health payload already carried a real
+    # status field ("degraded" when the database is unreachable) that
+    # nothing on this page read before.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "window.setOrbReason('degraded', h.status === 'degraded');" in html
 
 
 def test_offline_outranks_every_other_state(monkeypatch):
@@ -129,7 +146,8 @@ def test_offline_outranks_every_other_state(monkeypatch):
     # itself is actually unreachable.
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    priority_line = 'const PRIORITY = ["offline", "error", "speaking", "tool", "success", "thinking", "listening"];'
+    priority_line = ('const PRIORITY = ["offline", "degraded", "error", "speaking", "tool", '
+                     '"warning", "success", "thinking", "listening", "approval_required"];')
     assert priority_line in html
 
 
@@ -140,6 +158,16 @@ def test_success_is_driven_by_a_real_tool_end_ok_frame_and_self_clears(monkeypat
     # brief/self-clearing so it never gets stuck showing "success" forever.
     client = _client(monkeypatch)
     html = client.get("/ui").text
-    assert "if (ok && window.setOrbReason) {" in html
     assert "window.setOrbReason('success', true);" in html
     assert "window._orbSuccessFallback = setTimeout(() => window.setOrbReason('success', false), 1200);" in html
+
+
+def test_a_failed_tool_call_gets_a_distinct_warning_not_silence(monkeypatch):
+    # 2026-09-09: previously ok:false produced no cue at all — the orb just
+    # fell back to whatever PRIORITY reason was next. "warning", not
+    # "error": a tool reporting its own failure is diagnostic, not the same
+    # severity as an unhandled chat-level exception.
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "window.setOrbReason('warning', true);" in html
+    assert "window._orbWarningFallback = setTimeout(() => window.setOrbReason('warning', false), 2200);" in html
