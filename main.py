@@ -72,6 +72,8 @@ from actions import nucleus_hierarchy
 # second copy) — exposed under main.'s own name too so tests, and any
 # future desktop-specific code, can reach them the same way the shared
 # executor's tests already do (main.gmail_integration, main.biz_intel...).
+from actions import agent_orchestrator as agent_scheduler
+from actions.agent_orchestrator import orchestrator as agent_orchestrator
 from actions import gmail_integration
 from actions import calendar_integration
 from actions import airtable_integration
@@ -88,7 +90,9 @@ from actions import audit_log
 from actions import twilio_integration as twilio
 from actions import cloud_bridge
 from actions.web_search        import _news as _fetch_news_sync
-from memory.config_manager     import get_brief_enabled
+from memory.config_manager     import (
+    get_brief_enabled, get_proactive_enabled, get_proactive_quiet_hours,
+)
 
 
 def get_base_dir():
@@ -202,6 +206,42 @@ def _classify_connection_error(err: BaseException, prev_backoff: int = 3) -> tup
         )
 
     return f"ERR: {type(err).__name__} — retrying in 3s.", 3
+
+
+def _startup_situation_clause(data: dict | None = None) -> str:
+    """Turns real risk/priority/opportunity counts (from priorities_engine.
+    get_todays_priorities()/executive_brief's own risk detection) into what
+    the morning greeting should actually say — never a fixed script, and
+    never fabricated urgency when there genuinely isn't any. `data` is
+    None when the caller could not gather real numbers in time; that is
+    reported as an ordinary day, not silently treated as risk_count=0
+    (which would claim to KNOW nothing is wrong, rather than admit it
+    wasn't checked)."""
+    if not data:
+        return "It looks like a normal day — nothing notable to flag."
+
+    risk_count = data.get("risk_count") or 0
+    priority_count = data.get("priority_count") or 0
+    opportunity_count = data.get("opportunity_count") or 0
+    top_risk = data.get("top_risk")
+
+    if risk_count == 1:
+        detail = f": {top_risk}" if top_risk else ""
+        return f"There's 1 thing that will need their attention today{detail}."
+    if risk_count > 1:
+        return f"There are {risk_count} high-priority issues that will need their attention today."
+
+    if priority_count == 0 and opportunity_count == 0:
+        return "It's a quiet day — nothing urgent or pending."
+
+    parts = []
+    if priority_count > 0:
+        noun = "item" if priority_count == 1 else "items"
+        parts.append(f"{priority_count} {noun} worth reviewing")
+    if opportunity_count > 0:
+        noun = "opportunity" if opportunity_count == 1 else "opportunities"
+        parts.append(f"{opportunity_count} {noun} on the board")
+    return f"It's a fairly quiet day — nothing is urgent, but {' and '.join(parts)}."
 
 
 def _post_session_state(had_error: bool) -> str:
@@ -1131,7 +1171,17 @@ class JarvisLive:
             if not self.session:
                 continue
 
-            if not self._proactive.should_trigger(self._last_user_speech):
+            # get_proactive_enabled/get_proactive_quiet_hours (memory/
+            # config_manager.py) were already fully implemented and
+            # ProactiveEngine.should_trigger() already accepted them —
+            # they were just never actually passed in, so the user's own
+            # "disable proactive mode" setting and configured quiet hours
+            # were silently ignored; JARVIS could speak unprompted at any
+            # hour regardless of either.
+            enabled = await asyncio.to_thread(get_proactive_enabled)
+            quiet_hours = await asyncio.to_thread(get_proactive_quiet_hours)
+            if not self._proactive.should_trigger(
+                self._last_user_speech, enabled=enabled, quiet_hours=quiet_hours):
                 continue
 
             # Proactive speech is the lowest-priority writer of the three,
@@ -1163,6 +1213,38 @@ class JarvisLive:
                 print(f"[Proactive] ⚠️ {e}")
             finally:
                 self._conversation.complete(proactive_turn)
+
+    async def _run_agent_scheduler(self) -> None:
+        """Background task: runs every currently-due scheduled agent
+        (AgentDefinition.schedule, e.g. "60m") on a 5-minute poll —
+        actions/agent_orchestrator.py's run_due_agents()/get_due_agents()
+        and the scheduler-lock trio (acquire/refresh/release_scheduler_
+        lock) were already fully built for exactly this, down to a
+        docstring pointing back here by name, but nothing ever actually
+        called them: scheduled OBSERVE/SUGGEST agents never ran on their
+        own until a human explicitly assigned them.
+
+        Single-instance protected: acquire_scheduler_lock() fails cleanly
+        if another live JARVIS process already holds it, so two running
+        instances can never double-run the same scheduled agents against
+        the same database."""
+        if not agent_scheduler.acquire_scheduler_lock():
+            print("[Scheduler] Another live process already owns the agent scheduler — not running here.")
+            return
+        try:
+            while True:
+                await asyncio.sleep(300)   # 5-minute poll, per the module's own docstring
+                agent_scheduler.refresh_scheduler_lock()
+                try:
+                    ran = await asyncio.to_thread(agent_orchestrator.run_due_agents)
+                except Exception as e:
+                    print(f"[Scheduler] ⚠️ {e}")
+                    continue
+                for task in ran:
+                    agent = agent_orchestrator.get_agent(task.agent_id)
+                    self.ui.write_log(f"SYS: {agent.name if agent else task.agent_id} ran on schedule.")
+        finally:
+            agent_scheduler.release_scheduler_lock()
 
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
@@ -1293,6 +1375,7 @@ class JarvisLive:
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
+                    tg.create_task(self._run_agent_scheduler())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 

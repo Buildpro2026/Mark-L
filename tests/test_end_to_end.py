@@ -41,6 +41,7 @@ def _live(main):
     live = object.__new__(main.JarvisLive)
     live._dashboard = None
     live._loop = None
+    live._conversation = main.ConversationManager()
     return live
 
 
