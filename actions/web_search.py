@@ -47,16 +47,39 @@ def _grounding_sources(response) -> list[dict]:
     return sources
 
 
-def _gemini_search(query: str) -> str:
-    from datetime import datetime, timezone
+def _gemini_grounded_response(query: str):
+    """The raw Gemini grounded-search API response — shared by _gemini_
+    search (prose + real citations) and gemini_grounded_sources (just the
+    structured citations, for callers like web_research.py that need
+    source discovery without the prose)."""
     from core.headless.gemini_client import get_client
 
-    client   = get_client(_get_api_key())
-    response = client.models.generate_content(
+    client = get_client(_get_api_key())
+    return client.models.generate_content(
         model="gemini-2.5-flash",
         contents=query,
         config={"tools": [{"google_search": {}}]},
     )
+
+
+def gemini_grounded_sources(query: str) -> list[dict]:
+    """Real, API-verified source URLs for `query` via Gemini's own grounded
+    search, structured (url/title) rather than prose — the fallback
+    source-discovery path web_research.py's search() uses when DDG is
+    unreachable. Never raises and never invents a citation: any failure,
+    including an empty grounding response, returns []."""
+    try:
+        response = _gemini_grounded_response(query)
+    except Exception as exc:
+        print(f"[WebSearch] ⚠️ Gemini grounded source discovery failed: {exc}")
+        return []
+    return _grounding_sources(response)
+
+
+def _gemini_search(query: str) -> str:
+    from datetime import datetime, timezone
+
+    response = _gemini_grounded_response(query)
 
     text = ""
     for part in response.candidates[0].content.parts:

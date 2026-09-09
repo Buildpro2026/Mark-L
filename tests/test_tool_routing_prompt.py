@@ -72,6 +72,16 @@ def test_prompt_never_lets_web_search_absorb_research_grade_questions():
     assert "prefer web_research" in t or "research capability" in t
 
 
+def test_prompt_forbids_inferring_non_existence_from_a_failed_search():
+    # The reported production bug: a failed/unreachable web_research call
+    # produced "does not appear to be released" — a fabricated conclusion
+    # about the SUBJECT drawn from a failure of the TOOL. This instruction
+    # is what's supposed to stop that.
+    t = _text().lower()
+    assert "could not be completed" in t
+    assert "does not exist" in t or "not evidence" in t
+
+
 # ── dispatch mechanics: what happens once the model DOES call a tool ────
 
 def _fake_web_search_result(monkeypatch, result="iPhone 17: $999 (Apple.com, checked live)."):

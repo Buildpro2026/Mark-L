@@ -132,22 +132,31 @@ def unknown(field: str, why: str = "not found on any source read") -> dict[str, 
 def search(query: str, max_results: int = 6) -> dict[str, Any]:
     """Candidate sources for a question, as structured records.
 
-    Reuses web_search's DuckDuckGo path — that already returns dicts with
-    title/href/body, and a second search client would be a second answer
-    to the same question. Results are candidates, not findings: nothing
-    here has been read yet, so everything is REPORTED at best."""
+    DDG (web_search._ddg_search) is the primary discovery path — it
+    already returns structured title/href/body per result, and a second
+    search client would be a second answer to the same question. If DDG
+    itself is unreachable (blocked proxy, rate limit, network outage —
+    this is a real, observed production failure mode, not a hypothetical
+    one), Gemini's own grounded search is the fallback, via
+    gemini_grounded_sources() — the exact same real-citation extraction
+    the plain web_search tool uses, never a guessed or fabricated URL.
+    Only when BOTH are unreachable does this report failure — never
+    silently return zero candidates as if the search legitimately found
+    nothing. Results are candidates, not findings: nothing here has been
+    read yet, so everything is REPORTED at best."""
     from actions import web_search as ws
 
     query = (query or "").strip()
     if not query:
         return {"ok": False, "state": FAILED, "detail": "empty query", "sources": []}
 
+    raw: list[dict[str, Any]] = []
+    ddg_failed = False
     try:
         raw = ws._ddg_search(query, max_results=max_results) or []
     except Exception as exc:
-        logger.warning("search failed for %r: %s", query, exc)
-        return {"ok": False, "state": UNAVAILABLE, "detail": str(exc)[:300],
-                "query": query, "sources": []}
+        logger.warning("DDG search failed for %r: %s", query, exc)
+        ddg_failed = True
 
     sources, seen = [], set()
     for item in raw:
@@ -164,7 +173,31 @@ def search(query: str, max_results: int = 6) -> dict[str, Any]:
             "read": False,
         })
 
+    gemini_failed = False
     if not sources:
+        gemini_sources = ws.gemini_grounded_sources(query)
+        gemini_failed = not gemini_sources
+        for s in gemini_sources:
+            url = str(s.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            sources.append({
+                "url": url, "title": str(s.get("title") or "").strip(),
+                "snippet": "", "host": _host(url),
+                "found_at": _now_iso(), "read": False,
+            })
+
+    if not sources:
+        if ddg_failed and gemini_failed:
+            # A real inability to reach the live web — never the same
+            # thing as "searched and found nothing". A caller must relay
+            # this as "the research could not be completed", never as
+            # evidence the subject doesn't exist.
+            return {"ok": False, "state": UNAVAILABLE,
+                    "detail": "Live web search could not be reached right now "
+                              "(both the primary and fallback search paths failed).",
+                    "query": query, "sources": []}
         return {"ok": True, "state": NO_RESULTS, "query": query, "sources": [],
                 "detail": "the search returned no results"}
     return {"ok": True, "state": OK, "query": query, "sources": sources}
@@ -526,7 +559,12 @@ def summarize(outcome: dict[str, Any]) -> str:
     Never claims a source it could not read, and never states a value
     without saying where it came from and when."""
     if not outcome.get("ok"):
-        return (f"I couldn't research that: {outcome.get('detail') or 'no source was reachable'}."
+        # Deliberately does not say (or imply) anything about the SUBJECT
+        # of the research — a failure to reach the live web is a fact
+        # about the web access, never evidence about whether the thing
+        # being researched exists, is available, or was ever sold.
+        return (f"I couldn't research that — the research could not be completed: "
+                f"{outcome.get('detail') or 'no source was reachable'}."
                 + (f" {len(outcome.get('sources_failed') or [])} source(s) failed."
                    if outcome.get("sources_failed") else ""))
 

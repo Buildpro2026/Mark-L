@@ -198,3 +198,91 @@ def test_the_conversation_tool_path_invokes_the_research_engine(monkeypatch):
     assert "Lowest observed" in result
     assert "disagree" in result
     assert "toolshop.example" in result, "the answer must carry its sources"
+
+
+# 5. LIVE SOURCE ACQUISITION RESILIENCE — the reported production bug ────
+#
+# Production symptom: a price/product question got "The model does not
+# appear to be released or listed on major retailers..." — a fabricated
+# non-existence claim. Root cause: search() had exactly one source-
+# discovery path (DDG). When DDG is unreachable (a real, observed failure
+# in this environment — a blocked search-engine proxy), search() failed
+# outright with no fallback, and nothing told the model that a failed
+# search is not evidence the product doesn't exist.
+
+def test_search_falls_back_to_gemini_when_ddg_is_unreachable(monkeypatch):
+    from actions import web_search as ws
+
+    def _ddg_boom(query, max_results=6):
+        raise RuntimeError("proxy CONNECT failed: HTTP/1.1 403 Forbidden")
+    monkeypatch.setattr(ws, "_ddg_search", _ddg_boom)
+    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [
+        {"url": "https://www.apple.com/iphone-16/", "title": "iPhone 16 - Apple"},
+        {"url": "https://www.bestbuy.com/site/iphone-16", "title": "iPhone 16 at Best Buy"},
+    ])
+
+    result = wr.search("iPhone 16 128GB price")
+
+    assert result["ok"] is True
+    assert result["state"] == wr.OK
+    urls = {s["url"] for s in result["sources"]}
+    assert "https://www.apple.com/iphone-16/" in urls
+    assert "https://www.bestbuy.com/site/iphone-16" in urls
+
+
+def test_search_reports_failure_honestly_when_both_paths_are_unreachable(monkeypatch):
+    from actions import web_search as ws
+
+    monkeypatch.setattr(ws, "_ddg_search",
+                        lambda query, max_results=6: (_ for _ in ()).throw(RuntimeError("proxy 403")))
+    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [])
+
+    result = wr.search("iPhone 16 128GB price")
+
+    assert result["ok"] is False
+    assert result["state"] == wr.UNAVAILABLE
+    assert result["sources"] == []
+    # The failure is about web access, not the subject — no claim of any
+    # kind about the product itself anywhere in the detail text.
+    assert "iphone" not in result["detail"].lower()
+    assert "release" not in result["detail"].lower()
+    assert "exist" not in result["detail"].lower()
+
+
+def test_full_research_run_never_claims_non_existence_when_search_is_unreachable(monkeypatch):
+    # End-to-end reproduction of the exact production report: both source-
+    # discovery paths fail -> research() -> summarize() must say the
+    # research could not be completed, and must never say or imply the
+    # product doesn't exist / isn't released / isn't sold.
+    from actions import web_search as ws
+
+    monkeypatch.setattr(ws, "_ddg_search",
+                        lambda query, max_results=6: (_ for _ in ()).throw(RuntimeError("proxy 403")))
+    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [])
+
+    outcome = wr.research("current price of iPhone 16 128GB, compare at least three sources")
+    spoken = wr.summarize(outcome)
+
+    assert outcome["ok"] is False
+    assert outcome["confidence"] == 0.0
+    forbidden = ("does not appear", "not released", "not available", "doesn't exist",
+                "does not exist", "not listed", "discontinued")
+    lowered = spoken.lower()
+    for phrase in forbidden:
+        assert phrase not in lowered, f"fabricated non-existence claim: {phrase!r} in {spoken!r}"
+    assert "could not be completed" in spoken
+
+
+def test_search_still_reports_no_results_honestly_when_search_actually_works(monkeypatch):
+    # A working search that genuinely finds nothing is a different, real
+    # outcome from "the web was unreachable" — the two must not collapse
+    # into the same message.
+    from actions import web_search as ws
+
+    monkeypatch.setattr(ws, "_ddg_search", lambda query, max_results=6: [])
+    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [])
+
+    result = wr.search("a query with genuinely no results anywhere")
+
+    assert result["ok"] is True
+    assert result["state"] == wr.NO_RESULTS

@@ -864,7 +864,14 @@ TOOL_DECLARATIONS = [
             "could not find comes back unknown and MUST be relayed as "
             "unknown; never fill in a plausible number. When sources "
             "disagree, relay the disagreement rather than an average. "
-            "action='search' lists candidate sources without reading them."
+            "action='search' lists candidate sources without reading them. "
+            "If the result reports the research could not be completed "
+            "(search unreachable, every source failed to load), say exactly "
+            "that — the research could not be completed right now — and "
+            "NEVER reinterpret a failed/incomplete search as evidence the "
+            "product, person, or topic does not exist, was never released, "
+            "or is unavailable. A tool that could not reach the web has told "
+            "you nothing about the subject at all."
         ),
         "parameters": {
             "type": "OBJECT",
