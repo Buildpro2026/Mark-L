@@ -205,6 +205,29 @@ def _web_research() -> dict[str, Any]:
     return {"state": UNAVAILABLE, "detail": result.get("detail") or "search returned no sources"}
 
 
+def _voice() -> dict[str, Any]:
+    """The configured voice provider's credential, not the audio pipeline
+    itself (there is no server-side speaker/mic to probe). Gemini is the
+    project's primary/default provider (voice 'Charon'); a non-Gemini
+    provider is reported CONFIGURED as-is — this probe states facts, it
+    does not enforce the project's provider policy."""
+    from actions import voice_manager
+    from core.headless import config
+    cfg = voice_manager.get_voice_provider_config()
+    provider = cfg.get("provider")
+    if provider == "gemini":
+        if not getattr(config, "GEMINI_API_KEY", None):
+            return {"state": NOT_CONFIGURED,
+                    "detail": "gemini voice selected but GEMINI_API_KEY is not set"}
+        return {"state": CONFIGURED, "detail": f"gemini voice '{cfg.get('voice')}'"}
+    if provider == "elevenlabs":
+        from core.headless import config as _cfg
+        if not getattr(_cfg, "ELEVENLABS_API_KEY", None):
+            return {"state": NOT_CONFIGURED, "detail": "elevenlabs voice selected but no API key is set"}
+        return {"state": CONFIGURED, "detail": "elevenlabs voice configured"}
+    return {"state": CONFIGURED, "detail": f"local voice engine ('{provider}')"}
+
+
 def _buildpro_store() -> dict[str, Any]:
     """Local sqlite storage — never NOT_CONFIGURED (there is no credential),
     only CONFIGURED or UNAVAILABLE if the file can't be opened."""
@@ -229,6 +252,7 @@ PROBES: dict[str, Callable[[], dict[str, Any]]] = {
     "jarvis_brain": _brain,
     "web_research": _web_research,
     "buildpro_store": _buildpro_store,
+    "voice": _voice,
 }
 
 # What each business operation actually needs to be possible at all.

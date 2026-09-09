@@ -229,6 +229,24 @@ class AgentTask:
         return d
 
 
+def task_succeeded(task: "AgentTask") -> bool:
+    """Whether a task actually finished clean — not merely non-raising.
+
+    A handler can catch its own error and return it as a normal DONE
+    result (see the 2026-09-02 reliability-audit comment on
+    _attempt_once), so DONE alone is not success. Shared here rather than
+    duplicated: actions/ceo_operating_cycle.py's cycle-run verification and
+    this module's own approve/reject outcome recording both need the exact
+    same answer to "did this really work", and two copies of that check
+    drifting apart is how a real failure starts reading as a success."""
+    if task.status != TaskStatus.DONE:
+        return False
+    result = task.result or {}
+    if isinstance(result, dict) and (result.get("error") or result.get("failed")):
+        return False
+    return True
+
+
 @dataclass
 class AgentEvent:
     agent_id: str
@@ -873,8 +891,14 @@ def _buildpro_hubspot_writeback_handler(task: "AgentTask") -> dict:
         external_system="hubspot", reference_id=result.get("id"),
     )
     if not result.get("ok"):
+        # "error" is not decoration — task_succeeded() (and, downstream,
+        # ceo_decision.record_outcome()'s WRITE_FAILED-worthy evidence for
+        # Brain) reads exactly this key to tell a completed write from a
+        # failed one. A handler that returns cleanly without it is a DONE
+        # task with a failed HubSpot write inside — the false success this
+        # codebase's own reliability rules exist to prevent.
         return {"summary": f"Could not write '{name}' to HubSpot: {result.get('detail')}",
-                "created": False}
+                "created": False, "error": result.get("detail") or "hubspot write failed"}
     return {"summary": (f"Updated existing HubSpot company '{name}'." if already else
                         f"Created HubSpot company '{name}'."),
             "created": not already, "updated": already, "hubspot_id": result.get("id")}
@@ -905,7 +929,13 @@ def _buildpro_email_responder_handler(task: "AgentTask") -> dict:
         external_system="gmail", reference_id=r.get("message_id"),
     )
     if not r["ok"]:
-        return {"summary": f"Couldn't send draft {draft_id} ({r.get('state')}): {r.get('detail')}", "sent": False}
+        # See the matching comment in _buildpro_hubspot_writeback_handler:
+        # without "error" here, a failed send still reads DONE to
+        # task_succeeded(), which is the exact false success this handler
+        # otherwise looks careful about (it already checks r["ok"] before
+        # claiming anything was sent).
+        return {"summary": f"Couldn't send draft {draft_id} ({r.get('state')}): {r.get('detail')}",
+                "sent": False, "error": r.get("detail") or f"send failed: {r.get('state')}"}
     return {"summary": f"Sent draft {draft_id}.", "sent": True, "message_id": r.get("message_id")}
 
 
@@ -1733,7 +1763,33 @@ class AgentOrchestrator:
         task.updated_ts = time.time()
         _save_task(task)
         self._log_event(task.agent_id, "log", f"Task {task_id} approved — running.")
-        return self.run_task(task_id)
+        ran = self.run_task(task_id)
+        self._record_execution_outcome(ran)
+        return ran
+
+    def _record_execution_outcome(self, task: "AgentTask") -> None:
+        """LEARN from what actually happened once an EXECUTE-level task ran.
+
+        Distinct from cross_system.apply_sms_decision()'s "approval:<agent>"
+        outcome (was the request approved) — this is "<agent>" itself (did
+        the approved work succeed), the same source the CEO cycle records
+        against for its own OBSERVE/SUGGEST agent runs. Without this, an
+        approval reached from the dashboard or a voice command left no
+        record at all: only the SMS path recorded anything, and even that
+        recorded the approval decision, never whether the HubSpot write (or
+        any other EXECUTE handler) actually succeeded."""
+        try:
+            from actions import ceo_decision
+            ok = task_succeeded(task)
+            detail = task.error or (
+                (task.result or {}).get("summary") if isinstance(task.result, dict) else None
+            ) or (f"task {task.id} -> {task.status.value}")
+            ceo_decision.record_outcome(
+                {"source": task.agent_id, "title": f"agent {task.agent_id}",
+                 "kind": "agent_task", "business": "general"},
+                ok=ok, detail=detail, verified=ok)
+        except Exception:
+            logger.debug("could not record execution outcome for task %s", task.id, exc_info=True)
 
     def cancel_task(self, task_id: str, reason: str = "") -> AgentTask:
         """Withdraws a task awaiting approval. Distinct from reject_task:
@@ -1804,10 +1860,25 @@ class AgentOrchestrator:
 
     def reject_task(self, task_id: str) -> AgentTask:
         task = self._require_task(task_id)
+        if task.status != TaskStatus.PENDING_APPROVAL:
+            return task
         task.status = TaskStatus.REJECTED
         task.updated_ts = time.time()
         _save_task(task)
         self._log_event(task.agent_id, "log", f"Task {task_id} rejected.")
+        # A rejection is a real outcome too — Lee repeatedly declining what
+        # this agent proposes is exactly the signal ceo_decision.decide()
+        # already escalates a repeatedly-failing source on; without this,
+        # rejected work vanished, and the same unwanted proposal could keep
+        # reappearing forever with nothing ever escalating it.
+        try:
+            from actions import ceo_decision
+            ceo_decision.record_outcome(
+                {"source": task.agent_id, "title": f"agent {task.agent_id}",
+                 "kind": "agent_task", "business": "general"},
+                ok=False, detail=f"Lee rejected: {task.description}"[:300], verified=True)
+        except Exception:
+            logger.debug("could not record rejection outcome for task %s", task.id, exc_info=True)
         return task
 
     def _retry_safe(self, agent: "AgentDefinition") -> bool:

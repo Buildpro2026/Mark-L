@@ -278,11 +278,13 @@ def test_an_unverified_success_is_treated_as_a_lesson(monkeypatch):
 
 
 def test_a_store_failure_never_breaks_the_action_that_produced_it(monkeypatch):
-    from actions import operating_memory, business_intelligence as biz
+    from actions import operating_memory, business_intelligence as biz, brain_memory
     monkeypatch.setattr(operating_memory, "record",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
     monkeypatch.setattr(biz, "add_entry",
                         lambda **k: (_ for _ in ()).throw(RuntimeError("db down")))
+    monkeypatch.setattr(brain_memory, "remember",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
     result = cd.record_outcome(_item(title="x"), ok=False)   # must not raise
     assert result["ok"] is True
     assert result["recorded_to"] == []

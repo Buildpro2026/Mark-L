@@ -118,16 +118,12 @@ def _mark_ran(run_date: str, summary: str, risk_count: int, agents_run: int) -> 
 
 
 def _task_ok(task) -> bool:
-    """A task counts as verified-success only if it actually finished
-    clean — matches AgentOrchestrator.run_task's own DONE/error-vs-failure
-    distinction (see its 2026-09-02 reliability-audit comment) rather than
-    treating any non-exception result as success."""
-    if task.status.value != "done":
-        return False
-    result = task.result or {}
-    if isinstance(result, dict) and (result.get("error") or result.get("failed")):
-        return False
-    return True
+    """Whether a task actually finished clean. Delegates to
+    agent_orchestrator.task_succeeded() — the same check now used when an
+    approved EXECUTE task's outcome is recorded — rather than keeping a
+    second copy of the DONE/error-vs-failure distinction here."""
+    from actions.agent_orchestrator import task_succeeded
+    return task_succeeded(task)
 
 
 def _gather() -> dict[str, Any]:
@@ -221,23 +217,13 @@ def _decide_and_execute() -> dict[str, Any]:
     layers the one genuinely new autonomous action (DDF discovery, which
     is itself OBSERVE-class: a local DISCOVERED-status write, never a
     publish) alongside them."""
-    # Turn real business findings into real tasks BEFORE the sweep runs, so
-    # anything discovered this morning is executed in the same cycle rather
-    # than waiting a day. This is what connects the integrations (Gmail,
-    # Calendar, HubSpot, DDF, BuildPro, research) to the agent workforce;
-    # each source is isolated inside gather_and_dispatch, and every finding
-    # is claimed once through autonomous_ledger so a subject cannot generate
-    # the same work on every sweep.
-    try:
-        business = business_pipeline.gather_and_dispatch()
-    except Exception as exc:
-        logger.exception("business pipeline pass failed")
-        business = {"sources": {}, "states": {}, "dispatched": [], "total_dispatched": 0,
-                    "healthy_sources": 0, "error": str(exc)}
-
-    # BuildPro matching is a daily product, not an on-demand tool — it is
-    # the thing Lee reads first each morning. Isolated like every other
-    # stage: a matching failure must not cost the rest of the cycle.
+    # BuildPro matching runs FIRST, before the business-findings sweep below
+    # reads its results. gather_and_dispatch()'s buildpro_findings() reads
+    # bd.top_matches() — the table run_and_report() just discovered jobs
+    # into and scored — so if the sweep ran first it dispatched outreach
+    # tasks against YESTERDAY's matches while today's freshly-discovered
+    # jobs sat unmatched-into-tasks until tomorrow's cycle. Isolated like
+    # every other stage: a matching failure must not cost the rest.
     try:
         from actions import buildpro_daily
         matching = buildpro_daily.run_and_report()
@@ -245,6 +231,19 @@ def _decide_and_execute() -> dict[str, Any]:
         logger.exception("daily BuildPro matching failed")
         matching = {"ok": False, "state": "FAILED", "detail": str(exc)[:300],
                     "report": "", "strong_matches": 0}
+
+    # Turn real business findings into real tasks. This is what connects
+    # the integrations (Gmail, Calendar, HubSpot, DDF, BuildPro, research)
+    # to the agent workforce; each source is isolated inside
+    # gather_and_dispatch, and every finding is claimed once through
+    # autonomous_ledger so a subject cannot generate the same work on
+    # every sweep.
+    try:
+        business = business_pipeline.gather_and_dispatch()
+    except Exception as exc:
+        logger.exception("business pipeline pass failed")
+        business = {"sources": {}, "states": {}, "dispatched": [], "total_dispatched": 0,
+                    "healthy_sources": 0, "error": str(exc)}
 
     due_tasks = agent_orchestrator.run_due_agents()
     stale_tasks = agent_orchestrator.run_stale_autonomous_agents()

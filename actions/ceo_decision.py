@@ -377,5 +377,34 @@ def record_outcome(item: dict[str, Any], ok: bool, detail: str = "",
         except Exception:
             logger.debug("could not record a lesson", exc_info=True)
 
+    # A successful action becomes usable evidence too, not only a failed
+    # one — brain_memory.recall_for() and this module's own context_for()
+    # already surface prior "knowledge" to score_item()'s reasoning; before
+    # this write the only outcome that ever reached that store was a
+    # research finding, so a real, verified success (an approved HubSpot
+    # writeback, a completed agent run) taught the Brain nothing. Sourced
+    # by the item's own source, so it is never subject to the unsourced-
+    # claim confidence cap, and confidence tracks verification honestly:
+    # an unverified success is weaker evidence than a verified one, and a
+    # failure is recorded as evidence too — that is what makes it "less
+    # attractive when the same conditions recur" rather than merely logged.
+    try:
+        from actions import brain_memory
+        if ok and verified is not False:
+            confidence = 0.75 if verified else 0.5
+        else:
+            confidence = 0.6
+        brain_memory.remember(
+            brain_memory.OUTCOME, subject=title,
+            content=(detail or ("completed" if ok else "failed"))[:400],
+            confidence=confidence, source=source,
+            business=str(item.get("business") or "general"),
+            data={"disposition": (item.get("decision") or {}).get("disposition"),
+                  "verified": verified, "ok": ok},
+        )
+        written.append("brain_memory")
+    except Exception:
+        logger.debug("could not record outcome to brain_memory", exc_info=True)
+
     return {"ok": True, "recorded_to": written, "source": source,
             "outcome": "ok" if ok else "failed", "ts": time.time()}
