@@ -236,13 +236,39 @@ def interpret_reply(body: str) -> dict[str, Any]:
             "reason": "the reply did not plainly approve or reject"}
 
 
+def _same_phone(a: str, b: str) -> bool:
+    """Digits-only comparison, tolerant of "+1 555-123-4567" vs
+    "+15551234567" formatting differences. Empty on either side is never
+    a match — an unset owner number must refuse, not compare equal to an
+    unset caller number."""
+    da, db = re.sub(r"\D", "", a or ""), re.sub(r"\D", "", b or "")
+    return bool(da) and bool(db) and da == db
+
+
 def apply_sms_decision(body: str, from_number: str = "") -> dict[str, Any]:
     """Turn one inbound SMS into a real approval decision.
 
     Routes through agent_orchestrator's existing approve/reject — this
     does not decide anything itself and cannot bypass the gate. An
     ambiguous reply, an unknown task, or a task no longer awaiting
-    approval all change nothing and say so."""
+    approval all change nothing and say so.
+
+    SENDER CHECK (2026-09-09 fix): the webhook that calls this only
+    verifies the request came from Twilio's platform — it says nothing
+    about who texted. Every outbound SMS (business texts to candidates
+    and clients included) shares the one configured Twilio number, so
+    ANY inbound reply — from anyone who ever received a text from
+    JARVIS — hits this same function. Without comparing the sender
+    against the configured owner, a candidate replying "yes" to a
+    routine text could approve whatever agent task happened to be
+    pending. This never decides anything itself either: an unset owner
+    number refuses every reply rather than falling open."""
+    from core.headless import config
+
+    if not _same_phone(from_number, config.JARVIS_OWNER_PHONE):
+        return {"ok": False, "state": "UNAUTHORIZED", "applied": False,
+                "detail": "this number is not authorized to approve or reject tasks"}
+
     from actions import agent_orchestrator
 
     verdict = interpret_reply(body)

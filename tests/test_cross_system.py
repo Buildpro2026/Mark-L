@@ -222,10 +222,73 @@ def _orchestrator(monkeypatch, tasks, approved=None, rejected=None):
     return orch
 
 
-def test_a_yes_approves_the_single_pending_task(monkeypatch):
+# ══ ONLY THE OWNER'S NUMBER MAY APPROVE OR REJECT ═══════════════════════
+# The webhook that calls apply_sms_decision only verifies the request came
+# from Twilio's platform — nothing about who texted. Every outbound SMS
+# (routine business texts to candidates/clients included) shares the one
+# configured Twilio number, so any reply from anyone who ever received a
+# text from JARVIS reaches this same function. Every test below that
+# exercises a real approve/reject now has to supply the owner's own number
+# to keep working — that is the point of the fix, not a workaround for it.
+
+OWNER_PHONE = "+15550001111"
+
+
+@pytest.fixture(autouse=True)
+def _owner_phone(monkeypatch):
+    from core.headless import config
+    monkeypatch.setattr(config, "JARVIS_OWNER_PHONE", OWNER_PHONE)
+
+
+def test_a_reply_from_an_unauthorized_number_is_refused(monkeypatch):
+    approved = []
+    _orchestrator(monkeypatch, [_Task("task-1")], approved=approved)
+    result = cs.apply_sms_decision("yes", from_number="+15559998888")
+    assert result["ok"] is False
+    assert result["state"] == "UNAUTHORIZED"
+    assert result["applied"] is False
+    assert approved == [], "an unauthorized sender must never approve a task"
+
+
+def test_a_reply_with_no_sender_number_at_all_is_refused(monkeypatch):
+    # The webhook always supplies Twilio's From field, but the function
+    # itself must not fall open just because the argument was omitted.
     approved = []
     _orchestrator(monkeypatch, [_Task("task-1")], approved=approved)
     result = cs.apply_sms_decision("yes")
+    assert result["state"] == "UNAUTHORIZED"
+    assert approved == []
+
+
+def test_no_owner_number_configured_refuses_every_sender(monkeypatch):
+    from core.headless import config
+    monkeypatch.setattr(config, "JARVIS_OWNER_PHONE", "")
+    approved = []
+    _orchestrator(monkeypatch, [_Task("task-1")], approved=approved)
+    result = cs.apply_sms_decision("yes", from_number=OWNER_PHONE)
+    assert result["state"] == "UNAUTHORIZED"
+    assert approved == []
+
+
+@pytest.mark.parametrize("formatted", ["+1 555-000-1111", "15550001111"])
+def test_owner_number_formatting_differences_are_tolerated(monkeypatch, formatted):
+    # Same digit sequence as OWNER_PHONE, different punctuation/leading
+    # "+" — Twilio's From is always strict E.164, but this tolerates a
+    # human-entered JARVIS_OWNER_PHONE env var that isn't pasted in
+    # exactly that form. A genuinely different number (missing country
+    # code, a different area code, ...) is a different digit sequence
+    # and correctly stays unauthorized — that is not this test's claim.
+    approved = []
+    _orchestrator(monkeypatch, [_Task("task-1")], approved=approved)
+    result = cs.apply_sms_decision("yes", from_number=formatted)
+    assert result["state"] == "APPROVED"
+    assert approved == ["task-1"]
+
+
+def test_a_yes_approves_the_single_pending_task(monkeypatch):
+    approved = []
+    _orchestrator(monkeypatch, [_Task("task-1")], approved=approved)
+    result = cs.apply_sms_decision("yes", from_number=OWNER_PHONE)
     assert result["ok"] is True and result["state"] == "APPROVED"
     assert approved == ["task-1"]
 
@@ -233,7 +296,7 @@ def test_a_yes_approves_the_single_pending_task(monkeypatch):
 def test_a_no_rejects_it(monkeypatch):
     rejected = []
     _orchestrator(monkeypatch, [_Task("task-1")], rejected=rejected)
-    result = cs.apply_sms_decision("no")
+    result = cs.apply_sms_decision("no", from_number=OWNER_PHONE)
     assert result["state"] == "REJECTED"
     assert rejected == ["task-1"]
 
@@ -243,7 +306,7 @@ def test_a_bare_yes_with_several_pending_changes_nothing(monkeypatch):
     # gets executed.
     approved = []
     _orchestrator(monkeypatch, [_Task("task-1"), _Task("task-2")], approved=approved)
-    result = cs.apply_sms_decision("yes")
+    result = cs.apply_sms_decision("yes", from_number=OWNER_PHONE)
     assert result["ok"] is False
     assert result["state"] == "AMBIGUOUS"
     assert result["applied"] is False
@@ -253,7 +316,7 @@ def test_a_bare_yes_with_several_pending_changes_nothing(monkeypatch):
 def test_naming_the_task_resolves_the_ambiguity(monkeypatch):
     approved = []
     _orchestrator(monkeypatch, [_Task("aaa111"), _Task("bbb222")], approved=approved)
-    result = cs.apply_sms_decision("yes bbb222")
+    result = cs.apply_sms_decision("yes bbb222", from_number=OWNER_PHONE)
     assert result["state"] == "APPROVED"
     assert approved == ["bbb222"]
 
@@ -261,7 +324,7 @@ def test_naming_the_task_resolves_the_ambiguity(monkeypatch):
 def test_an_unclear_reply_applies_nothing(monkeypatch):
     approved = []
     _orchestrator(monkeypatch, [_Task("task-1")], approved=approved)
-    result = cs.apply_sms_decision("hmm not sure")
+    result = cs.apply_sms_decision("hmm not sure", from_number=OWNER_PHONE)
     assert result["applied"] is False
     assert result["state"] == "UNCLEAR"
     assert approved == []
@@ -269,7 +332,7 @@ def test_an_unclear_reply_applies_nothing(monkeypatch):
 
 def test_a_reply_with_nothing_pending_is_reported_honestly(monkeypatch):
     _orchestrator(monkeypatch, [])
-    result = cs.apply_sms_decision("yes")
+    result = cs.apply_sms_decision("yes", from_number=OWNER_PHONE)
     assert result["state"] == "NOT_FOUND"
     assert result["applied"] is False
 
@@ -277,7 +340,7 @@ def test_a_reply_with_nothing_pending_is_reported_honestly(monkeypatch):
 def test_a_task_no_longer_awaiting_approval_is_not_touched(monkeypatch):
     approved = []
     _orchestrator(monkeypatch, [_Task("task-1", status="completed")], approved=approved)
-    result = cs.apply_sms_decision("yes")
+    result = cs.apply_sms_decision("yes", from_number=OWNER_PHONE)
     assert result["state"] == "NOT_FOUND"
     assert approved == []
 
@@ -297,7 +360,7 @@ def test_an_approval_decision_is_recorded_as_an_outcome(monkeypatch):
     monkeypatch.setattr(ceo_decision, "record_outcome",
                         lambda item, **k: recorded.append((item, k)) or {"ok": True})
     _orchestrator(monkeypatch, [_Task("task-1")])
-    cs.apply_sms_decision("yes")
+    cs.apply_sms_decision("yes", from_number=OWNER_PHONE)
     assert recorded, "the approval outcome never reached memory"
     assert recorded[0][1]["ok"] is True
 
@@ -308,7 +371,7 @@ def test_a_failing_orchestrator_is_reported_not_swallowed(monkeypatch):
     monkeypatch.setattr(orch, "list_tasks", lambda **k: [_Task("task-1")])
     monkeypatch.setattr(orch, "approve_task",
                         lambda tid: (_ for _ in ()).throw(RuntimeError("db locked")))
-    result = cs.apply_sms_decision("yes")
+    result = cs.apply_sms_decision("yes", from_number=OWNER_PHONE)
     assert result["ok"] is False and result["state"] == "FAILED"
     assert "locked" in result["detail"]
 
