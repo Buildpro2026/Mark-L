@@ -143,9 +143,30 @@ def _ddg_news(query: str, max_results: int = 8) -> list[dict]:
     return results
 
 
+def _could_not_verify(query: str, reason: str = "") -> str:
+    """The one honest failure message for every web_search mode: live
+    search could not be completed. Deliberately states the non-existence
+    caveat INSIDE the tool result itself, not only in the system prompt —
+    a caveat sitting right next to the failure a model is about to
+    describe is a much stronger, harder-to-miss signal than general
+    guidance stated once earlier in context, and this exact gap (a bare
+    "Search failed: <raw exception>" with no such caveat) is what let
+    "the iPhone 16 has not been released" get fabricated from a genuine
+    search outage."""
+    detail = f" ({reason})" if reason else ""
+    return (
+        f"I could not verify this right now — live web search is currently "
+        f"unavailable{detail}. This is NOT evidence that '{query}' does not "
+        f"exist, was never released, or is unavailable; it only means the "
+        f"check could not be completed. Tell the user plainly that this "
+        f"could not be verified — never guess or invent an explanation."
+    )
+
+
 def _format_ddg(query: str, results: list[dict]) -> str:
     if not results:
-        return f"No results found for: {query}"
+        return (f"No results found for: {query}. This does not mean it doesn't "
+                f"exist — only that this particular search did not surface it.")
 
     lines = [f"Search results for: {query}\n"]
     for i, r in enumerate(results, 1):
@@ -294,7 +315,11 @@ def _search(query: str) -> str:
     )
     if result is not None:
         return result
-    return _format_ddg(query, _ddg_search(query))
+    try:
+        return _format_ddg(query, _ddg_search(query))
+    except Exception as e:
+        _log_search_error("search-retry", e)
+        return _could_not_verify(query, "search backends are unreachable right now")
 
 
 def _news(query: str) -> str:
@@ -362,7 +387,11 @@ def _research(query: str) -> str:
     )
     if result is not None:
         return result
-    return _format_ddg(query, _ddg_search(query, max_results=10))
+    try:
+        return _format_ddg(query, _ddg_search(query, max_results=10))
+    except Exception as e:
+        _log_search_error("research-retry", e)
+        return _could_not_verify(query, "search backends are unreachable right now")
 
 
 def _price(query: str) -> str:
@@ -375,7 +404,11 @@ def _price(query: str) -> str:
     )
     if result is not None:
         return result
-    return _format_ddg(query, _ddg_search(f"{query} price buy", max_results=6))
+    try:
+        return _format_ddg(query, _ddg_search(f"{query} price buy", max_results=6))
+    except Exception as e:
+        _log_search_error("price-retry", e)
+        return _could_not_verify(query, "search backends are unreachable right now")
 
 
 def _compare(items: list[str], aspect: str) -> str:
@@ -444,4 +477,4 @@ def web_search(
 
     except Exception as e:
         print(f"[WebSearch] ❌ All backends failed: {e}")
-        return f"Search failed: {e}"
+        return _could_not_verify(query or ", ".join(items), str(e))

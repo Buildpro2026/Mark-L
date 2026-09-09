@@ -153,6 +153,55 @@ def test_grounding_sources_survives_a_response_shape_with_no_metadata_at_all():
     assert ws._grounding_sources(response) == []
 
 
+# ── Double failure: never fabricate non-existence from a search outage ────
+# (production bug: JARVIS told the user "the iPhone 16 has not been
+# released" when both search backends were simply unreachable. The gap was
+# these modes' own unprotected retry of _ddg_search() after _race() already
+# gave up — it could raise straight into the generic "Search failed: {e}"
+# handler, which has no anti-fabrication caveat at all.)
+
+def test_search_reports_could_not_verify_when_both_backends_fail(monkeypatch):
+    monkeypatch.setattr(ws, "_gemini_search", lambda q: (_ for _ in ()).throw(
+        RuntimeError("connection reset")))
+    monkeypatch.setattr(ws, "_ddg_search", lambda q, max_results=6: (_ for _ in ()).throw(
+        RuntimeError("connection reset")))
+    result = ws._search("iphone 16 price")
+    assert "could not verify" in result.lower()
+    # The message states the non-existence caveat as an explicit negation —
+    # "NOT evidence that X does not exist... was never released" — never as
+    # a bare, unqualified claim.
+    assert "not evidence" in result.lower()
+
+
+def test_price_reports_could_not_verify_when_both_backends_fail(monkeypatch):
+    monkeypatch.setattr(ws, "_gemini_search", lambda q: (_ for _ in ()).throw(
+        RuntimeError("connection reset")))
+    monkeypatch.setattr(ws, "_ddg_search", lambda q, max_results=6: (_ for _ in ()).throw(
+        RuntimeError("connection reset")))
+    result = ws._price("iphone 16")
+    assert "could not verify" in result.lower()
+    assert "not evidence" in result.lower()
+
+
+def test_research_reports_could_not_verify_when_both_backends_fail(monkeypatch):
+    monkeypatch.setattr(ws, "_gemini_search", lambda q: (_ for _ in ()).throw(
+        RuntimeError("connection reset")))
+    monkeypatch.setattr(ws, "_ddg_search", lambda q, max_results=10: (_ for _ in ()).throw(
+        RuntimeError("connection reset")))
+    result = ws._research("iphone 16")
+    assert "could not verify" in result.lower()
+    assert "not evidence" in result.lower()
+
+
+def test_web_search_entry_point_never_fabricates_nonexistence_on_a_hard_failure(monkeypatch):
+    def boom(query):
+        raise RuntimeError("network unreachable")
+    monkeypatch.setattr(ws, "_search", boom)
+    result = ws.web_search(parameters={"query": "iphone 16 price", "mode": "search"})
+    assert "could not verify" in result.lower()
+    assert "not evidence" in result.lower()
+
+
 def test_gemini_search_includes_real_sources_and_a_checked_timestamp(monkeypatch):
     response = _fake_grounded_response(
         text="The current price is $999.",

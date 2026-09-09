@@ -57,7 +57,13 @@ TOOL_DECLARATIONS = [
             "or topics — always prefer this over guessing. "
             "Modes: 'search' (default), 'news' (latest headlines on a topic), "
             "'research' (deep comprehensive answer), 'price' (product cost lookup), "
-            "'compare' (side-by-side comparison of items)."
+            "'compare' (side-by-side comparison of items). "
+            "If the result says it could not verify the query right now (search "
+            "backends unreachable), say exactly that — it could not be verified — "
+            "and NEVER reinterpret a failed search as evidence the product, "
+            "person, company, or topic does not exist, was never released, or is "
+            "unavailable. A search that could not reach the web has told you "
+            "nothing about the subject at all."
         ),
         "parameters": {
             "type": "OBJECT",
