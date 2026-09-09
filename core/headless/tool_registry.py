@@ -924,6 +924,12 @@ TOOL_DECLARATIONS = [
             "it (submitting a candidate, rejecting one, or any other "
             "consequential step) — this tool only scores and stores "
             "matches locally; it never contacts anyone. "
+            "USE action='daily_report' FOR ANY 'what are today's matches', "
+            "'show me the matches', 'any strong candidates today', 'daily "
+            "BuildPro report' request — it runs the real matcher over the "
+            "open jobs and available candidates and returns counted results "
+            "with the evidence behind each score. 'intake_jobs' takes in new "
+            "postings, deduplicating them against what is already on file. "
             "Actions: 'add_candidate' (adds or updates a candidate record "
             "— deduplicated by email, so adding the same person twice "
             "just updates them, never creates a duplicate; local write "
@@ -940,7 +946,9 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":         {"type": "STRING", "description": "add_candidate | add_job | score | match_job | match_candidate | top_matches"},
+                "action":         {"type": "STRING", "description": "daily_report | intake_jobs | add_candidate | add_job | score | match_job | match_candidate | top_matches"},
+                "jobs":           {"type": "ARRAY", "description": "Postings to take in, for 'intake_jobs'", "items": {"type": "OBJECT"}},
+                "source":         {"type": "STRING", "description": "Where the postings came from, for 'intake_jobs'"},
                 "name":           {"type": "STRING", "description": "Candidate full name, for 'add_candidate'"},
                 "email":          {"type": "STRING", "description": "Candidate email — the dedup key, for 'add_candidate'"},
                 "title":          {"type": "STRING", "description": "Candidate's job title/role for 'add_candidate', or the job title for 'add_job'"},

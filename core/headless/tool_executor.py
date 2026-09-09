@@ -1102,6 +1102,24 @@ class ToolExecutor:
                         f"candidate {m['candidate_id']} / job {m['job_id']}: {m['match_score']}"
                         for m in matches[:limit]
                     )
+            elif bmaction in ("daily_report", "daily", "todays_matches", "today"):
+                # The daily operational question. Runs the real matcher and
+                # reports counted values — never a summary of numbers
+                # nobody computed.
+                from actions import buildpro_daily
+                r = await loop.run_in_executor(None, buildpro_daily.run_and_report)
+                result = r.get("report") or "The matching run produced no report."
+                if (r.get("discovery") or {}).get("state") == "NOT_CONFIGURED":
+                    result += ("\n\nNote: no job-board source is configured, so no new "
+                               "postings were retrieved today.")
+            elif bmaction == "intake_jobs":
+                from actions import buildpro_daily
+                jobs = args.get("jobs") or []
+                r = await loop.run_in_executor(
+                    None, lambda: buildpro_daily.intake_jobs(
+                        jobs, source=args.get("source") or "manual"))
+                result = (f"Took in {r['received']} posting(s): {r['stored']} new, "
+                          f"{r['updated']} updated, {r['skipped']} skipped.")
             else:
                 result = f"Unknown buildpro_matching action: {bmaction}"
 

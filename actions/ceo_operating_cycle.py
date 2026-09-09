@@ -202,6 +202,17 @@ def _decide_and_execute() -> dict[str, Any]:
         business = {"sources": {}, "states": {}, "dispatched": [], "total_dispatched": 0,
                     "healthy_sources": 0, "error": str(exc)}
 
+    # BuildPro matching is a daily product, not an on-demand tool — it is
+    # the thing Lee reads first each morning. Isolated like every other
+    # stage: a matching failure must not cost the rest of the cycle.
+    try:
+        from actions import buildpro_daily
+        matching = buildpro_daily.run_and_report()
+    except Exception as exc:
+        logger.exception("daily BuildPro matching failed")
+        matching = {"ok": False, "state": "FAILED", "detail": str(exc)[:300],
+                    "report": "", "strong_matches": 0}
+
     due_tasks = agent_orchestrator.run_due_agents()
     stale_tasks = agent_orchestrator.run_stale_autonomous_agents()
 
@@ -213,7 +224,8 @@ def _decide_and_execute() -> dict[str, Any]:
         discovery_result = {"ok": False, "state": "ERROR", "detail": str(exc), "discovered": [], "saved": 0, "errors": [{"detail": str(exc)}]}
 
     return {"due_tasks": due_tasks, "stale_tasks": stale_tasks,
-            "discovery_result": discovery_result, "business": business}
+            "discovery_result": discovery_result, "business": business,
+            "buildpro_matching": matching}
 
 
 def _verify_and_followup(execution: dict[str, Any]) -> list[dict[str, Any]]:
@@ -281,6 +293,13 @@ def _verify_and_followup(execution: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+def buildpro_daily_module():
+    """Imported lazily so a BuildPro import problem cannot stop the whole
+    module from loading — the report degrades, the cycle does not."""
+    from actions import buildpro_daily
+    return buildpro_daily
+
+
 def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], execution: dict[str, Any], verifications: list[dict[str, Any]]) -> str:
     brief = gathered["brief"]
     risks = brief.get("risks", [])
@@ -289,6 +308,24 @@ def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], e
     failed_verifications = [v for v in verifications if not v["success"] and v.get("follow_up_required")]
 
     lines = [f"Morning cycle — {len(priorities)} item(s) need attention."]
+
+    # BuildPro matches lead the report: they are the day's revenue
+    # opportunity, and every number in this block is counted by
+    # buildpro_daily rather than asserted here.
+    matching = execution.get("buildpro_matching") or {}
+    if matching.get("ok"):
+        lines.append(
+            f"BuildPro matching: {matching.get('strong_matches', 0)} strong match(es) "
+            f"from {matching.get('jobs_evaluated', 0)} open job(s) against "
+            f"{matching.get('candidates_evaluated', 0)} candidate(s).")
+        top = matching.get("top")
+        if top and top.get("score") is not None:
+            lines.append(
+                f"  Best: {top.get('candidate_name') or 'a candidate'} → "
+                f"{top.get('job_title') or 'a job'} at {float(top['score']):.0f}% "
+                f"— {buildpro_daily_module().recommended_action(top).lower()}.")
+    elif matching:
+        lines.append(f"BuildPro matching did not run: {matching.get('detail') or 'unknown error'}")
     buildpro = brief.get("buildpro", {})
     bp_counts = buildpro.get("counts", {})
     if bp_counts:
