@@ -56,7 +56,7 @@ def _gemini_grounded_response(query: str):
 
     client = get_client(_get_api_key())
     return client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=query,
         config={"tools": [{"google_search": {}}]},
     )
@@ -209,7 +209,7 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
 
     client = get_client(_get_api_key())
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=f"Current world news: {n} headlines. Numbered list, titles only.",
         config={"tools": [{"google_search": {}}]},
     )

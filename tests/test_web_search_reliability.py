@@ -221,3 +221,45 @@ def test_gemini_search_includes_real_sources_and_a_checked_timestamp(monkeypatch
     assert "The current price is $999." in result
     assert "https://www.apple.com/iphone-17/" in result
     assert "checked " in result and "UTC" in result
+
+
+# ── Web-research model migration (Lee's instruction, 2026-09-09):
+# gemini-2.5-flash -> gemini-3.8-flash, for both grounded-search call
+# sites in this module (the primary web-research discovery path used by
+# actions/web_research.py, and the briefing headlines call). Ollama and
+# the DDG fallback are untouched by this migration.
+
+def test_gemini_grounded_response_uses_gemini_3_8_flash(monkeypatch):
+    calls = []
+
+    class _FakeModels:
+        def generate_content(self, **kw):
+            calls.append(kw)
+            return _fake_grounded_response()
+
+    import core.headless.gemini_client as gemini_client
+    monkeypatch.setattr(gemini_client, "get_client",
+                        lambda key: type("Client", (), {"models": _FakeModels()})())
+    monkeypatch.setattr(ws, "_get_api_key", lambda: "fake-key")
+
+    ws._gemini_grounded_response("current price of iphone 17")
+
+    assert calls and calls[0]["model"] == "gemini-3.8-flash"
+
+
+def test_gemini_headlines_uses_gemini_3_8_flash(monkeypatch):
+    calls = []
+
+    class _FakeModels:
+        def generate_content(self, **kw):
+            calls.append(kw)
+            return _fake_grounded_response(text="1. Headline one\n2. Headline two")
+
+    import core.headless.gemini_client as gemini_client
+    monkeypatch.setattr(gemini_client, "get_client",
+                        lambda key: type("Client", (), {"models": _FakeModels()})())
+    monkeypatch.setattr(ws, "_get_api_key", lambda: "fake-key")
+
+    ws._gemini_headlines(2)
+
+    assert calls and calls[0]["model"] == "gemini-3.8-flash"
