@@ -163,6 +163,52 @@ class ToolExecutor:
                 None, lambda: clock.current_time(args.get("timezone") or "")
             )
 
+        elif name == "web_research":
+            # The structured research path. web_search (below) stays as it
+            # is — it returns prose for conversational answers; this
+            # returns sources, timestamps and evidence classes that Brain
+            # and the CEO layer can actually consume. One engine, reached
+            # identically from text, voice, the CEO cycle and any agent.
+            from actions import web_research
+            raction = (args.get("action") or "research").strip().lower()
+            question = (args.get("question") or args.get("query") or "").strip()
+            max_sources = int(args.get("max_sources") or 3)
+
+            if not question:
+                result = "I need something to research."
+            elif raction == "search":
+                r = await loop.run_in_executor(None, lambda: web_research.search(question))
+                if not r.get("ok") or not r.get("sources"):
+                    result = f"No sources found for that: {r.get('detail') or r.get('state')}"
+                else:
+                    result = "\n".join(
+                        [f"{len(r['sources'])} candidate source(s) — none read yet:"]
+                        + [f"  - {s['title'] or s['host']}: {s['url']}" for s in r["sources"][:8]])
+            else:
+                r = await loop.run_in_executor(
+                    None, lambda: web_research.research(question, max_sources=max_sources))
+                lines = [web_research.summarize(r)]
+                if r.get("ok") and r.get("results"):
+                    comparison = web_research.compare_field(r["results"], args.get("field") or "price")
+                    if comparison.get("ok"):
+                        lines.append("")
+                        lines.append(comparison["detail"] + ":")
+                        for obs in comparison["observations"]:
+                            lines.append(f"  - {obs['value']} from {obs['source_title'] or obs['source_url']}"
+                                         f" ({obs['evidence'].lower()}, observed {obs['observed_at']})")
+                        if comparison.get("lowest"):
+                            lines.append(f"  Lowest observed: {comparison['lowest']['value']} "
+                                         f"at {comparison['lowest']['source_url']}")
+                        if comparison.get("conflict"):
+                            lines.append("  Sources disagree — both values are shown rather than averaged.")
+                audit_log.record(
+                    "web_research", execution_status="succeeded" if r.get("ok") else "failed",
+                    result={"sources_read": len(r.get("sources_read") or []),
+                            "confidence": r.get("confidence")},
+                    error=None if r.get("ok") else r.get("detail"),
+                    external_system="web_research")
+                result = "\n".join(lines)
+
         elif name == "web_search":
             r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=ctx.ui))
             result = r or "Done."

@@ -841,6 +841,38 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "web_research",
+        "description": (
+            "Research anything on the live internet and return what was "
+            "ACTUALLY found, with sources. USE THIS for 'research X', 'find "
+            "the current price of X', 'compare X across sources', 'what does "
+            "the market look like for X', 'go and look up X'. It searches, "
+            "opens the pages, extracts the information and reports each "
+            "value with the URL it came from, when it was observed, and "
+            "whether it was directly observed, merely reported by a source, "
+            "calculated, or inferred. Sources that could not be read are "
+            "listed with the reason — never silently dropped. A value it "
+            "could not find comes back unknown and MUST be relayed as "
+            "unknown; never fill in a plausible number. When sources "
+            "disagree, relay the disagreement rather than an average. "
+            "action='search' lists candidate sources without reading them."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "question": {"type": "STRING",
+                             "description": "What to research, in plain words"},
+                "action": {"type": "STRING",
+                           "description": "'research' (default, reads pages) or 'search' (list sources only)"},
+                "max_sources": {"type": "INTEGER",
+                                "description": "How many sources to read (default 3)"},
+                "field": {"type": "STRING",
+                          "description": "Field to compare across sources, e.g. 'price'"},
+            },
+            "required": ["question"],
+        },
+    },
+    {
         "name": "daily_deal_finders",
         "description": (
             "USE action='run_workflow' FOR ANY WHOLE-OBJECTIVE REQUEST like "
