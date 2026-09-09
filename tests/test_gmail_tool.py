@@ -132,6 +132,34 @@ def test_list_surfaces_a_failure_honestly_not_as_empty(monkeypatch):
     assert "not_authorized" in result
 
 
+# ── list_drafts (existing drafts, not the inbox) ─────────────────────
+
+def test_list_drafts_reports_recipient_subject_and_preview(monkeypatch):
+    main, _ = _new_live()
+    live = _live(main)
+    monkeypatch.setattr(main.gmail_integration, "list_drafts", lambda max_results: {
+        "ok": True,
+        "drafts": [{"draft_id": "d1", "to": "candidate@example.com",
+                    "subject": "Interview scheduling", "body_preview": "Are you free Tuesday?"}],
+    })
+
+    response = _run(live._execute_tool(_make_fc(action="list_drafts")))
+    result = response.response["result"]
+    assert "candidate@example.com" in result
+    assert "Interview scheduling" in result
+    assert "Are you free Tuesday?" in result
+
+
+def test_list_drafts_reports_none_waiting_when_empty(monkeypatch):
+    main, _ = _new_live()
+    live = _live(main)
+    monkeypatch.setattr(main.gmail_integration, "list_drafts",
+                         lambda max_results: {"ok": True, "drafts": []})
+
+    response = _run(live._execute_tool(_make_fc(action="list_drafts")))
+    assert "no draft emails waiting" in response.response["result"].lower()
+
+
 # ── draft (always safe) ──────────────────────────────────────────────
 
 def test_draft_without_recipient_or_body_is_refused(monkeypatch):

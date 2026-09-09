@@ -531,6 +531,19 @@ class ToolExecutor:
                         f"{m.get('sender', 'unknown')} — {m.get('subject', '(no subject)')}"
                         for m in r["messages"][:8]
                     )
+            elif gaction == "list_drafts":
+                max_results = int(args.get("max_results") or 10)
+                r = await loop.run_in_executor(None, lambda: gmail_integration.list_drafts(max_results))
+                if not r["ok"]:
+                    result = f"Couldn't read Gmail drafts ({r.get('state')}): {r.get('detail')}"
+                elif not r["drafts"]:
+                    result = "No draft emails waiting for review."
+                else:
+                    result = "\n".join(
+                        f"- To {d['to'] or '(no recipient set)'} — {d['subject'] or '(no subject)'}: "
+                        f"{d['body_preview']}"
+                        for d in r["drafts"][:8]
+                    )
             elif gaction == "read":
                 message_id = (args.get("message_id") or "").strip()
                 if not message_id:

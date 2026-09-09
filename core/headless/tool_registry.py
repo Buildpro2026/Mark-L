@@ -616,12 +616,17 @@ TOOL_DECLARATIONS = [
             "real classification/category/reason). Use 'read' whenever "
             "you need to know what an email actually says, not just its "
             "subject line; 'list' alone is not enough to answer 'what did "
-            "this email say' or 'why did you flag this one'."
+            "this email say' or 'why did you flag this one'. "
+            "'list_drafts' lists EXISTING drafts already sitting in the "
+            "account (from 'draft' or made directly in Gmail) with "
+            "recipient/subject/a body preview each — use this for 'show "
+            "me the draft emails ready for review', never 'list' (that's "
+            "the inbox, not drafts)."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "status | list | read | draft | send"},
+                "action":      {"type": "STRING", "description": "status | list | list_drafts | read | draft | send"},
                 "query":       {"type": "STRING", "description": "Gmail search query for 'list', e.g. 'is:unread', 'from:x@y.com' (optional)"},
                 "max_results": {"type": "INTEGER", "description": "Max messages to return for 'list' (default 10)"},
                 "message_id":  {"type": "STRING", "description": "Gmail message id, for 'read' (get it from a prior 'list' call's results)"},

@@ -340,6 +340,65 @@ def test_create_draft_succeeds_and_never_calls_send(monkeypatch):
     assert len(fake.drafted_bodies) == 1
 
 
+class _FakeDraftsService:
+    """drafts().list()/drafts().get() — the real API's actual shape (a
+    draft wraps a message, unlike FakeGmailService's bare-message .get()
+    above), so list_drafts() has its own small fake rather than forcing
+    the shared one to serve two different response shapes."""
+
+    def __init__(self, list_result, get_by_id):
+        self._list_result = list_result
+        self._get_by_id = get_by_id
+
+    def users(self):
+        return self
+
+    def drafts(self):
+        return self
+
+    def list(self, userId, maxResults=None):
+        return _Execute(self._list_result)
+
+    def get(self, userId, id, format=None):
+        return _Execute(self._get_by_id[id])
+
+
+def test_list_drafts_returns_recipient_subject_and_body_preview(monkeypatch):
+    fake = _FakeDraftsService(
+        list_result={"drafts": [{"id": "d1"}], "resultSizeEstimate": 1},
+        get_by_id={"d1": {"id": "d1", "message": {
+            "payload": {
+                "headers": [
+                    {"name": "To", "value": "candidate@example.com"},
+                    {"name": "Subject", "value": "Interview scheduling"},
+                ],
+                "mimeType": "text/plain",
+                "body": {"data": base64.urlsafe_b64encode(b"Are you free Tuesday?").decode()},
+            },
+        }}},
+    )
+    monkeypatch.setattr(gmail, "_service", lambda: fake)
+
+    result = gmail.list_drafts()
+    assert result["ok"] is True
+    assert len(result["drafts"]) == 1
+    assert result["drafts"][0]["draft_id"] == "d1"
+    assert result["drafts"][0]["to"] == "candidate@example.com"
+    assert result["drafts"][0]["subject"] == "Interview scheduling"
+    assert "free Tuesday" in result["drafts"][0]["body_preview"]
+
+
+def test_list_drafts_not_authorized_reports_honestly(monkeypatch):
+    def raise_not_authorized():
+        raise RuntimeError("Google account not yet authorized.")
+
+    monkeypatch.setattr(gmail, "_service", raise_not_authorized)
+    result = gmail.list_drafts()
+    assert result["ok"] is False
+    assert result["state"] == "NOT_AUTHORIZED"
+    assert result["drafts"] == []
+
+
 def test_create_draft_not_authorized(monkeypatch):
     def raise_not_authorized():
         raise RuntimeError("Google account not yet authorized.")

@@ -346,6 +346,36 @@ def create_draft(to: str, subject: str, body: str) -> dict[str, Any]:
         return {"ok": False, "state": "ERROR", "detail": str(exc)}
 
 
+def list_drafts(max_results: int = 10) -> dict[str, Any]:
+    """Read-only: the account's existing Gmail drafts (created by
+    create_draft(), or by a human directly in Gmail) — recipient, subject
+    and a body preview for each, so JARVIS can actually tell Lee what's
+    ready for review instead of only being able to create new ones.
+    Same honest ok=False on any auth/API failure as every other function
+    here; never fabricates a draft that isn't really there."""
+    try:
+        service = _service()
+        resp = service.users().drafts().list(userId="me", maxResults=max_results).execute()
+        drafts = []
+        for stub in resp.get("drafts", []):
+            full = service.users().drafts().get(userId="me", id=stub["id"], format="full").execute()
+            message = full.get("message") or {}
+            headers = {h["name"].lower(): h["value"]
+                      for h in (message.get("payload") or {}).get("headers", [])}
+            body = _extract_body(message.get("payload") or {})
+            drafts.append({
+                "draft_id": full.get("id"),
+                "to": headers.get("to", ""),
+                "subject": headers.get("subject", ""),
+                "body_preview": (body or "")[:300],
+            })
+        return {"ok": True, "drafts": drafts, "result_size_estimate": resp.get("resultSizeEstimate", 0)}
+    except RuntimeError as exc:
+        return {"ok": False, "state": "NOT_AUTHORIZED", "detail": str(exc), "drafts": []}
+    except Exception as exc:
+        return {"ok": False, "state": "ERROR", "detail": str(exc), "drafts": []}
+
+
 def send_draft(draft_id: str, approved: bool = False) -> dict[str, Any]:
     """Sends an EXISTING draft (created earlier by create_draft() — see
     actions/buildpro_email_monitor.py) via Gmail's drafts().send(), rather
