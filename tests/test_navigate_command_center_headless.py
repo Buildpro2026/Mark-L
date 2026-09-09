@@ -176,21 +176,23 @@ def test_no_dashboard_server_is_reported_honestly_not_as_success():
     assert "isn't running" in result.lower() or "not running" in result.lower()
 
 
-def test_no_connected_command_center_window_still_navigates_from_ui_itself():
-    # /ui IS the Command Center (2026-09 fix) — with no /3d tab already
-    # connected, ToolExecutor now tells /ui's own browser tab to execute
-    # the navigation itself (auto_opens=True; see index.html's
-    # actOnNavigation) instead of telling the user to go open a separate
-    # window first. It must never claim the OLD kind of success either
-    # ("Opened X in the command center", which implies a /3d client
-    # already showed it) — that would be a claim with nothing behind it on
-    # a /3d screen. What actually happens is real: the reply says a tab is
-    # opening now, backed by the structured destination on ctx.last_navigation.
+def test_no_connected_command_center_window_reports_honest_failure():
+    # Production bug fixed here: with no /3d tab connected, this used to
+    # say "Opening BuildPro in the command center now" — a claim that
+    # depended entirely on an unconfirmed, later client-side window.open()
+    # call, which browsers routinely block silently when it fires outside
+    # a direct user click (exactly what happened in production: JARVIS
+    # said it opened a page that never opened). delivered == 0 is the only
+    # fact available at this point, and it means the navigation was not
+    # confirmed — describe() must report that as a failure, not a promise.
     dashboard = DashboardServer()
     result = _run(ToolExecutor(_ctx(dashboard)).execute(
         "navigate_command_center", {"action": "open", "target": "BuildPro"}))
-    assert "opening buildpro" in result.lower()
-    assert "open the command center and it will be there" not in result.lower()
+    assert "couldn't open" in result.lower()
+    assert "opening" not in result.lower()
+    assert "opened" not in result.lower()
+    # Never instructs the user to go do it themselves either.
+    assert "open the command center" not in result.lower()
 
 
 def test_the_headless_branch_never_bypasses_the_shared_resolver_or_executor():
@@ -325,3 +327,59 @@ def test_record_tool_call_does_not_attach_navigation_to_other_tools():
     tool_calls_made = []
     headless_ui._record_tool_call(tool_calls_made, executor, "weather_report", {}, "Sunny.")
     assert "navigation" not in tool_calls_made[0]
+
+
+# ── production-bug regression: honest confirmation, not an assumed one ────
+
+def test_web_research_surfaced_url_navigates_when_a_window_is_connected():
+    # A URL JARVIS learned about from web_research (never a known site
+    # name) must resolve and navigate the same as any other external
+    # destination — the resolver doesn't care where the URL came from.
+    dashboard = _connected_dashboard()
+    result = _run(ToolExecutor(_ctx(dashboard)).execute(
+        "navigate_command_center",
+        {"action": "open", "target": "https://www.apple.com/iphone-16/"}))
+    assert "apple.com" in result.lower()
+    sent = list(dashboard._3d_ws_clients)[0].sent
+    assert sent, "the connected window never received the research-sourced URL"
+    assert sent[0]["external_url"] == "https://www.apple.com/iphone-16/"
+
+
+def test_web_research_surfaced_url_reports_honest_failure_with_no_window():
+    # Same URL, no connected Command Center — must be reported as a
+    # failure, never as an "opening now" promise.
+    dashboard = DashboardServer()   # no /3d client connected
+    result = _run(ToolExecutor(_ctx(dashboard)).execute(
+        "navigate_command_center",
+        {"action": "open", "target": "https://www.apple.com/iphone-16/"}))
+    assert "couldn't open" in result.lower()
+    assert "opened" not in result.lower()
+    assert "opening" not in result.lower()
+
+
+def test_navigation_immediately_followed_by_another_request_stays_independent():
+    # A failed navigation must not corrupt or bleed into whatever the very
+    # next tool call reports — each call gets its own honest result from
+    # its own delivered count, and ctx.last_navigation always reflects
+    # only the most recent call.
+    dashboard = DashboardServer()   # starts with no /3d client connected
+    ctx = _ctx(dashboard)
+    executor = ToolExecutor(ctx)
+
+    first = _run(executor.execute(
+        "navigate_command_center", {"action": "open", "target": "BuildPro"}))
+    assert "couldn't open" in first.lower()
+    assert ctx.last_navigation["delivered"] == 0
+
+    # A window connects between the two calls (e.g. the /3d tab that
+    # opened from the first attempt finished loading and registered).
+    dashboard._3d_ws_clients.add(_FakeSocket())
+
+    second = _run(executor.execute(
+        "navigate_command_center", {"action": "open", "target": "Candidates"}))
+    assert "candidates" in second.lower()
+    assert "couldn't open" not in second.lower()
+    assert ctx.last_navigation["delivered"] == 1
+    # The first call's failure must not linger into the second's report.
+    sent = list(dashboard._3d_ws_clients)[0].sent
+    assert sent and sent[-1]["nucleus_id"] == "candidates"

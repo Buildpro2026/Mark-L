@@ -160,15 +160,17 @@ class ToolExecutor:
                 else:
                     destination = workspace_navigation.resolve(target, action=action, target=target)
                     delivered = await ctx.dashboard_server.execute_destination(destination)
-                    # /ui's own browser tab is where this call actually came
-                    # from — unlike main.py's desktop path, where the
-                    # Command Center is a separate paired device, /ui IS the
-                    # Command Center, so when no /3d tab already picked this
-                    # up (delivered == 0) the /ui page itself executes the
-                    # navigation client-side (see index.html's
-                    # actOnNavigation). This is what makes that possible:
-                    # a real, structured destination, not just prose.
-                    result = workspace_navigation.describe(destination, delivered, auto_opens=True)
+                    # delivered is the ONLY confirmed signal available at
+                    # this point — the count of /3d clients that actually
+                    # received and processed the navigation. describe()
+                    # reports failure honestly when it's zero rather than
+                    # assuming some later, unconfirmed client-side action
+                    # (a browser tab opening a popup, which is routinely
+                    # silently blocked when triggered outside a direct
+                    # click) will land — that assumption is exactly what
+                    # produced "JARVIS said it opened a page that never
+                    # opened" in production.
+                    result = workspace_navigation.describe(destination, delivered)
                     if destination is not None:
                         ctx.last_navigation = {**destination, "delivered": delivered}
 

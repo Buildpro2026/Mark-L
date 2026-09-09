@@ -201,7 +201,10 @@ def test_with_no_window_open_nothing_is_reported_as_opened():
     delivered = asyncio.run(server.execute_destination(d))
     assert delivered == 0
     said = wn.describe(d, delivered)
-    assert "no Command Center window is open" in said
+    # A real failure, reported as one — never "opening now"/"I set it
+    # to..." on the strength of an unconfirmed later client-side action.
+    assert "couldn't open" in said.lower()
+    assert "no active command center view" in said.lower()
 
 
 def test_a_successful_navigation_is_reported_as_success():
@@ -224,28 +227,34 @@ def test_voice_and_click_share_one_executor():
     assert src.count("def apply_navigation") == 1
 
 
-# ── auto_opens: /ui IS the Command Center, no separate window required ────
+# ── false-success protection: no confirmed delivery, no claim of one ─────
+# (production bug: JARVIS said a page "opened" — via an "opening now"
+# message that assumed an unconfirmed, later client-side window.open()
+# would land — when the browser's own popup blocker silently dropped it,
+# since it fired from an async callback rather than a direct user click.
+# describe() must never promise an action it cannot confirm, on any
+# surface — desktop or /ui.)
 
-def test_auto_opens_reports_the_destination_will_open_itself():
-    # /ui's own browser tab executes navigation client-side when nothing
-    # else picked it up (see index.html's actOnNavigation) — so it must
-    # never be told to go open some other Command Center window first.
+def test_a_failed_navigation_never_claims_success_on_any_surface():
+    # describe() takes no surface-specific flag any more: delivered is the
+    # only fact it is allowed to act on, identically for /ui and desktop.
     d = wn.resolve("open BuildPro")
-    said = wn.describe(d, 0, auto_opens=True)
-    assert "open the command center" not in said.lower()
+    said = wn.describe(d, 0)
+    assert "opened" not in said.lower()
+    assert "opening" not in said.lower()
+    assert "couldn't open" in said.lower()
     assert "BuildPro" in said
 
 
-def test_without_auto_opens_the_desktop_message_is_unchanged():
-    # main.py's desktop path never passes auto_opens — there a Command
-    # Center is a genuinely separate paired device and nothing here can
-    # open a window on it, so the honest "go open it" message must stay.
+def test_a_failed_navigation_never_instructs_the_user_to_open_it_themselves():
     d = wn.resolve("open BuildPro")
     said = wn.describe(d, 0)
-    assert "no Command Center window is open" in said.lower() or "no command center window" in said.lower()
+    assert "open the command center" not in said.lower()
+    assert "open it yourself" not in said.lower()
 
 
-def test_auto_opens_a_control_action_with_nothing_delivered_stays_honest():
+def test_a_failed_control_action_stays_honest_and_uninstructive():
     d = wn.resolve_control(wn.ACTION_HOME)
-    said = wn.describe(d, 0, auto_opens=True)
+    said = wn.describe(d, 0)
     assert "nothing to" in said.lower()
+    assert "opened" not in said.lower()
