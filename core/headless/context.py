@@ -71,6 +71,16 @@ class ToolContext:
     # center reports that honestly rather than pretending it can navigate
     # somewhere with nothing listening.
     dashboard_server: Any = None
+    # Set by ToolExecutor.execute()'s navigate_command_center branch to the
+    # resolved destination (actions/workspace_navigation.py's shape) plus
+    # how many /3d clients it was actually delivered to — None for every
+    # other tool. The caller (core/headless/ui.py's provider loops) reads
+    # this once right after the call and folds it into that tool call's own
+    # entry in tool_calls_made, so the browser chat page can act on a REAL
+    # destination instead of only the spoken description. One request/turn
+    # per ToolExecutor instance (see tool_executor.py's class docstring),
+    # so there is nothing to reset between unrelated turns.
+    last_navigation: Optional[dict] = None
 
     def __post_init__(self) -> None:
         if self.proactive is None:

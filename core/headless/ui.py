@@ -462,6 +462,22 @@ def _configured_providers() -> list[str]:
     return ["ollama"] if config.OLLAMA_API_KEY else []
 
 
+def _record_tool_call(tool_calls_made: list[dict], executor: "ToolExecutor",  # noqa: F821
+                      name: str, args: dict, result) -> None:
+    """Appends one completed tool call to this turn's record, folding in
+    the structured navigation payload ToolExecutor.execute() stashed on
+    ctx.last_navigation for navigate_command_center (see context.py's
+    field docstring) so the SSE /ui/api/chat response — and the browser
+    JS that reads it — gets a real destination to act on, not just the
+    spoken description. One helper shared by all four provider loops
+    below rather than four copies of the same three lines."""
+    entry = {"name": name, "args": args, "result": result}
+    if name == "navigate_command_center" and executor.ctx.last_navigation is not None:
+        entry["navigation"] = executor.ctx.last_navigation
+        executor.ctx.last_navigation = None  # consumed — don't leak into a later call this turn
+    tool_calls_made.append(entry)
+
+
 async def run_chat_turn(
     message: str, history: list[dict],
     on_status: Callable[[str], Awaitable[None]] | None = None,
@@ -646,7 +662,7 @@ async def _run_chat_turn_ollama(
                 result = f"Error: {name} failed — {e}"
                 tool_ok = False
             await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": name, "ok": tool_ok})
-            tool_calls_made.append({"name": name, "args": args, "result": result})
+            _record_tool_call(tool_calls_made, executor, name, args, result)
             # Ollama matches a result to its call by tool_name, not by an
             # id (it doesn't issue call ids), so the name must be carried.
             messages.append({"role": "tool", "tool_name": name, "content": str(result)})
@@ -736,7 +752,7 @@ async def _run_chat_turn_gemini(
                 result = f"Error: {fc.name} failed — {e}"
                 tool_ok = False
             await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": fc.name, "ok": tool_ok})
-            tool_calls_made.append({"name": fc.name, "args": args, "result": result})
+            _record_tool_call(tool_calls_made, executor, fc.name, args, result)
             contents.append(gtypes.Content(
                 role="user",
                 parts=[gtypes.Part(function_response=gtypes.FunctionResponse(name=fc.name, response={"result": result}))],
@@ -847,7 +863,7 @@ async def _run_chat_turn_groq(
                 result = f"Error: {tc.function.name} failed — {e}"
                 tool_ok = False
             await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": tc.function.name, "ok": tool_ok})
-            tool_calls_made.append({"name": tc.function.name, "args": args, "result": result})
+            _record_tool_call(tool_calls_made, executor, tc.function.name, args, result)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
 
         if on_status is not None and tool_calls:
@@ -948,7 +964,7 @@ async def _run_chat_turn_anthropic(
                 result = f"Error: {tu.name} failed — {e}"
                 tool_ok = False
             await _emit_tool_event(on_tool_event, {"type": "tool_end", "name": tu.name, "ok": tool_ok})
-            tool_calls_made.append({"name": tu.name, "args": args, "result": result})
+            _record_tool_call(tool_calls_made, executor, tu.name, args, result)
             tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(result)})
         messages.append({"role": "user", "content": tool_results})
 

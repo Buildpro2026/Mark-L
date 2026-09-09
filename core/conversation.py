@@ -48,6 +48,8 @@ only, which is what makes it testable without a sound card.
 """
 from __future__ import annotations
 
+import difflib
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -366,3 +368,72 @@ def should_forward_mic_audio(*, jarvis_speaking: bool, muted: bool, phone_active
     if not jarvis_speaking:
         return True
     return rms >= threshold
+
+
+# ── content-based self-echo protection ──────────────────────────────────
+# RMS alone cannot tell "a person is genuinely talking near the mic" apart
+# from "JARVIS's own voice, played loud enough (a hard-surfaced room, the
+# volume turned up) to clear the loudness gate above." That is a real,
+# distinct failure mode from the one should_forward_mic_audio solves — a
+# louder-than-usual echo of JARVIS's own words being sent to Gemini,
+# transcribed, and then misread as the user interrupting himself with his
+# own sentence played back. The only signal available for THAT case is not
+# loudness but CONTENT: JARVIS knows exactly what he is currently saying
+# (out_buf in main.py's _receive_audio), so a transcript that closely
+# matches his own recent output is far more likely to be leaked playback
+# than something the user actually said. This is deliberately a second,
+# independent check layered on top of should_forward_mic_audio, not a
+# replacement for it — together they are "not solely an RMS threshold."
+_ECHO_STRIP_RE = re.compile(r"[^\w\s]")
+
+DEFAULT_ECHO_SIMILARITY_THRESHOLD = 0.6
+
+
+def _normalize_for_comparison(text: str) -> str:
+    return _ECHO_STRIP_RE.sub("", (text or "")).strip().lower()
+
+
+def is_self_echo(candidate_text: str, recent_jarvis_text: str, *,
+                 similarity_threshold: float = DEFAULT_ECHO_SIMILARITY_THRESHOLD) -> bool:
+    """True when `candidate_text` (a transcript Gemini reported as user
+    input) reads as JARVIS's own recent output leaking back into the mic,
+    rather than something the user said.
+
+    Not an exact-match check: audio that loops back through a speaker and
+    a mic before being re-transcribed rarely comes back byte-identical —
+    words get merged, clipped or misheard on the way through. A fuzzy
+    ratio over the normalized text catches that without needing the two
+    strings to match exactly. An empty candidate or nothing currently
+    playing can never be an echo of anything."""
+    a = _normalize_for_comparison(candidate_text)
+    b = _normalize_for_comparison(recent_jarvis_text)
+    if not a or not b:
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= similarity_threshold
+
+
+def is_genuine_user_transcript(candidate_text: str, *, recent_jarvis_text: str = "",
+                               last_seen_text: str = "",
+                               similarity_threshold: float = DEFAULT_ECHO_SIMILARITY_THRESHOLD
+                               ) -> bool:
+    """Whether one input-transcription chunk from Gemini should be accepted
+    as real user speech.
+
+    Three independent reasons to reject a chunk, any one of which is
+    enough: it is empty; it duplicates the chunk already accepted (Gemini's
+    transcription stream can redeliver a partial before finalizing it —
+    the "duplicated transcript" failure mode); or it reads as JARVIS's own
+    voice leaking back in (the "self-generated transcript"/"playback
+    feedback" failure mode). `recent_jarvis_text` should only be passed
+    when JARVIS is actually speaking — comparing against his last answer
+    once he has finished and it is genuinely the user's turn would wrongly
+    reject a user who happens to reference JARVIS's own words."""
+    text = (candidate_text or "").strip()
+    if not text:
+        return False
+    if text == (last_seen_text or "").strip():
+        return False
+    if recent_jarvis_text and is_self_echo(
+            text, recent_jarvis_text, similarity_threshold=similarity_threshold):
+        return False
+    return True

@@ -22,6 +22,7 @@ import time
 import json
 import sys
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -113,6 +114,14 @@ try:
 except ValueError:
     BARGE_IN_RMS_THRESHOLD = BARGE_IN_RMS_THRESHOLD_DEFAULT
 
+# How much confirmed speech Gemini's own server-side VAD requires before it
+# commits to "the user has started talking" (see _build_config's
+# realtime_input_config). Lower is more sensitive/faster to trigger but
+# more prone to false positives from a brief noise; this is Gemini's own
+# tunable, not core/conversation.py's client-side RMS one — the two are
+# independent, complementary layers, not duplicates of each other.
+BARGE_IN_PREFIX_PADDING_MS = 100
+
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
@@ -176,6 +185,8 @@ class JarvisLive:
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
         self._audio_generation     = None    # conversation generation the in-flight audio belongs to
+        self._out_stream           = None    # live sd.RawOutputStream, set by _play_audio — lets
+                                              # interrupt() abort in-flight playback immediately
         # Single owner of the response channel (core/conversation.py). The
         # bare _is_speaking flag below stays because the mic callback reads
         # it on a hot path, but it is now a mirror of the manager's state,
@@ -283,9 +294,24 @@ class JarvisLive:
         chunk arriving during the drain is already stale and cannot be
         replayed. The old code set a bare bool that the ending response's
         own turn_complete then cleared — which is how an interrupted answer
-        could pick itself back up mid-sentence."""
+        could pick itself back up mid-sentence.
+
+        Draining the queue only stops audio not yet handed to the sound
+        card — up to ~200ms already dispatched to the output stream (see
+        _play_audio's batching) would otherwise keep playing out to
+        completion instead of being discarded immediately. abort() (never
+        stop(), which waits for buffered audio to finish first) cuts that
+        off at the hardware. _play_audio restarts the stream itself before
+        its next write, so this never leaves playback dead for the rest of
+        the session."""
         self._conversation.barge_in("user interrupted JARVIS")
         self._interrupted = True
+        out_stream = getattr(self, "_out_stream", None)
+        if out_stream is not None:
+            try:
+                out_stream.abort()
+            except Exception:
+                pass
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -335,7 +361,9 @@ class JarvisLive:
         mem_str    = format_memory_for_prompt(memory)
         from core.headless.obsidian import ObsidianVault
         knowledge_str = ObsidianVault().format_for_prompt(query=None, max_chars=6000)
+        sys_prompt = _load_system_prompt()
 
+        parts: list[str] = []
         parts.append(knowledge_str)
 
         if mem_str:
@@ -355,7 +383,28 @@ class JarvisLive:
                     )
                 )
             ),
+            # Gemini's own server-side voice-activity detection — the
+            # existing audio stack's real echo/barge-in protection, used
+            # here rather than reinvented client-side. START_OF_ACTIVITY_
+            # INTERRUPTS makes the server itself stop generation and report
+            # server_content.interrupted=True (handled in _receive_audio)
+            # the moment it detects genuine new speech, which is a stronger
+            # signal than anything derivable purely from client-side RMS.
+            # LOW start-of-speech sensitivity keeps it from firing on a
+            # brief noise; should_forward_mic_audio's RMS gate and
+            # is_genuine_user_transcript's content check (core/
+            # conversation.py) still run independently on top of this —
+            # three separate, complementary layers, not one point of
+            # failure.
+            realtime_input_config=types.RealtimeInputConfig(
+                activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                    prefix_padding_ms=BARGE_IN_PREFIX_PADDING_MS,
+                ),
+            ),
         )
+        return config
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
@@ -566,6 +615,17 @@ class JarvisLive:
                     if response.server_content:
                         sc = response.server_content
 
+                        # Gemini's own server-side VAD (configured in
+                        # _build_config's realtime_input_config) already
+                        # decided this is a genuine interruption using the
+                        # real audio stream server-side — the strongest
+                        # signal available, and the one the SDK itself
+                        # documents as "a good signal to stop and empty the
+                        # current queue". Trust it directly rather than
+                        # re-deriving the same decision from transcripts.
+                        if sc.interrupted and not self._interrupted:
+                            self.interrupt()
+
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt and txt != (out_buf[-1] if out_buf else ""):
@@ -573,18 +633,33 @@ class JarvisLive:
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
-                            if txt:
-                                with self._speaking_lock:
-                                    jarvis_was_speaking = self._is_speaking
+                            with self._speaking_lock:
+                                jarvis_was_speaking = self._is_speaking
+                            # should_forward_mic_audio (core/conversation.py)
+                            # already judged the AUDIO loud enough to be a
+                            # genuine interruption before it was even sent to
+                            # Gemini — but loudness alone cannot tell a real
+                            # interruption apart from JARVIS's own voice
+                            # leaking back into the mic loud enough to clear
+                            # that gate (a hard-surfaced room, the volume
+                            # turned up). is_genuine_user_transcript adds the
+                            # second, independent check this content itself
+                            # can carry: reject it if it duplicates the chunk
+                            # already accepted, or if it reads as an echo of
+                            # what JARVIS is currently saying (out_buf).
+                            # Together these are "not solely an RMS
+                            # threshold," as required.
+                            accepted = _cv.is_genuine_user_transcript(
+                                txt,
+                                recent_jarvis_text=" ".join(out_buf) if jarvis_was_speaking else "",
+                                last_seen_text=in_buf[-1] if in_buf else "",
+                            )
+                            if accepted:
                                 # Real transcribed input arrived while JARVIS was
-                                # speaking. It only reached Gemini at all because
-                                # _listen_audio's should_forward_mic_audio gate
-                                # (core/conversation.py) judged it loud enough to
-                                # be a genuine interruption, not speaker bleed —
-                                # that is the barge-in signal itself. Act on it
-                                # immediately rather than silently accumulating it
-                                # into in_buf for a turn_complete that belongs to
-                                # the response already being interrupted.
+                                # speaking. Act on it immediately rather than
+                                # silently accumulating it into in_buf for a
+                                # turn_complete that belongs to the response
+                                # already being interrupted.
                                 if jarvis_was_speaking and not self._interrupted:
                                     self.interrupt()
                                     in_buf = []
@@ -683,6 +758,7 @@ class JarvisLive:
             blocksize=CHUNK_SIZE,
         )
         stream.start()
+        self._out_stream = stream   # interrupt() can now abort this stream immediately
 
         try:
             while True:
@@ -714,6 +790,13 @@ class JarvisLive:
                         break
 
                 try:
+                    # interrupt() may have aborted this exact stream since
+                    # the last write (immediate hardware stop, so old audio
+                    # is discarded rather than finishing its buffer) — abort
+                    # leaves it stopped, so the next response's audio needs
+                    # a fresh start() or the write below would raise.
+                    if stream.stopped:
+                        stream.start()
                     await asyncio.to_thread(stream.write, bytes(batch))
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
@@ -722,6 +805,7 @@ class JarvisLive:
             raise
         finally:
             self.set_speaking(False)
+            self._out_stream = None
             stream.stop()
             stream.close()
 
@@ -1067,10 +1151,24 @@ class JarvisLive:
             self._dashboard = None
 
         while True:
+            # A fresh id per reconnect attempt — register_session (core/
+            # conversation.py) refuses a second live session while one is
+            # already registered, which is the documented protection
+            # against two live Gemini sessions listening to one microphone
+            # at once (a reconnect firing before the previous session's own
+            # cleanup has actually released it). Normal operation never
+            # trips this — this loop only ever holds one connection open —
+            # but it is real, tested protection rather than an assumption.
+            session_id = uuid.uuid4().hex
             try:
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
+
+                if not self._conversation.register_session(session_id):
+                    print("[JARVIS] A live session is still registered — waiting before reconnecting.")
+                    await asyncio.sleep(getattr(self, "_conn_backoff", 3))
+                    continue
 
                 # Fresh client on every reconnect — avoids stale HTTP session state
                 client = genai.Client(
@@ -1158,6 +1256,7 @@ class JarvisLive:
                     self._conn_backoff = 3
             finally:
                 self.session = None
+                self._conversation.release_session(session_id)
                 # Only save if there was a real conversation (≥3 turns)
                 if len(self._session_log) >= 3:
                     asyncio.create_task(self._save_session_summary())

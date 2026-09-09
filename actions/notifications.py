@@ -104,9 +104,27 @@ def notify(message_type: str, event_id: str, title: str, detail: str = "",
     level = level_for(message_type)
     prefixed = f"{_PREFIXES.get(message_type, '')}{title}"
 
+    # The destination was being computed and stored on the outcome/memory
+    # record, but never actually reached the message Lee receives — an SMS
+    # that says "Open in HubSpot" with no link is not actionable, it just
+    # sounds like it should be. This is what makes it real: the label and
+    # the URL go into the body the transport actually sends. Internal
+    # (INTERNAL-kind) destinations are relative paths on JARVIS's own /ui,
+    # so they need the deployment's public origin to be a link a phone can
+    # open; external ones already carry a full https:// URL.
+    sms_detail = detail
+    if destination is not None:
+        link = (destination.get("url") if destination.get("kind") == notification_destinations.EXTERNAL
+                else None)
+        if link is None and destination.get("path"):
+            from core.headless.config import PUBLIC_BASE_URL
+            link = f"{PUBLIC_BASE_URL}{destination['path']}"
+        if link:
+            sms_detail = f"{detail}\n\n{destination.get('label') or 'Open'}: {link}".strip()
+
     try:
         result = approval_notifier.notify_urgent_event(
-            event_id=event_id, title=prefixed, detail=detail,
+            event_id=event_id, title=prefixed, detail=sms_detail,
             level=level, dry_run=dry_run,
         )
         ok = result.get("action") in ("sms", "already_sent") and result.get("ok", True) is not False

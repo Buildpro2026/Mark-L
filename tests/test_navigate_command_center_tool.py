@@ -49,6 +49,27 @@ class _FakeDashboard:
 
     async def broadcast_nav(self, msg):
         self.broadcast_calls.append(msg)
+        return 1   # pretend one connected window received it
+
+    async def execute_destination(self, destination):
+        # Mirrors dashboard/server.py's real execute_destination(): route
+        # through apply_navigation for the actions that mutate state, then
+        # report through broadcast_nav — the exact contract main.py's
+        # _execute_tool depends on.
+        from actions import workspace_navigation as wn
+
+        if destination is None:
+            return 0
+        action = destination.get("action")
+        if action == wn.ACTION_OPEN_NUCLEUS:
+            self.apply_navigation("open", destination["destination_id"])
+        elif action == wn.ACTION_BACK:
+            self.apply_navigation("back", "")
+        elif action == wn.ACTION_HOME:
+            self.apply_navigation("home", "")
+        else:
+            self.apply_navigation("status", "")
+        return await self.broadcast_nav({"type": "navigate", **destination})
 
 
 def _make_fc(action=None, target=None):
@@ -139,7 +160,10 @@ def test_execute_tool_unrecognized_target_reports_error_without_touching_dashboa
     response = _run(live._execute_tool(fc))
 
     assert live._dashboard.apply_calls == []   # never reached the dashboard
-    assert "moon base" in response.response["result"]
+    # workspace_navigation.describe(None, ...) reports a generic "couldn't
+    # find that" rather than echoing arbitrary user-said text back — an
+    # unresolved target must never be reported as a successful navigation.
+    assert "couldn't find that destination" in response.response["result"].lower()
 
 
 def test_execute_tool_without_dashboard_running_gives_a_clear_message():

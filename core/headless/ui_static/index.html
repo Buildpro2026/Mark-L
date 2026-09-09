@@ -2473,6 +2473,53 @@ function resolveToolChip(ok) {
   _activeToolChip = null;
 }
 
+// /ui IS the Command Center — the user should never have to separately
+// open another window for "open BuildPro"/"open candidates" etc. to mean
+// anything. navigate_command_center's tool_calls entry now carries a real
+// `navigation` destination (core/headless/context.py's last_navigation,
+// threaded through by _record_tool_call in ui.py) whenever the resolver
+// found a real place to go. When a /3d tab is already open and connected
+// (navigation.delivered > 0) it already updated in place over that
+// websocket — nothing more to do here. Only when nothing was delivered
+// does this tab act on it itself: a real, executed navigation (never a
+// claim with nothing behind it), and never a silent requirement that the
+// user go open some other window first.
+function actOnNavigation(toolCalls) {
+  if (!toolCalls || !toolCalls.length) return;
+  const call = toolCalls.find(t => t.name === 'navigate_command_center' && t.navigation);
+  if (!call) return;
+  const dest = call.navigation;
+  if (dest.delivered > 0) return;               // a /3d tab already showed it live
+  if (dest.destination_type === 'control') return;  // no prior /3d state to act on here
+  const url = dest.external_url ||
+    (dest.destination_route ? dest.destination_route :
+     (dest.destination_id ? ('/3d#' + dest.destination_id) : null));
+  if (url) window.open(url, '_blank', 'noopener');
+}
+
+// Notification links built by actions/notification_destinations.py point
+// at /ui#drafts, /ui#approvals/<id>, /ui#opportunities/<id>, /ui#social/<id>
+// and /ui#tasks/<id> — real routes into JARVIS's own review areas, not a
+// second UI to build: opening one asks the existing chat/agent pipeline to
+// show that exact record, the same way typing the question would. Runs
+// once on load; a hash arriving after load (this page never rewrites its
+// own hash) isn't a case that occurs in practice, so no hashchange listener.
+function handleNotificationDeepLink() {
+  const hash = (location.hash || '').replace(/^#/, '');
+  if (!hash) return;
+  const [kind, id] = hash.split('/');
+  const prompts = {
+    drafts: 'Show me the draft emails ready for review.',
+    approvals: id ? `Show me the details of approval ${id} so I can review it.`
+                  : 'Show me my pending approvals.',
+    opportunities: id ? `Show me opportunity ${id}.` : 'Show me open business opportunities.',
+    social: id ? `Show me social post ${id} awaiting approval.` : 'Show me posts awaiting approval.',
+    tasks: id ? `Show me task ${id}.` : 'Show me my open tasks.',
+  };
+  const prompt = prompts[kind];
+  if (prompt) sendMessage(prompt);
+}
+
 // Parses one Server-Sent-Events response body into {type, ...} frames as
 // they arrive — POST /ui/api/chat streams tool_start/tool_end events live
 // during the turn, then a terminal done/error frame. Calls onEvent for
@@ -2532,6 +2579,7 @@ async function sendMessage(message) {
     if (window.setOrbReason) window.setOrbReason('thinking', false);
     chatHistory.push({ role: 'model', text: finalReply });
     appendMessage('jarvis', finalReply, finalToolCalls);
+    actOnNavigation(finalToolCalls);
     loadHistory();
     if (window.speakReply) window.speakReply(finalReply);
     return finalReply;
@@ -3198,6 +3246,7 @@ async function loadSettingsAndApply() {
     showError('Failed to load settings: ' + e.message);
   }
   loadAll();
+  handleNotificationDeepLink();
 }
 
 function populateVoiceOptions(voices, selected) {

@@ -144,6 +144,7 @@ class ToolExecutor:
             # center branch exactly — same resolver, same executor, same
             # honest-delivery reporting — the headless equivalent of the
             # desktop path, not a second implementation of it.
+            ctx.last_navigation = None
             if ctx.dashboard_server is None:
                 result = ("The command center dashboard isn't running in this "
                           "process right now.")
@@ -159,7 +160,17 @@ class ToolExecutor:
                 else:
                     destination = workspace_navigation.resolve(target, action=action, target=target)
                     delivered = await ctx.dashboard_server.execute_destination(destination)
-                    result = workspace_navigation.describe(destination, delivered)
+                    # /ui's own browser tab is where this call actually came
+                    # from — unlike main.py's desktop path, where the
+                    # Command Center is a separate paired device, /ui IS the
+                    # Command Center, so when no /3d tab already picked this
+                    # up (delivered == 0) the /ui page itself executes the
+                    # navigation client-side (see index.html's
+                    # actOnNavigation). This is what makes that possible:
+                    # a real, structured destination, not just prose.
+                    result = workspace_navigation.describe(destination, delivered, auto_opens=True)
+                    if destination is not None:
+                        ctx.last_navigation = {**destination, "delivered": delivered}
 
         elif name == "file_controller":
             r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=ctx.ui))

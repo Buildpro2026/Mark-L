@@ -347,3 +347,77 @@ def test_a_custom_threshold_is_honored_for_per_machine_tuning():
     assert cv.should_forward_mic_audio(
         jarvis_speaking=True, muted=False, phone_active=False,
         rms=50.0, threshold=100.0) is False
+
+
+# ── is_self_echo / is_genuine_user_transcript: not solely an RMS threshold ─
+
+def test_self_echo_detects_a_close_match_to_recent_jarvis_output():
+    assert cv.is_self_echo(
+        "the weather today is sunny with a light breeze",
+        "The weather today is sunny with a light breeze.") is True
+
+
+def test_self_echo_allows_genuinely_different_speech_through():
+    assert cv.is_self_echo(
+        "wait stop I need to change that",
+        "The weather today is sunny with a light breeze.") is False
+
+
+def test_self_echo_is_false_when_nothing_is_currently_playing():
+    assert cv.is_self_echo("anything at all", "") is False
+
+
+def test_self_echo_is_false_for_an_empty_candidate():
+    assert cv.is_self_echo("", "The weather today is sunny.") is False
+
+
+def test_self_echo_respects_a_custom_similarity_threshold():
+    # A partial, not-quite-exact overlap — passes a loose threshold,
+    # fails a strict one. Confirms the threshold is load-bearing, not
+    # a decorative parameter nobody can actually move.
+    candidate = "weather today sunny breeze"
+    recent = "The weather today is sunny with a light breeze across the coast."
+    assert cv.is_self_echo(candidate, recent, similarity_threshold=0.3) is True
+    assert cv.is_self_echo(candidate, recent, similarity_threshold=0.95) is False
+
+
+def test_genuine_transcript_rejects_self_echo_of_jarvis_own_speech():
+    # The actual failure this batch fixes: RMS alone let a loud echo of
+    # JARVIS's own words through; content comparison is the second,
+    # independent check that catches it.
+    assert cv.is_genuine_user_transcript(
+        "added that to your calendar",
+        recent_jarvis_text="I have added that to your calendar for tomorrow.") is False
+
+
+def test_genuine_transcript_accepts_real_speech_while_jarvis_talks():
+    assert cv.is_genuine_user_transcript(
+        "wait no stop",
+        recent_jarvis_text="I have added that to your calendar for tomorrow.") is True
+
+
+def test_genuine_transcript_rejects_an_immediate_duplicate_chunk():
+    # Gemini's transcription stream can redeliver a partial before
+    # finalizing it — the same text arriving twice must not be treated as
+    # two separate things the user said.
+    assert cv.is_genuine_user_transcript(
+        "open my calendar", last_seen_text="open my calendar") is False
+
+
+def test_genuine_transcript_accepts_a_second_distinct_chunk():
+    assert cv.is_genuine_user_transcript(
+        "for tomorrow", last_seen_text="open my calendar") is True
+
+
+def test_genuine_transcript_rejects_an_empty_chunk():
+    assert cv.is_genuine_user_transcript("") is False
+    assert cv.is_genuine_user_transcript("   ") is False
+
+
+def test_genuine_transcript_does_not_compare_against_jarvis_once_he_has_finished():
+    # recent_jarvis_text is only meaningful while JARVIS is actually
+    # speaking — main.py passes "" once he's done. A user legitimately
+    # repeating JARVIS's own words back (e.g. confirming an order) must not
+    # be rejected just because it resembles his last answer.
+    assert cv.is_genuine_user_transcript(
+        "added that to your calendar", recent_jarvis_text="") is True

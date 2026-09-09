@@ -222,3 +222,30 @@ def test_voice_and_click_share_one_executor():
     src = inspect.getsource(mod)
     assert src.count("def execute_destination") == 1
     assert src.count("def apply_navigation") == 1
+
+
+# ── auto_opens: /ui IS the Command Center, no separate window required ────
+
+def test_auto_opens_reports_the_destination_will_open_itself():
+    # /ui's own browser tab executes navigation client-side when nothing
+    # else picked it up (see index.html's actOnNavigation) — so it must
+    # never be told to go open some other Command Center window first.
+    d = wn.resolve("open BuildPro")
+    said = wn.describe(d, 0, auto_opens=True)
+    assert "open the command center" not in said.lower()
+    assert "BuildPro" in said
+
+
+def test_without_auto_opens_the_desktop_message_is_unchanged():
+    # main.py's desktop path never passes auto_opens — there a Command
+    # Center is a genuinely separate paired device and nothing here can
+    # open a window on it, so the honest "go open it" message must stay.
+    d = wn.resolve("open BuildPro")
+    said = wn.describe(d, 0)
+    assert "no Command Center window is open" in said.lower() or "no command center window" in said.lower()
+
+
+def test_auto_opens_a_control_action_with_nothing_delivered_stays_honest():
+    d = wn.resolve_control(wn.ACTION_HOME)
+    said = wn.describe(d, 0, auto_opens=True)
+    assert "nothing to" in said.lower()

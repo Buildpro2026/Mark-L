@@ -176,15 +176,21 @@ def test_no_dashboard_server_is_reported_honestly_not_as_success():
     assert "isn't running" in result.lower() or "not running" in result.lower()
 
 
-def test_no_connected_command_center_window_is_reported_not_faked():
-    # A real DashboardServer with genuinely nobody connected — apply_
-    # navigation() still mutates server-side state, but nothing exists on
-    # any screen for it to reach, and the reply must say so, not "Opened."
+def test_no_connected_command_center_window_still_navigates_from_ui_itself():
+    # /ui IS the Command Center (2026-09 fix) — with no /3d tab already
+    # connected, ToolExecutor now tells /ui's own browser tab to execute
+    # the navigation itself (auto_opens=True; see index.html's
+    # actOnNavigation) instead of telling the user to go open a separate
+    # window first. It must never claim the OLD kind of success either
+    # ("Opened X in the command center", which implies a /3d client
+    # already showed it) — that would be a claim with nothing behind it on
+    # a /3d screen. What actually happens is real: the reply says a tab is
+    # opening now, backed by the structured destination on ctx.last_navigation.
     dashboard = DashboardServer()
     result = _run(ToolExecutor(_ctx(dashboard)).execute(
         "navigate_command_center", {"action": "open", "target": "BuildPro"}))
-    assert "no command center window is open" in result.lower()
-    assert "opened buildpro in the command center" not in result.lower()
+    assert "opening buildpro" in result.lower()
+    assert "open the command center and it will be there" not in result.lower()
 
 
 def test_the_headless_branch_never_bypasses_the_shared_resolver_or_executor():
@@ -244,3 +250,78 @@ def test_set_dashboard_server_is_what_create_app_calls(monkeypatch):
     monkeypatch.setattr(headless_ui, "set_dashboard_server", lambda s: captured.setdefault("server", s))
     create_app(start_background_worker=False)
     assert "server" in captured
+
+
+# ── /ui IS the Command Center: a real, structured destination reaches the
+# browser chat page, not just a spoken description — the actual fix for
+# "the user must actually see the navigation happen" ───────────────────────
+
+def test_navigate_leaves_a_structured_destination_on_the_context():
+    # ToolExecutor.execute() stashes the resolved destination on
+    # ctx.last_navigation so the caller (core/headless/ui.py's provider
+    # loops, via _record_tool_call) can fold it into this turn's tool_calls
+    # entry for the browser to act on.
+    dashboard = _connected_dashboard()
+    ctx = _ctx(dashboard)
+    _run(ToolExecutor(ctx).execute(
+        "navigate_command_center", {"action": "open", "target": "YouTube"}))
+    assert ctx.last_navigation is not None
+    assert ctx.last_navigation["delivered"] == 1
+    assert ctx.last_navigation["destination_type"] in ("nucleus", "external")
+    assert ctx.last_navigation["external_url"] or ctx.last_navigation["destination_route"]
+
+
+def test_navigate_reports_zero_delivered_when_no_window_is_connected():
+    ctx = _ctx(DashboardServer())   # no /3d client added — nothing connected
+    _run(ToolExecutor(ctx).execute(
+        "navigate_command_center", {"action": "open", "target": "BuildPro"}))
+    assert ctx.last_navigation is not None
+    assert ctx.last_navigation["delivered"] == 0
+
+
+def test_status_and_control_actions_leave_no_navigation_to_auto_open():
+    dashboard = _connected_dashboard()
+    ctx = _ctx(dashboard)
+    _run(ToolExecutor(ctx).execute("navigate_command_center", {"action": "status"}))
+    assert ctx.last_navigation is None
+
+
+def test_a_dashboard_less_process_leaves_no_navigation_either():
+    ctx = _ctx(None)
+    _run(ToolExecutor(ctx).execute(
+        "navigate_command_center", {"action": "open", "target": "Google"}))
+    assert ctx.last_navigation is None
+
+
+def test_record_tool_call_folds_navigation_into_the_tool_calls_entry(monkeypatch):
+    from core.headless import ui as headless_ui
+    from core.headless.tool_executor import ToolExecutor
+
+    dashboard = _connected_dashboard()
+    ctx = _ctx(dashboard)
+    executor = ToolExecutor(ctx)
+    result = _run(executor.execute(
+        "navigate_command_center", {"action": "open", "target": "YouTube"}))
+
+    tool_calls_made = []
+    headless_ui._record_tool_call(
+        tool_calls_made, executor, "navigate_command_center",
+        {"action": "open", "target": "YouTube"}, result)
+
+    assert len(tool_calls_made) == 1
+    assert "navigation" in tool_calls_made[0]
+    assert tool_calls_made[0]["navigation"]["delivered"] == 1
+    # Consumed — a later, unrelated tool call in the same turn must never
+    # inherit a stale navigation payload from an earlier one.
+    assert executor.ctx.last_navigation is None
+
+
+def test_record_tool_call_does_not_attach_navigation_to_other_tools():
+    from core.headless import ui as headless_ui
+    from core.headless.context import ToolContext
+    from core.headless.tool_executor import ToolExecutor
+
+    executor = ToolExecutor(ToolContext())
+    tool_calls_made = []
+    headless_ui._record_tool_call(tool_calls_made, executor, "weather_report", {}, "Sunny.")
+    assert "navigation" not in tool_calls_made[0]

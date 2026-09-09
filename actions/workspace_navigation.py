@@ -277,11 +277,21 @@ def resolve(request: str = "", *, action: str = "", target: str = "",
     return resolve_nucleus(cleaned or text)
 
 
-def describe(destination: Optional[dict[str, Any]], delivered: int) -> str:
+def describe(destination: Optional[dict[str, Any]], delivered: int,
+            *, auto_opens: bool = False) -> str:
     """What JARVIS should SAY about a navigation that has already been
     attempted. `delivered` is the number of Command Center windows that
-    actually received it — zero means nothing moved on any screen, and
-    that is reported rather than papered over."""
+    actually received it — zero means nothing moved on any already-open
+    screen, and that is reported rather than papered over.
+
+    `auto_opens` is True only for the /ui web chat surface (see
+    tool_executor.py's navigate_command_center branch): there, when
+    delivered is zero, the calling browser tab itself executes the
+    navigation client-side rather than requiring the user to separately
+    open another Command Center window first — /ui IS the Command Center.
+    main.py's desktop path leaves this False, since there a Command Center
+    is a genuinely separate paired device and nothing here can open a
+    window on it."""
     if destination is None:
         return ("I couldn't find that destination — try a business or module name "
                 "like BuildPro, Candidates or Daily Deal Finders, or give me a full web address.")
@@ -289,6 +299,8 @@ def describe(destination: Optional[dict[str, Any]], delivered: int) -> str:
     label = destination.get("label") or "that"
     if destination["action"] == ACTION_OPEN_EXTERNAL_TAB:
         if not delivered:
+            if auto_opens:
+                return f"Opening {label} in a new tab now."
             return (f"I can open {label}, but no Command Center window is connected to "
                     f"open it in. Open the command center and ask me again.")
         return (f"Opened {label} in a new tab — {destination.get('detail') or ''}".strip()
@@ -297,9 +309,14 @@ def describe(destination: Optional[dict[str, Any]], delivered: int) -> str:
         verb = {ACTION_BACK: "Went back", ACTION_HOME: "Back at the command center home",
                 ACTION_CLOSE: "Closed the workspace"}[destination["action"]]
         if not delivered:
+            # Nothing to auto-open for a relative control (back/home/close)
+            # with no existing Command Center view — there is no prior
+            # state to act on, in /ui or anywhere else.
             return f"No Command Center window is open, so there was nothing to {destination['action']}."
         return f"{verb}."
     if not delivered:
+        if auto_opens:
+            return f"Opening {label} in the command center now."
         return (f"I set the command center to {label}, but no Command Center window is open "
                 f"to show it — open the command center and it will be there.")
     return f"Opened {label} in the command center."
