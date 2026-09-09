@@ -457,6 +457,23 @@ def run_daily_matching(min_score: float = 50.0, top_n: int = 10) -> dict[str, An
     strong = [m for m in scored_matches if float(m["score"]) >= STRONG_MATCH_SCORE]
     exceptional = [m for m in scored_matches if float(m["score"]) >= EXCEPTIONAL_MATCH_SCORE]
 
+    top = scored_matches[0] if scored_matches else None
+
+    # HUBSPOT CONTEXT on the top match only — one read-only lookup per run,
+    # not one per match. Isolated: a HubSpot outage must not cost the
+    # matching result that is the actual point of this run.
+    if top is not None:
+        jobs_by_id = {j["id"]: j for j in jobs}
+        job = jobs_by_id.get(top.get("job_id"))
+        company = company_from_source((job or {}).get("source") or "")
+        if company:
+            try:
+                from actions import cross_system
+                top["hubspot"] = cross_system.hubspot_context_for_employer(company)
+                top["employer"] = company
+            except Exception:
+                logger.debug("hubspot context lookup failed for %r", company, exc_info=True)
+
     return {
         "ok": True, "state": OK,
         # Every one of these is a count of something that happened.
@@ -467,9 +484,20 @@ def run_daily_matching(min_score: float = 50.0, top_n: int = 10) -> dict[str, An
         "exceptional_matches": len(exceptional),
         "failed_jobs": failed_jobs,
         "matches": scored_matches[:top_n],
-        "top": scored_matches[0] if scored_matches else None,
+        "top": top,
         "duration_ms": int((time.time() - started) * 1000),
     }
+
+
+_COMPANY_FROM_SOURCE_RE = re.compile(r"\bcompany:(\S+)")
+
+
+def company_from_source(source: str) -> str:
+    """The employer name tucked into a job's provenance string by
+    intake_jobs() (there is no dedicated company column on buildpro_jobs).
+    '' when the source carries none — never guessed."""
+    match = _COMPANY_FROM_SOURCE_RE.search(source or "")
+    return match.group(1).replace("_", " ") if match else ""
 
 
 def recommended_action(match: dict[str, Any]) -> str:
@@ -497,6 +525,9 @@ def _match_line(match: dict[str, Any], rank: int) -> list[str]:
         lines.extend(f"  - {reason}" for reason in reasons[:6])
     elif match.get("rationale"):
         lines.append(f"Why: {match['rationale']}")
+    hubspot = match.get("hubspot")
+    if hubspot and hubspot.get("state") == "OK":
+        lines.append(f"HubSpot: {hubspot['detail']}")
     lines.append(f"Recommended action: {recommended_action(match)}")
     return lines
 

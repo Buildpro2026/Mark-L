@@ -157,6 +157,39 @@ def _gather() -> dict[str, Any]:
     return {"brief": brief, "modules": modules, "health": health, "knowledge": knowledge}
 
 
+def _escalate_flagged_priorities(priorities: list[dict[str, Any]], dry_run: bool = False) -> list[dict[str, Any]]:
+    """Turn a decision-layer escalation into an actual SMS.
+
+    Only items ceo_decision.decide() has ALREADY flagged escalate=True are
+    touched — this makes no new escalation judgement of its own, it only
+    delivers the one that already exists. Isolated per item: one failing
+    notification must not stop the others from being sent or block the
+    rest of the cycle."""
+    from actions import approval_notifier
+    import hashlib
+
+    sent: list[dict[str, Any]] = []
+    for item in priorities or []:
+        decision = item.get("decision") or {}
+        if not decision.get("escalate"):
+            continue
+        title = str(item.get("title") or "an item")[:200]
+        source = str(item.get("source") or "unknown")
+        # Stable across cycles for the SAME item so notify_urgent_event's
+        # own dedup (keyed on event_id) sends it once, not once per cycle.
+        event_id = "ceo-escalation-" + hashlib.sha256(f"{source}:{title}".encode()).hexdigest()[:16]
+        detail = (decision.get("why") or "repeated failures — needs a person to look at it")
+        try:
+            outcome = approval_notifier.notify_urgent_event(
+                event_id=event_id, title=f"Needs your attention: {title}",
+                detail=detail, level=3, dry_run=dry_run)
+            sent.append({"source": source, "title": title, **outcome})
+        except Exception as exc:
+            logger.warning("could not deliver escalation for %s: %s", source, exc)
+            sent.append({"source": source, "title": title, "action": "failed", "error": str(exc)[:200]})
+    return sent
+
+
 def _prioritize() -> list[dict[str, Any]]:
     """PRIORITIZE — real ranking, not a fixed severity tier.
 
@@ -341,6 +374,13 @@ def _format_report(gathered: dict[str, Any], priorities: list[dict[str, Any]], e
         lines.append(f"RISKS: {len(risks)} — top: {risks[0]['detail'][:140]}")
     if approvals:
         lines.append(f"APPROVALS WAITING: {len(approvals)}")
+    tasks_snapshot = brief.get("tasks", {})
+    if tasks_snapshot.get("available") and tasks_snapshot.get("overdue"):
+        lines.append(f"Google Tasks: {len(tasks_snapshot['overdue'])} overdue.")
+    hubspot_snapshot = brief.get("hubspot", {})
+    if hubspot_snapshot.get("available") and hubspot_snapshot.get("companies"):
+        lines.append(f"HubSpot: {len(hubspot_snapshot['companies'])} compan(y/ies) "
+                     f"not yet assessed as a recruiting opportunity.")
     if ddf_snapshot.get("high_ticket_picks"):
         names = ", ".join(p.get("name", "") for p in ddf_snapshot["high_ticket_picks"])
         lines.append(f"DDF high-ticket picks ready: {names}")
@@ -511,6 +551,17 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     # VERIFY
     verifications = _verify_and_followup(execution)
 
+    # ESCALATE. ceo_decision.decide() flags an item escalate=True when its
+    # source has failed repeatedly (>= ESCALATION_STREAK) — a signal that
+    # was computed and then never consulted anywhere: the CEO cycle could
+    # know a source was broken and still say nothing to Lee about it. This
+    # is the missing connection from decision to the existing Twilio
+    # escalation path (approval_notifier.notify_urgent_event), not a new
+    # notification system. notify_urgent_event's own event_id dedup means
+    # calling this every cycle for the same failing item sends exactly one
+    # SMS, not one per cycle.
+    _escalate_flagged_priorities(priorities, dry_run=dry_run)
+
     # REPORT delivery is the last stage, and it is the only one whose
     # failure must not erase the four that already succeeded. Previously a
     # raise here propagated out of run_cycle BEFORE _mark_ran(), so a Twilio
@@ -560,6 +611,12 @@ def run_cycle(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         "report_delivered": delivery_ok,
         "business_state": snapshot, "movement": movement, "report": report,
     }
+    # Additive: Google Tasks and HubSpot snapshots (executive_brief) ride
+    # alongside the structured report without touching ceo_report.py's
+    # existing, already-tested build()/render_text() internals.
+    if isinstance(result.get("report"), dict):
+        result["report"].setdefault("google_tasks", gathered["brief"].get("tasks"))
+        result["report"].setdefault("hubspot", gathered["brief"].get("hubspot"))
     _mark_ran(run_date, summary_text, risk_count=len(gathered["brief"].get("risks", [])), agents_run=result["agents_run"])
     _remember_cycle(run_date, result, execution, delivery_ok)
     _safe_stage("save_snapshot", lambda: business_state.save_snapshot(snapshot, run_date), None)

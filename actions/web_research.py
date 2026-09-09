@@ -763,8 +763,12 @@ def contradictions(results: Iterable[dict[str, Any]], field: str) -> dict[str, A
 
 _SALARY_RE = re.compile(
     r"[$£€]\s?([\d,]{2,})(?:\s?[kK])?(?:\s*(?:-|–|to)\s*[$£€]?\s?([\d,]{2,})(?:\s?[kK])?)?")
+# Restricted to non-newline whitespace and a bounded word count so a city
+# can never swallow an unrelated capitalized phrase across a line break —
+# found live: "...Construction Operations\n\nPhoenix, AZ" matched
+# "Construction Operations Phoenix" as one city before this fix.
 _LOCATION_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*([A-Z]{2})\b")
+    r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}),[ \t]*([A-Z]{2})\b")
 
 
 def extract_job(page: dict[str, Any]) -> dict[str, Any]:

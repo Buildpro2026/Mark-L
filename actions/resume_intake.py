@@ -153,6 +153,20 @@ def _extract_docx(data: bytes) -> str:
     return "\n".join(p.text for p in document.paragraphs)[:200_000]
 
 
+_YEARS_EXPERIENCE_RE = re.compile(r"(\d{1,2})\s*\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", re.I)
+# Restricted to ONE line and non-newline whitespace, so a city name never
+# spans a paragraph break — "...Operations\n\nPhoenix, AZ" previously let
+# the multi-word group swallow "Operations" and "Phoenix" into one city.
+_LOCATION_RE = re.compile(r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}),[ \t]*([A-Z]{2})\b")
+# Construction-leadership job titles a resume states about itself — the
+# same vocabulary buildpro_daily.seniority_of() reads off a job posting,
+# so a candidate and a job are judged by the same yardstick.
+_TITLE_LINE_RE = re.compile(
+    r"\b(VP|Vice President|Director|Senior Director|Superintendent|"
+    r"Project Manager|Construction Manager|General Manager|COO|President|"
+    r"Estimator|Regional Manager|Operations Manager)\b", re.I)
+
+
 def extract_contact(text: str) -> dict[str, str]:
     """Email, phone and name from resume text. Every field is either found
     in the document or absent — a resume with no email produces no email,
@@ -179,6 +193,58 @@ def extract_contact(text: str) -> dict[str, str]:
             found["name"] = candidate
         break
     return found
+
+
+def extract_profile(text: str) -> dict[str, Any]:
+    """The structured candidate fields BuildPro's matcher actually scores
+    on — title, specialty, years of experience, location, skills — read
+    off the resume text. Every field absent from the document is absent
+    from the result; a candidate's specialty is never guessed at because
+    the matcher's own scoring depends on that field being real or missing,
+    never invented.
+
+    Reuses buildpro_daily's title/specialty vocabulary rather than
+    duplicating it, so a candidate is judged by the same yardstick a job
+    posting is."""
+    from actions import buildpro_daily
+
+    found: dict[str, Any] = {}
+    title_match = _TITLE_LINE_RE.search(text or "")
+    if title_match:
+        # The whole line the title appears on, not just the matched word —
+        # "Senior Director of Construction Operations" carries more of the
+        # real title than "Director" alone.
+        for line in (text or "").splitlines():
+            if title_match.group(0).lower() in line.lower() and len(line.strip()) <= 100:
+                found["title"] = line.strip()
+                break
+        found.setdefault("title", title_match.group(0))
+
+    specialty = buildpro_daily.project_types_in(text or "")
+    if specialty:
+        found["specialty"] = specialty[0]
+
+    years = _first_int(_YEARS_EXPERIENCE_RE, text)
+    if years is not None:
+        found["years_experience"] = years
+
+    for line in (text or "").splitlines():
+        location = _LOCATION_RE.search(line)
+        if location:
+            found["location"] = f"{location.group(1)}, {location.group(2)}"
+            break
+
+    return found
+
+
+def _first_int(pattern: re.Pattern, text: str) -> Optional[int]:
+    match = pattern.search(text or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (ValueError, IndexError):
+        return None
 
 
 def store_resume(data: bytes, filename: str, uploads_dir: Path) -> Path:
@@ -245,6 +311,7 @@ def process_upload(data: bytes, filename: str, uploads_dir: Path,
 
     text = extract_text(data, kind)
     parsed = extract_contact(text) if text else {}
+    profile = extract_profile(text) if text else {}
     email = (submitted_email or parsed.get("email") or "").strip().lower()
     name = (submitted_name or parsed.get("name") or "").strip()
 
@@ -258,6 +325,7 @@ def process_upload(data: bytes, filename: str, uploads_dir: Path,
         "size": len(data),
         "text_extracted": bool(text),
         "parsed": parsed,
+        "profile": profile,
         "candidate_email": email or None,
         "candidate_name": name or None,
         "candidate_id": None,
@@ -301,6 +369,10 @@ def process_upload(data: bytes, filename: str, uploads_dir: Path,
             phone=parsed.get("phone", ""),
             source="resume_upload",
             source_url=str(path),
+            title=profile.get("title", ""),
+            specialty=profile.get("specialty", ""),
+            years_experience=profile.get("years_experience"),
+            location=profile.get("location", ""),
             notes=(f"Resume uploaded {datetime.now(timezone.utc).isoformat()}: "
                    f"{path.name}"),
         )

@@ -325,3 +325,43 @@ def match_new_candidate(candidate_id: int, min_score: Optional[float] = None,
             # Never "we found 25 matches" when the matcher found three.
             "detail": (f"{len(matches)} match(es) scored"
                        if matches else "no job currently matches this candidate")}
+
+# ══ HUBSPOT ══════════════════════════════════════════════════════════════
+# HubSpot is the CRM of record. A recruiting decision that ignores whether
+# the employer already has a CRM history is working with less information
+# than exists. This is read-only on purpose: creating or updating a
+# HubSpot record is a real external write, and upsert_company()/
+# upsert_contact() already require approved=True for exactly that reason —
+# nothing here calls them. Surfacing context is not the same action as
+# writing a record, and only the second one needs Lee's approval.
+
+def hubspot_context_for_employer(company_name: str) -> dict[str, Any]:
+    """Whether this employer already has CRM history, read-only.
+
+    NOT_CONFIGURED and a genuine "no match" are different facts and are
+    returned as different states — a recruiter reading "not in HubSpot"
+    must be able to tell "we don't know" from "we checked and it isn't
+    there"."""
+    from actions import hubspot_integration as hs
+
+    company_name = (company_name or "").strip()
+    if not company_name:
+        return {"state": "UNKNOWN", "in_hubspot": None, "detail": "no employer name to check"}
+    if not hs.is_configured():
+        return {"state": "NOT_CONFIGURED", "in_hubspot": None,
+                "detail": "HUBSPOT_TOKEN is not set"}
+    try:
+        found = hs.search_companies(company_name, property_name="name", limit=1)
+    except Exception as exc:
+        return {"state": FAILED, "in_hubspot": None, "detail": str(exc)[:200]}
+    if not found.get("ok"):
+        return {"state": FAILED, "in_hubspot": None, "detail": found.get("detail")}
+
+    results = found.get("results") or found.get("items") or []
+    if results:
+        company = results[0]
+        return {"state": OK, "in_hubspot": True,
+                "hubspot_company_id": company.get("id"),
+                "detail": f"'{company_name}' already exists in HubSpot"}
+    return {"state": OK, "in_hubspot": False,
+            "detail": f"'{company_name}' has no existing HubSpot company record — new prospect"}

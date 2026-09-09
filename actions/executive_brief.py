@@ -60,6 +60,56 @@ def _calendar_snapshot(max_results: int = 5) -> dict[str, Any]:
     }
 
 
+def _tasks_snapshot(max_results: int = 10) -> dict[str, Any]:
+    """Overdue and waiting Google Tasks, same honesty contract as the
+    Gmail/Calendar snapshots above: unauthorized reports as unavailable,
+    never as an empty (and therefore misleadingly clean) list."""
+    from actions import google_tasks_integration as tasks
+
+    status = google_auth.get_credential_status()
+    if not status.get("authorized"):
+        return {"available": False, "reason": "Google Tasks not authorized",
+                "overdue": [], "waiting": []}
+    r = tasks.list_tasks(max_results=max_results, show_completed=False)
+    if not r.get("ok"):
+        return {"available": False, "reason": r.get("detail"), "overdue": [], "waiting": []}
+
+    from actions import cross_system
+    now = cross_system._now()
+    overdue, waiting = [], []
+    for task in r.get("tasks") or []:
+        due = cross_system._parse_dt(task.get("due"))
+        entry = {"title": task.get("title"), "due": task.get("due"), "id": task.get("id")}
+        if due is not None and due < now:
+            overdue.append(entry)
+        else:
+            waiting.append(entry)
+    return {"available": True, "overdue": overdue, "waiting": waiting}
+
+
+def _hubspot_snapshot(limit: int = 10) -> dict[str, Any]:
+    """Companies in the CRM not yet worked as a recruiting opportunity.
+    Read-only — nothing here writes to HubSpot. Same honesty contract:
+    NOT_CONFIGURED is reported plainly rather than as zero opportunities."""
+    from actions import hubspot_integration as hs
+
+    if not hs.is_configured():
+        return {"available": False, "reason": "HUBSPOT_TOKEN is not set", "companies": []}
+    try:
+        result = hs.get_companies(limit=limit)
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)[:200], "companies": []}
+    if not result.get("ok", True):
+        return {"available": False, "reason": result.get("detail"), "companies": []}
+    companies = []
+    for company in (result.get("results") or result.get("items") or []):
+        props = company.get("properties") or {}
+        if props.get("name"):
+            companies.append({"id": company.get("id"), "name": props.get("name"),
+                              "domain": props.get("domain")})
+    return {"available": True, "companies": companies}
+
+
 def _pending_approvals() -> list[dict[str, Any]]:
     return [
         t.to_public_dict() for t in agent_orchestrator.list_tasks()
@@ -200,6 +250,8 @@ def generate_brief() -> dict[str, Any]:
 
     risks = _operational_risks()
     ddf_snapshot = _ddf_snapshot()
+    tasks_snapshot = _tasks_snapshot()
+    hubspot_snapshot = _hubspot_snapshot()
 
     recommended_actions = list(buildpro["recommended_actions"])
     if pending_approvals:
@@ -219,6 +271,15 @@ def generate_brief() -> dict[str, Any]:
         recommended_actions.append(
             f"DDF has {len(ddf_snapshot['high_ticket_picks'])} high-ticket pick(s) ready for today."
         )
+    if tasks_snapshot["available"] and tasks_snapshot["overdue"]:
+        recommended_actions.append(
+            f"{len(tasks_snapshot['overdue'])} Google Task(s) are overdue."
+        )
+    if hubspot_snapshot["available"] and hubspot_snapshot["companies"]:
+        recommended_actions.append(
+            f"{len(hubspot_snapshot['companies'])} HubSpot compan(y/ies) on file "
+            f"not yet assessed as a recruiting opportunity."
+        )
 
     return {
         "generated_ts": time.time(),
@@ -229,6 +290,8 @@ def generate_brief() -> dict[str, Any]:
         "strategic_objective": objective,
         "important_emails": _gmail_snapshot(),
         "calendar": _calendar_snapshot(),
+        "tasks": tasks_snapshot,
+        "hubspot": hubspot_snapshot,
         "pending_approvals": pending_approvals,
         "completed_overnight_work": overnight,
         "risks": risks,
