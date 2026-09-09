@@ -28,6 +28,8 @@ from actions import autonomous_ledger as ledger
 from actions import business_intent
 from actions import business_pipeline as bp
 
+_EMAIL_ADDR_RE = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+")
+
 logger = logging.getLogger("jarvis.inbound_monitor")
 
 # LinkedIn's notification senders.
@@ -99,6 +101,14 @@ def linkedin_findings(limit: int = MAX_MESSAGES) -> dict[str, Any]:
             {"sender": details.get("person") or "linkedin-member",
              "subject": message.get("subject"), "body": message.get("body") or message.get("snippet")},
             source="linkedin")
+        # No CRM cross-reference here, unlike email_opportunity_findings —
+        # a genuine integration limitation, not an oversight: LinkedIn's
+        # own notification email gives a display name, never an email
+        # address, and matching "existing candidate/client" on a bare name
+        # would risk crediting the wrong person entirely (name collisions
+        # are common). CLIENT/CANDIDATE/GENERAL/NOISE are still classified
+        # correctly; EXISTING_CLIENT/EXISTING_CANDIDATE just never fires
+        # for this source, honestly, rather than guessing.
         if not business_intent.is_at_least(verdict["priority"], business_intent.HIGH):
             continue
         person = details.get("person") or "a LinkedIn member"
@@ -118,6 +128,55 @@ def linkedin_findings(limit: int = MAX_MESSAGES) -> dict[str, Any]:
     return {"state": bp.SUCCESS, "findings": findings, "scanned": scanned}
 
 
+def _sender_email(raw: str) -> str:
+    """The bare address out of a "From" header ("Jane Doe <jane@co.com>" or
+    a bare address) — '' when none is present."""
+    m = _EMAIL_ADDR_RE.search(raw or "")
+    return m.group(0).lower() if m else ""
+
+
+def _apply_crm_cross_reference(verdict: dict[str, Any], sender_raw: str) -> dict[str, Any]:
+    """Upgrades a fresh CLIENT/CANDIDATE verdict to EXISTING_CLIENT/
+    EXISTING_CANDIDATE when the sender is already a known contact —
+    business_intent.classify() has no CRM access of its own (it is
+    deliberately pure pattern-matching over the message text), so this is
+    the one place that cross-references the two real record stores
+    (BuildPro's own candidate table, then HubSpot) that actually know who
+    is already in the book of business. Never raises and never downgrades
+    a verdict — a lookup failure just leaves the fresh classification as
+    the honest answer it already was."""
+    party = verdict.get("party")
+    if party not in (business_intent.CLIENT, business_intent.CANDIDATE):
+        return verdict
+    email = _sender_email(sender_raw)
+    if not email:
+        return verdict
+
+    try:
+        if party == business_intent.CANDIDATE:
+            from actions import buildpro_data
+            existing = buildpro_data.find_candidate_by_email(email)
+            if existing:
+                return {**verdict, "party": business_intent.EXISTING_CANDIDATE,
+                        "reason": verdict["reason"] + " — already a known BuildPro candidate",
+                        "crm_state": "MATCHED_BUILDPRO"}
+        else:
+            from actions import buildpro_data
+            existing = buildpro_data.find_client_by_email(email)
+            if existing:
+                return {**verdict, "party": business_intent.EXISTING_CLIENT,
+                        "reason": verdict["reason"] + " — already a known BuildPro client",
+                        "crm_state": "MATCHED_BUILDPRO"}
+            crm = business_intent.crm_relationship(email)
+            if crm.get("trusted") and crm.get("party") == business_intent.EXISTING_CLIENT:
+                return {**verdict, "party": business_intent.EXISTING_CLIENT,
+                        "reason": verdict["reason"] + " — already a known HubSpot contact",
+                        "crm_state": crm.get("crm_state")}
+    except Exception:
+        logger.debug("CRM cross-reference failed for %s", email, exc_info=True)
+    return verdict
+
+
 def email_opportunity_findings(limit: int = MAX_MESSAGES) -> dict[str, Any]:
     """Inbound email showing real business intent."""
     fetched = _fetch_inbox("in:inbox newer_than:3d -from:linkedin.com", limit)
@@ -127,10 +186,11 @@ def email_opportunity_findings(limit: int = MAX_MESSAGES) -> dict[str, Any]:
     findings, scanned = [], 0
     for message in fetched["messages"]:
         scanned += 1
+        sender = str(message.get("sender") or message.get("from") or "someone")
         verdict = business_intent.classify(message, source="email")
+        verdict = _apply_crm_cross_reference(verdict, sender)
         if not business_intent.is_at_least(verdict["priority"], business_intent.HIGH):
             continue
-        sender = str(message.get("sender") or message.get("from") or "someone")
         findings.append({
             **bp._finding(
                 "email_opportunity", str(message.get("id")),

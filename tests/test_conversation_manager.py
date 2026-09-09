@@ -269,3 +269,81 @@ def test_an_unknown_state_is_rejected_rather_than_silently_stored():
     m = _mgr()
     with pytest.raises(ValueError):
         m.set_state("VIBING")
+
+
+# ══ BARGE-IN AUDIO GATING ═══════════════════════════════════════════════
+# main.py's mic loop used to gate completely while JARVIS spoke — no audio
+# reached Gemini Live at all, so voice barge-in was structurally
+# impossible (the only way to interrupt JARVIS was a UI click). These
+# cover should_forward_mic_audio, the decision that replaced the blanket
+# gate: forward everything when JARVIS isn't speaking (unchanged), forward
+# nothing when muted/on a phone call (unchanged), and while JARVIS IS
+# speaking, forward only audio loud enough to plausibly be a real,
+# nearby interruption rather than the model's own voice leaking back in
+# from the speakers.
+
+def test_jarvis_speaking_with_no_user_speech_forwards_nothing():
+    # Quiet room, JARVIS talking, only his own faint speaker bleed reaches
+    # the mic — must not be forwarded (the exact original self-listening
+    # failure mode this whole gate exists to prevent).
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=False, phone_active=False, rms=5.0) is False
+
+
+def test_microphone_containing_only_jarvis_playback_is_not_forwarded():
+    # Louder than silence, but still well under the threshold — plausible
+    # for speaker bleed picked up a few feet from the mic, not someone
+    # speaking directly at it.
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=False, phone_active=False,
+        rms=cv.BARGE_IN_RMS_THRESHOLD_DEFAULT - 1) is False
+
+
+def test_normal_user_speech_while_jarvis_is_idle_is_always_forwarded():
+    # rms is irrelevant when JARVIS isn't speaking — every chunk goes
+    # through exactly as it always did; the threshold only ever applies
+    # during playback, the only window where forwarding is a risk at all.
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=False, muted=False, phone_active=False, rms=0.0) is True
+
+
+def test_intentional_barge_in_is_forwarded_when_loud_enough():
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=False, phone_active=False,
+        rms=cv.BARGE_IN_RMS_THRESHOLD_DEFAULT + 500) is True
+
+
+def test_the_threshold_boundary_itself_counts_as_loud_enough():
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=False, phone_active=False,
+        rms=cv.BARGE_IN_RMS_THRESHOLD_DEFAULT) is True
+
+
+def test_muted_overrides_a_loud_barge_in_attempt():
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=True, phone_active=False,
+        rms=999999.0) is False
+
+
+def test_muted_overrides_normal_listening_too():
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=False, muted=True, phone_active=False, rms=0.0) is False
+
+
+def test_an_active_phone_call_overrides_a_loud_barge_in_attempt():
+    # The PC mic must stay closed while the phone line owns the audio —
+    # unchanged from the pre-existing phone_active gate.
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=False, phone_active=True,
+        rms=999999.0) is False
+
+
+def test_a_custom_threshold_is_honored_for_per_machine_tuning():
+    # JARVIS_BARGE_IN_RMS_THRESHOLD exists precisely because one fixed
+    # constant cannot be right for every speaker volume/mic gain/room.
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=False, phone_active=False,
+        rms=50.0, threshold=10.0) is True
+    assert cv.should_forward_mic_audio(
+        jarvis_speaking=True, muted=False, phone_active=False,
+        rms=50.0, threshold=100.0) is False

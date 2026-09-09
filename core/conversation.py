@@ -323,3 +323,46 @@ class ConversationManager:
     def active_session(self) -> Optional[str]:
         with self._lock:
             return getattr(self, "_session_id", None)
+
+
+# ── barge-in audio gating ────────────────────────────────────────────────
+# main.py's Gemini Live mic loop used to gate completely while JARVIS spoke
+# — no audio was ever sent to the model. That guaranteed JARVIS could never
+# hear his own voice, at the cost of the OTHER required guarantee: a user
+# talking over him did nothing, because the mic was closed. There is no
+# acoustic echo cancellation available here (sounddevice provides none, and
+# building real AEC is out of scope for this pass), so the only signal
+# available to tell "a person is genuinely talking near the mic" apart from
+# "JARVIS's own voice is leaking back in from the speakers" is loudness: a
+# real interruption spoken at the mic is reliably louder than reflected
+# playback picked up from a few feet away. This is the standard fallback
+# technique when true AEC hardware/software isn't available — not a full
+# solution, an honest, tunable approximation of one.
+#
+# The threshold is deliberately not a literal buried in main.py: every
+# machine's speaker volume, mic gain and room acoustics differ, and getting
+# it wrong in either direction is a real regression — too low reopens the
+# original self-listening bug, too high makes barge-in silently impossible
+# again, which is exactly the failure mode this replaces. Override with
+# JARVIS_BARGE_IN_RMS_THRESHOLD (int16 PCM RMS) without a code change if a
+# specific machine needs retuning.
+BARGE_IN_RMS_THRESHOLD_DEFAULT = 1800.0
+
+
+def should_forward_mic_audio(*, jarvis_speaking: bool, muted: bool, phone_active: bool,
+                             rms: float = 0.0,
+                             threshold: float = BARGE_IN_RMS_THRESHOLD_DEFAULT) -> bool:
+    """Whether one captured microphone chunk should be sent to Gemini Live.
+
+    muted/phone_active are absolute gates, unchanged from the prior
+    behavior. The only thing that changed is what happens while JARVIS is
+    speaking: previously "never forward anything"; now "forward only audio
+    loud enough to plausibly be a real interruption." When JARVIS is not
+    speaking, every chunk is forwarded exactly as before — the threshold
+    only ever applies during playback, the only window where forwarding is
+    a self-listening risk at all."""
+    if muted or phone_active:
+        return False
+    if not jarvis_speaking:
+        return True
+    return rms >= threshold

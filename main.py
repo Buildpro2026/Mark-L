@@ -15,6 +15,7 @@ if _platform.system() == "Windows":
     _subprocess.Popen = _Popen
 # ─────────────────────────────────────────────────────────────────────────────
 import asyncio
+import os
 import re
 import threading
 import time
@@ -24,6 +25,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import sounddevice as sd
 from google import genai
 from google.genai import types
@@ -57,7 +59,10 @@ from actions.background_monitor import (
 )
 from core.headless.context import ToolContext
 from core.headless.tool_executor import ToolExecutor, UnknownToolError
-from core.conversation import ConversationManager, SOURCE_BACKGROUND
+from core.conversation import (
+    ConversationManager, SOURCE_BACKGROUND,
+    BARGE_IN_RMS_THRESHOLD_DEFAULT, should_forward_mic_audio,
+)
 from core import conversation as _cv
 from actions import workspace_navigation
 from actions import nucleus_hierarchy
@@ -99,6 +104,14 @@ CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+
+# See core/conversation.py's should_forward_mic_audio for what this is and
+# why it exists — env-overridable per machine without a code change.
+try:
+    BARGE_IN_RMS_THRESHOLD = float(
+        os.environ.get("JARVIS_BARGE_IN_RMS_THRESHOLD", "") or BARGE_IN_RMS_THRESHOLD_DEFAULT)
+except ValueError:
+    BARGE_IN_RMS_THRESHOLD = BARGE_IN_RMS_THRESHOLD_DEFAULT
 
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -484,7 +497,20 @@ class JarvisLive:
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted and not self._phone_active:
+            # should_forward_mic_audio (core/conversation.py): while JARVIS
+            # is speaking, only audio loud enough to plausibly be a real,
+            # nearby interruption is forwarded — see that function's own
+            # docstring for why (no AEC available; loudness is the
+            # fallback signal). RMS is only computed when actually needed
+            # (jarvis_speaking), not on every callback, since it isn't free.
+            rms = 0.0
+            if jarvis_speaking:
+                rms = float(np.sqrt(np.mean(np.square(indata.astype(np.float64)))))
+            if should_forward_mic_audio(
+                jarvis_speaking=jarvis_speaking, muted=self.ui.muted,
+                phone_active=self._phone_active, rms=rms,
+                threshold=BARGE_IN_RMS_THRESHOLD,
+            ):
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -548,6 +574,20 @@ class JarvisLive:
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                with self._speaking_lock:
+                                    jarvis_was_speaking = self._is_speaking
+                                # Real transcribed input arrived while JARVIS was
+                                # speaking. It only reached Gemini at all because
+                                # _listen_audio's should_forward_mic_audio gate
+                                # (core/conversation.py) judged it loud enough to
+                                # be a genuine interruption, not speaker bleed —
+                                # that is the barge-in signal itself. Act on it
+                                # immediately rather than silently accumulating it
+                                # into in_buf for a turn_complete that belongs to
+                                # the response already being interrupted.
+                                if jarvis_was_speaking and not self._interrupted:
+                                    self.interrupt()
+                                    in_buf = []
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
 

@@ -314,6 +314,115 @@ def test_an_email_client_inquiry_becomes_a_finding(monkeypatch):
     assert f["destination_data"]["thread_id"] == "th-1"
 
 
+def test_an_existing_candidate_emailing_in_is_recognized_as_such(monkeypatch):
+    # business_intent.classify() never produces EXISTING_CANDIDATE on its
+    # own (it has no CRM access) — this is the cross-reference the monitor
+    # itself must apply, matching an actual BuildPro record by email.
+    from actions import inbound_opportunity_monitor as monitor
+    from actions import buildpro_data
+    _fake_gmail(monkeypatch, [{
+        "id": "em-cand", "ok": True, "sender": "Dana Reeves <dana@example.com>", "thread_id": "t2",
+        "subject": "Following up",
+        "body": "I'm looking for a new leadership position and would like to be represented.",
+    }])
+    monkeypatch.setattr(buildpro_data, "find_candidate_by_email",
+                        lambda email: {"id": 7, "name": "Dana Reeves"} if email == "dana@example.com" else None)
+    result = monitor.email_opportunity_findings()
+    f = result["findings"][0]
+    assert f["verdict"]["party"] == intent.EXISTING_CANDIDATE
+
+
+def test_an_existing_client_emailing_in_is_recognized_via_buildpro(monkeypatch):
+    from actions import inbound_opportunity_monitor as monitor
+    from actions import buildpro_data
+    _fake_gmail(monkeypatch, [{
+        "id": "em-client", "ok": True, "sender": "john@acme.com", "thread_id": "t3",
+        "subject": "Need help hiring",
+        "body": "We're looking for a VP of Operations and need help finding someone.",
+    }])
+    monkeypatch.setattr(buildpro_data, "find_candidate_by_email", lambda email: None)
+    monkeypatch.setattr(buildpro_data, "find_client_by_email",
+                        lambda email: {"id": 3, "name": "Acme Co"} if email == "john@acme.com" else None)
+    result = monitor.email_opportunity_findings()
+    f = result["findings"][0]
+    assert f["verdict"]["party"] == intent.EXISTING_CLIENT
+
+
+def test_an_existing_client_is_also_recognized_via_a_trusted_hubspot_match(monkeypatch):
+    # Falls back to HubSpot when BuildPro's own client table has no match —
+    # the two stores are checked in order, not exclusively.
+    from actions import inbound_opportunity_monitor as monitor
+    from actions import buildpro_data
+    _fake_gmail(monkeypatch, [{
+        "id": "em-hs", "ok": True, "sender": "maria@bigco.com", "thread_id": "t4",
+        "subject": "Recruiting help",
+        "body": "Our firm is hiring and needs recruiting services support.",
+    }])
+    monkeypatch.setattr(buildpro_data, "find_candidate_by_email", lambda email: None)
+    monkeypatch.setattr(buildpro_data, "find_client_by_email", lambda email: None)
+    monkeypatch.setattr(intent, "crm_relationship",
+                        lambda email: {"party": intent.EXISTING_CLIENT, "trusted": True,
+                                      "crm_state": "MATCHED"})
+    result = monitor.email_opportunity_findings()
+    f = result["findings"][0]
+    assert f["verdict"]["party"] == intent.EXISTING_CLIENT
+
+
+def test_an_untrusted_crm_lookup_never_upgrades_the_verdict(monkeypatch):
+    # A HubSpot lookup marked untrusted (wrong portal, unreachable, not
+    # configured) must never be read as "existing client" — the whole
+    # point of crm_relationship()'s fail-safe design.
+    from actions import inbound_opportunity_monitor as monitor
+    from actions import buildpro_data
+    _fake_gmail(monkeypatch, [{
+        "id": "em-untrusted", "ok": True, "sender": "john@acme.com", "thread_id": "t5",
+        "subject": "Need help hiring",
+        "body": "We're looking for a VP of Operations and need help finding someone.",
+    }])
+    monkeypatch.setattr(buildpro_data, "find_candidate_by_email", lambda email: None)
+    monkeypatch.setattr(buildpro_data, "find_client_by_email", lambda email: None)
+    monkeypatch.setattr(intent, "crm_relationship",
+                        lambda email: {"party": intent.UNKNOWN, "trusted": False,
+                                      "crm_state": "NOT_CONFIGURED"})
+    result = monitor.email_opportunity_findings()
+    f = result["findings"][0]
+    assert f["verdict"]["party"] == intent.CLIENT   # unchanged — never upgraded on untrusted evidence
+
+
+def test_a_crm_lookup_failure_never_breaks_finding_generation(monkeypatch):
+    from actions import inbound_opportunity_monitor as monitor
+    from actions import buildpro_data
+    _fake_gmail(monkeypatch, [{
+        "id": "em-boom", "ok": True, "sender": "john@acme.com", "thread_id": "t6",
+        "subject": "Need help hiring",
+        "body": "We're looking for a VP of Operations and need help finding someone.",
+    }])
+    def _boom(email):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(buildpro_data, "find_candidate_by_email", _boom)
+    result = monitor.email_opportunity_findings()
+    assert result["state"] == "SUCCESS"
+    assert result["findings"][0]["verdict"]["party"] == intent.CLIENT
+
+
+def test_linkedin_findings_never_claim_an_existing_relationship_from_a_bare_name(monkeypatch):
+    # The documented, honest limitation: LinkedIn's notification email
+    # carries a display name, never an address, so EXISTING_CLIENT/
+    # EXISTING_CANDIDATE must never fire for this source — a name-only
+    # match would risk crediting the wrong person.
+    from actions import inbound_opportunity_monitor as monitor
+    _fake_gmail(monkeypatch, [{
+        "id": "li-cand", "ok": True, "sender": "messages-noreply@linkedin.com",
+        "subject": "New message from Dana Reeves",
+        "body": ("Dana Reeves sent you a message: I'm looking for a new leadership "
+                 "position and would like to be represented. "
+                 "https://www.linkedin.com/messaging/thread/xyz789/"),
+    }])
+    result = monitor.linkedin_findings()
+    f = result["findings"][0]
+    assert f["verdict"]["party"] not in (intent.EXISTING_CLIENT, intent.EXISTING_CANDIDATE)
+
+
 def test_the_same_message_is_never_processed_twice(monkeypatch):
     from actions import inbound_opportunity_monitor as monitor
     from actions import agent_orchestrator as ao
