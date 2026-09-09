@@ -10,11 +10,12 @@ still could not answer "compare this across three sources and tell me
 when each was observed", because the answer had already been flattened
 into a sentence by the time anyone saw it.
 
-This is the structured layer. It reuses what exists — web_search's
-DuckDuckGo results for discovery, browser_control.automation_page() for
-fetching, BeautifulSoup for parsing — and adds the part that was absent:
-every finding carries where it came from, when it was seen, and how
-strongly it is known.
+This is the structured layer. It reuses what exists — web_search's own
+Gemini grounded search as the primary source-discovery path, its
+DuckDuckGo results as the fallback when Gemini cannot complete a request,
+browser_control.automation_page() for fetching, BeautifulSoup for parsing
+— and adds the part that was absent: every finding carries where it came
+from, when it was seen, and how strongly it is known.
 
 THE EVIDENCE CLASSES ARE THE POINT
     OBSERVED    JARVIS loaded the page and read this off it.
@@ -132,14 +133,17 @@ def unknown(field: str, why: str = "not found on any source read") -> dict[str, 
 def search(query: str, max_results: int = 6) -> dict[str, Any]:
     """Candidate sources for a question, as structured records.
 
-    DDG (web_search._ddg_search) is the primary discovery path — it
-    already returns structured title/href/body per result, and a second
-    search client would be a second answer to the same question. If DDG
-    itself is unreachable (blocked proxy, rate limit, network outage —
-    this is a real, observed production failure mode, not a hypothetical
-    one), Gemini's own grounded search is the fallback, via
-    gemini_grounded_sources() — the exact same real-citation extraction
-    the plain web_search tool uses, never a guessed or fabricated URL.
+    Gemini's own grounded search is the PRIMARY discovery path — when
+    Gemini is available and has not exhausted its quota, JARVIS uses it
+    first. This reuses the exact same real-citation extraction the plain
+    web_search tool uses (web_search._gemini_grounded_response +
+    _grounding_sources), never a guessed or fabricated URL. DDG
+    (web_search._ddg_search) is the FALLBACK — tried whenever Gemini
+    cannot complete the request (quota exhausted, rate-limited,
+    temporarily unavailable, or any other failure) or returns no
+    candidates at all. The fallback does not depend on Gemini or on
+    Google's paid Search grounding in any way: DDG is a completely
+    independent path and works even when Gemini is entirely unreachable.
     Only when BOTH are unreachable does this report failure — never
     silently return zero candidates as if the search legitimately found
     nothing. Results are candidates, not findings: nothing here has been
@@ -150,53 +154,65 @@ def search(query: str, max_results: int = 6) -> dict[str, Any]:
     if not query:
         return {"ok": False, "state": FAILED, "detail": "empty query", "sources": []}
 
-    raw: list[dict[str, Any]] = []
-    ddg_failed = False
-    try:
-        raw = ws._ddg_search(query, max_results=max_results) or []
-    except Exception as exc:
-        logger.warning("DDG search failed for %r: %s", query, exc)
-        ddg_failed = True
-
     sources, seen = [], set()
-    for item in raw:
-        url = str(item.get("href") or item.get("url") or "").strip()
+
+    # PRIMARY: Gemini's own grounded search.
+    gemini_failed = False
+    try:
+        response = ws._gemini_grounded_response(query)
+        gemini_sources = ws._grounding_sources(response)
+    except Exception as exc:
+        logger.warning("Gemini grounded search failed for %r: %s", query, exc)
+        gemini_sources = []
+        gemini_failed = True
+    for s in gemini_sources:
+        url = str(s.get("url") or "").strip()
         if not url or url in seen:
             continue
         seen.add(url)
         sources.append({
-            "url": url,
-            "title": str(item.get("title") or "").strip(),
-            "snippet": str(item.get("body") or item.get("snippet") or "").strip(),
-            "host": _host(url),
-            "found_at": _now_iso(),
-            "read": False,
+            "url": url, "title": str(s.get("title") or "").strip(),
+            "snippet": "", "host": _host(url),
+            "found_at": _now_iso(), "read": False,
         })
 
-    gemini_failed = False
+    # FALLBACK: DDG. Only attempted when Gemini produced no candidates —
+    # whether because it failed outright or because it genuinely found
+    # nothing — so a quota/rate-limit/outage on Gemini never turns into a
+    # dead end. Independent of Gemini: no shared state, no dependency on
+    # Google's paid Search grounding being configured or reachable.
+    ddg_failed = False
     if not sources:
-        gemini_sources = ws.gemini_grounded_sources(query)
-        gemini_failed = not gemini_sources
-        for s in gemini_sources:
-            url = str(s.get("url") or "").strip()
+        try:
+            raw = ws._ddg_search(query, max_results=max_results) or []
+        except Exception as exc:
+            logger.warning("DDG search failed for %r: %s", query, exc)
+            raw = []
+            ddg_failed = True
+        for item in raw:
+            url = str(item.get("href") or item.get("url") or "").strip()
             if not url or url in seen:
                 continue
             seen.add(url)
             sources.append({
-                "url": url, "title": str(s.get("title") or "").strip(),
-                "snippet": "", "host": _host(url),
-                "found_at": _now_iso(), "read": False,
+                "url": url,
+                "title": str(item.get("title") or "").strip(),
+                "snippet": str(item.get("body") or item.get("snippet") or "").strip(),
+                "host": _host(url),
+                "found_at": _now_iso(),
+                "read": False,
             })
 
     if not sources:
-        if ddg_failed and gemini_failed:
+        if gemini_failed and ddg_failed:
             # A real inability to reach the live web — never the same
             # thing as "searched and found nothing". A caller must relay
             # this as "the research could not be completed", never as
             # evidence the subject doesn't exist.
             return {"ok": False, "state": UNAVAILABLE,
                     "detail": "Live web search could not be reached right now "
-                              "(both the primary and fallback search paths failed).",
+                              "(both the primary Gemini and fallback DDG search "
+                              "paths failed).",
                     "query": query, "sources": []}
         return {"ok": True, "state": NO_RESULTS, "query": query, "sources": [],
                 "detail": "the search returned no results"}

@@ -200,26 +200,49 @@ def test_the_conversation_tool_path_invokes_the_research_engine(monkeypatch):
     assert "toolshop.example" in result, "the answer must carry its sources"
 
 
-# 5. LIVE SOURCE ACQUISITION RESILIENCE — the reported production bug ────
+# 5. LIVE SOURCE ACQUISITION RESILIENCE — the reported production bug,
+# and Gemini-primary/DDG-fallback ────────────────────────────────────────
 #
 # Production symptom: a price/product question got "The model does not
 # appear to be released or listed on major retailers..." — a fabricated
 # non-existence claim. Root cause: search() had exactly one source-
-# discovery path (DDG). When DDG is unreachable (a real, observed failure
-# in this environment — a blocked search-engine proxy), search() failed
-# outright with no fallback, and nothing told the model that a failed
-# search is not evidence the product doesn't exist.
+# discovery path. When it was unreachable (a real, observed failure in
+# this environment), search() failed outright with no fallback, and
+# nothing told the model that a failed search is not evidence the
+# product doesn't exist.
+#
+# Gemini's own grounded search is now the PRIMARY discovery path (Lee's
+# explicit instruction: use Gemini first when it is available and has
+# quota); DDG is the FALLBACK, tried whenever Gemini cannot complete the
+# request — quota exhausted, rate-limited, temporarily unavailable, or
+# any other failure. This does not depend on Google's paid Search
+# grounding being available at all: DDG is attempted completely
+# independently of Gemini and works even when Gemini is entirely
+# unreachable.
 
-def test_search_falls_back_to_gemini_when_ddg_is_unreachable(monkeypatch):
+def _fake_grounded_response(chunks):
+    web_chunks = [type("Chunk", (), {"web": type("Web", (), {"uri": u, "title": t})()})()
+                  for u, t in chunks]
+    candidate = type("Candidate", (), {
+        "content": type("Content", (), {"parts": []})(),
+        "grounding_metadata": type("Meta", (), {"grounding_chunks": web_chunks})(),
+    })()
+    return type("Response", (), {"candidates": [candidate]})()
+
+
+def test_gemini_is_attempted_first_and_ddg_is_never_called_on_success(monkeypatch):
+    # Requirement 1 & 2: Gemini is tried first, and a Gemini success is
+    # returned as-is — the fallback path is not even touched.
     from actions import web_search as ws
 
-    def _ddg_boom(query, max_results=6):
-        raise RuntimeError("proxy CONNECT failed: HTTP/1.1 403 Forbidden")
-    monkeypatch.setattr(ws, "_ddg_search", _ddg_boom)
-    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [
-        {"url": "https://www.apple.com/iphone-16/", "title": "iPhone 16 - Apple"},
-        {"url": "https://www.bestbuy.com/site/iphone-16", "title": "iPhone 16 at Best Buy"},
-    ])
+    monkeypatch.setattr(ws, "_gemini_grounded_response", lambda q: _fake_grounded_response([
+        ("https://www.apple.com/iphone-16/", "iPhone 16 - Apple"),
+        ("https://www.bestbuy.com/site/iphone-16", "iPhone 16 at Best Buy"),
+    ]))
+
+    def _ddg_must_not_be_called(query, max_results=6):
+        raise AssertionError("DDG must not be called when Gemini succeeds")
+    monkeypatch.setattr(ws, "_ddg_search", _ddg_must_not_be_called)
 
     result = wr.search("iPhone 16 128GB price")
 
@@ -230,12 +253,42 @@ def test_search_falls_back_to_gemini_when_ddg_is_unreachable(monkeypatch):
     assert "https://www.bestbuy.com/site/iphone-16" in urls
 
 
-def test_search_reports_failure_honestly_when_both_paths_are_unreachable(monkeypatch):
+@pytest.mark.parametrize("gemini_exc", [
+    RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded for gemini-2.5-flash"),
+    RuntimeError("503 UNAVAILABLE: the model is temporarily overloaded"),
+    TimeoutError("Gemini grounded search timed out"),
+])
+def test_search_falls_back_to_ddg_when_gemini_cannot_complete(monkeypatch, gemini_exc):
+    # Requirements 3 & 4: a quota/rate-limit error and a plain
+    # unavailability both fall back to DDG, which works independently of
+    # Gemini (no paid Search grounding dependency).
     from actions import web_search as ws
 
+    def _gemini_boom(query):
+        raise gemini_exc
+    monkeypatch.setattr(ws, "_gemini_grounded_response", _gemini_boom)
+    monkeypatch.setattr(ws, "_ddg_search", lambda query, max_results=6: [
+        {"title": "iPhone 16 - Apple", "href": "https://www.apple.com/iphone-16/",
+         "body": "The latest iPhone, starting at $799."},
+    ])
+
+    result = wr.search("iPhone 16 128GB price")
+
+    assert result["ok"] is True
+    assert result["state"] == wr.OK
+    urls = {s["url"] for s in result["sources"]}
+    assert "https://www.apple.com/iphone-16/" in urls
+
+
+def test_search_reports_failure_honestly_when_both_paths_are_unreachable(monkeypatch):
+    # Requirement 5: both providers failing is an honest "unavailable",
+    # never a claim about the subject.
+    from actions import web_search as ws
+
+    monkeypatch.setattr(ws, "_gemini_grounded_response",
+                        lambda query: (_ for _ in ()).throw(RuntimeError("429 RESOURCE_EXHAUSTED")))
     monkeypatch.setattr(ws, "_ddg_search",
                         lambda query, max_results=6: (_ for _ in ()).throw(RuntimeError("proxy 403")))
-    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [])
 
     result = wr.search("iPhone 16 128GB price")
 
@@ -250,15 +303,17 @@ def test_search_reports_failure_honestly_when_both_paths_are_unreachable(monkeyp
 
 
 def test_full_research_run_never_claims_non_existence_when_search_is_unreachable(monkeypatch):
-    # End-to-end reproduction of the exact production report: both source-
-    # discovery paths fail -> research() -> summarize() must say the
-    # research could not be completed, and must never say or imply the
-    # product doesn't exist / isn't released / isn't sold.
+    # Requirement 6, end-to-end reproduction of the exact production
+    # report: both source-discovery paths fail -> research() ->
+    # summarize() must say the research could not be completed, and must
+    # never say or imply the product doesn't exist / isn't released /
+    # isn't sold.
     from actions import web_search as ws
 
+    monkeypatch.setattr(ws, "_gemini_grounded_response",
+                        lambda query: (_ for _ in ()).throw(RuntimeError("429 RESOURCE_EXHAUSTED")))
     monkeypatch.setattr(ws, "_ddg_search",
                         lambda query, max_results=6: (_ for _ in ()).throw(RuntimeError("proxy 403")))
-    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [])
 
     outcome = wr.research("current price of iPhone 16 128GB, compare at least three sources")
     spoken = wr.summarize(outcome)
@@ -279,8 +334,9 @@ def test_search_still_reports_no_results_honestly_when_search_actually_works(mon
     # into the same message.
     from actions import web_search as ws
 
+    monkeypatch.setattr(ws, "_gemini_grounded_response",
+                        lambda query: _fake_grounded_response([]))
     monkeypatch.setattr(ws, "_ddg_search", lambda query, max_results=6: [])
-    monkeypatch.setattr(ws, "gemini_grounded_sources", lambda q: [])
 
     result = wr.search("a query with genuinely no results anywhere")
 
