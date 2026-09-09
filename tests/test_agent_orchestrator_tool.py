@@ -71,7 +71,7 @@ def test_assign_to_execute_agent_requires_approval_and_never_autoruns():
     # Register a throwaway EXECUTE-level agent on the shared singleton for
     # this test only, so the tool path is exercised against a real EXECUTE
     # agent without touching the real BuildPro Email Monitor's permission level.
-    ao = main.agent_orchestrator
+    from actions.agent_orchestrator import orchestrator as ao
     calls = []
 
     from actions.agent_orchestrator import AgentDefinition, PermissionLevel
@@ -97,6 +97,52 @@ def test_assign_to_execute_agent_requires_approval_and_never_autoruns():
             del ao._tasks[tid]
 
 
+def test_status_with_task_id_describes_one_pending_approval():
+    # notification_destinations.approval() points "Approval required" links
+    # at /ui#approvals/<task_id> — this is what answers "show me the
+    # details of that approval": status + task_id, not agent_id.
+    main, live = _new_live()
+    live.ui = _ui_stub()
+    live._dashboard = None
+    live._loop = None
+
+    from actions.agent_orchestrator import orchestrator as ao
+    from actions.agent_orchestrator import AgentDefinition, PermissionLevel
+    ao._agents["test_status_via_tool"] = AgentDefinition(
+        id="test_status_via_tool", name="Test Status Via Tool", description="x",
+        nucleus_id="system", permission_level=PermissionLevel.EXECUTE,
+        handler=lambda task: {"ok": True},
+    )
+    try:
+        assign_fc = _make_fc(action="assign", agent_id="test_status_via_tool",
+                             task="Send the candidate intro email")
+        _run(live._execute_tool(assign_fc))
+        task_id = next(t.id for t in ao._tasks.values() if t.agent_id == "test_status_via_tool")
+
+        status_fc = _make_fc(action="status", task_id=task_id)
+        response = _run(live._execute_tool(status_fc))
+        result = response.response["result"]
+        assert task_id in result
+        assert "Test Status Via Tool" in result
+        assert "Send the candidate intro email" in result
+        assert "will not run until you approve it" in result.lower()
+    finally:
+        del ao._agents["test_status_via_tool"]
+        for tid in [t.id for t in ao._tasks.values() if t.agent_id == "test_status_via_tool"]:
+            del ao._tasks[tid]
+
+
+def test_status_with_unknown_task_id_reports_honestly():
+    main, live = _new_live()
+    live.ui = _ui_stub()
+    live._dashboard = None
+    live._loop = None
+
+    fc = _make_fc(action="status", task_id="no-such-task")
+    response = _run(live._execute_tool(fc))
+    assert "no task found" in response.response["result"].lower()
+
+
 def test_assign_reports_honest_failure_not_task_completed(gmail_not_authorized):
     # Phase 2 fix: a handler that returns normally (task.status == DONE)
     # while its result dict says the underlying action actually failed
@@ -108,7 +154,7 @@ def test_assign_reports_honest_failure_not_task_completed(gmail_not_authorized):
     live._dashboard = None
     live._loop = None
 
-    ao = main.agent_orchestrator
+    from actions.agent_orchestrator import orchestrator as ao
     from actions.agent_orchestrator import AgentDefinition, PermissionLevel
     ao._agents["test_soft_failure_via_tool"] = AgentDefinition(
         id="test_soft_failure_via_tool", name="Test Soft Failure", description="x",

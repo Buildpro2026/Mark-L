@@ -521,7 +521,11 @@ TOOL_DECLARATIONS = [
             "through the Agent Orchestrator. Use when a task is better handled by a "
             "dedicated agent than by you directly, or when the user asks about agent "
             "status or results, or wants to approve/reject a pending agent action. "
-            "Actions: 'list' (available agents), 'status' (one agent's state), "
+            "Actions: 'list' (available agents), 'status' (pass agent_id for one "
+            "agent's state, OR pass task_id instead for one specific pending task's "
+            "full detail — agent, the action it wants to take, and whether it's "
+            "still awaiting approval; use this for 'show me the details of that "
+            "approval' or 'what does task X want to do'), "
             "'start'/'stop' (agent lifecycle), 'assign' (give an agent a task — runs "
             "immediately for OBSERVE/SUGGEST-level agents; EXECUTE-level agents require "
             "a separate 'approve' before running, because they take real actions), "
@@ -535,7 +539,7 @@ TOOL_DECLARATIONS = [
                 "action":   {"type": "STRING", "description": "list | status | start | stop | assign | approve | reject | results"},
                 "agent_id": {"type": "STRING", "description": "Target agent id, e.g. 'buildpro_email_monitor'"},
                 "task":     {"type": "STRING", "description": "Task description, for 'assign'"},
-                "task_id":  {"type": "STRING", "description": "Target task id, for 'approve'/'reject'"},
+                "task_id":  {"type": "STRING", "description": "Target task id, for 'approve'/'reject', or for 'status' to look up one specific pending task/approval"},
             },
             "required": ["action"],
         },

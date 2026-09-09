@@ -354,8 +354,30 @@ class ToolExecutor:
                         f"{a.name} ({a.status.value}, {a.permission_level.value})" for a in agents
                     ) or "No agents registered."
                 elif action == "status":
-                    agent = agent_orchestrator.get_agent(agent_id)
-                    result = f"{agent.name}: {agent.status.value}" if agent else f"Unknown agent: {agent_id}"
+                    task_id = (args.get("task_id") or "").strip()
+                    if task_id:
+                        # A specific pending task/approval, by id — what
+                        # "show me the details of approval X" needs (the
+                        # notification link built by notification_
+                        # destinations.approval() points at /ui#approvals/
+                        # <task_id>, and nothing could answer that request
+                        # by id before this).
+                        task = agent_orchestrator.get_task(task_id)
+                        if task is None:
+                            result = f"No task found with id {task_id}."
+                        else:
+                            owning_agent = agent_orchestrator.get_agent(task.agent_id)
+                            result = (
+                                f"Task {task.id} ({owning_agent.name if owning_agent else task.agent_id}): "
+                                f"{task.status.value}\n"
+                                f"Action: {task.description}"
+                                + (f"\nError: {task.error}" if task.error else "")
+                                + ("\nThis will NOT run until you approve it."
+                                   if task.status.value == "pending_approval" else "")
+                            )
+                    else:
+                        agent = agent_orchestrator.get_agent(agent_id)
+                        result = f"{agent.name}: {agent.status.value}" if agent else f"Unknown agent: {agent_id}"
                 elif action == "start":
                     agent = await loop.run_in_executor(None, agent_orchestrator.start_agent, agent_id)
                     result = f"{agent.name} started."
