@@ -63,6 +63,14 @@ class ToolContext:
     ui: Any = field(default_factory=NullPlayer)
     speak: Callable[[str], None] = field(default=lambda text: None)
     proactive: Any = None   # actions.proactive.ProactiveEngine instance; built lazily if None
+    # dashboard.server.DashboardServer instance, when one is actually
+    # running in this process (core/headless/app.py mounts one at startup
+    # whenever it can import cleanly — it has no PyQt dependency, so this
+    # is normally set). None on a genuinely dashboard-less process (some
+    # tests, or a deployment that failed to mount it) — navigate_command_
+    # center reports that honestly rather than pretending it can navigate
+    # somewhere with nothing listening.
+    dashboard_server: Any = None
 
     def __post_init__(self) -> None:
         if self.proactive is None:

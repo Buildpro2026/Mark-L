@@ -11,14 +11,27 @@ tests monkeypatch the shared module objects (e.g. actions.gmail_integration
 itself), not a name inside main.py's namespace, so it doesn't matter which
 file holds the `from actions import X` — both point at the same module.
 
-SESSION_ONLY_TOOLS (screen_process, close_camera, shutdown_jarvis,
-navigate_command_center) stay in main.py, unchanged, because they need a
-real camera/screen/live Gemini session/embedded dashboard — faking that
-headlessly would mean pretending a capability exists that doesn't.
-save_memory is handled here too (memory writes are genuinely headless-safe)
-even though main.py keeps its own fast-path early return for it, to avoid
-a UI flicker during an interactive voice turn.
-"""
+SESSION_ONLY_TOOLS (screen_process, close_camera, shutdown_jarvis) stay in
+main.py, unchanged, because they need a real camera/screen/live Gemini
+session — faking that headlessly would mean pretending a capability exists
+that doesn't. save_memory is handled here too (memory writes are genuinely
+headless-safe) even though main.py keeps its own fast-path early return
+for it, to avoid a UI flicker during an interactive voice turn.
+
+navigate_command_center IS handled here (see its branch below) — it only
+needs a dashboard.server.DashboardServer instance, which has no PyQt
+dependency and is mounted in this same headless process by
+core/headless/app.py whenever it can import cleanly (which is normally).
+Before this, it was miscategorized as session-only: the /ui browser chat
+and core.headless.dashboard_bridge's /3d typed-command relay both run
+turns through this exact executor, so "open Google"/"open BuildPro" typed
+or spoken into either surface had no working navigation tool at all — only
+browser_control (which is honest that a headless server has no visible
+browser of its own, but is not what should answer "open it in the command
+center" in the first place). main.py's own inline navigate_command_center
+handling in JarvisLive._execute_tool is unchanged and still intercepts the
+call before it would ever reach this executor on the desktop path — the
+two never run for the same request."""
 from __future__ import annotations
 
 import json
@@ -125,6 +138,28 @@ class ToolExecutor:
         elif name == "browser_control":
             r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=ctx.ui))
             result = r or "Done."
+
+        elif name == "navigate_command_center":
+            # Mirrors main.py's JarvisLive._execute_tool navigate_command_
+            # center branch exactly — same resolver, same executor, same
+            # honest-delivery reporting — the headless equivalent of the
+            # desktop path, not a second implementation of it.
+            if ctx.dashboard_server is None:
+                result = ("The command center dashboard isn't running in this "
+                          "process right now.")
+            else:
+                from actions import workspace_navigation
+                action = (args.get("action") or "").strip().lower()
+                target = (args.get("target") or "").strip()
+                if not action:
+                    action = "back" if target.lower() == "go back" else ("open" if target else "status")
+                if action == "status":
+                    nav = ctx.dashboard_server.apply_navigation("status", "")
+                    result = f"You're currently looking at {nav['name']} in the command center."
+                else:
+                    destination = workspace_navigation.resolve(target, action=action, target=target)
+                    delivered = await ctx.dashboard_server.execute_destination(destination)
+                    result = workspace_navigation.describe(destination, delivered)
 
         elif name == "file_controller":
             r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=ctx.ui))

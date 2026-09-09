@@ -1159,12 +1159,19 @@ TOOL_DECLARATIONS = [
     {
         "name": "navigate_command_center",
         "description": (
-            "Controls the 3D spatial command center (the /3d browser view). "
-            "Always call this — never just say you did it — for phrases like: "
+            "Opens something in the JARVIS Command Center — the ONLY way to show the "
+            "user a website or business area; never claim a page is open without calling "
+            "this. Handles two kinds of destination: (1) an internal area, e.g. "
             "'open BuildPro', 'go to BuildPro', 'show BuildPro', 'open Daily Deal Finders', "
             "'open DDF', 'open CareerRocket', 'open my email', 'open calendar', 'open files', "
             "'open reports', 'open communications', 'open phone', 'go back', 'go home', "
-            "'show me everything', 'what am I looking at'."
+            "'show me everything', 'what am I looking at'; (2) an external website by name "
+            "or URL, e.g. 'open Google', 'open YouTube', 'open github.com' — put the site "
+            "name or URL in `target`. Sites that refuse to be embedded (Google, LinkedIn, "
+            "HubSpot, GitHub, social platforms, and others) still genuinely open, in their "
+            "own browser tab rather than inside the Command Center panel — this tool's own "
+            "result says which happened; never claim 'embedded' when it opened in a tab, "
+            "and never claim success if the result says no Command Center window is open."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1176,9 +1183,10 @@ TOOL_DECLARATIONS = [
                 "target": {
                     "type": "STRING",
                     "description": (
-                        "Name of the Nucleus to open, e.g. 'BuildPro', 'Daily Deal Finders', 'DDF', "
+                        "What to open: a Nucleus name ('BuildPro', 'Daily Deal Finders', 'DDF', "
                         "'CareerRocket Pro', 'Email', 'Calendar', 'Files', 'Reports', 'Communications', "
-                        "'System'. Required when action is 'open'; omit for back/home/status."
+                        "'System'), a website name ('Google', 'YouTube'), or a full URL. "
+                        "Required when action is 'open'; omit for back/home/status."
                     ),
                 },
             },
@@ -1188,12 +1196,17 @@ TOOL_DECLARATIONS = [
 ]
 
 # Tools that are inherently bound to a live desktop/voice session (camera,
-# screen capture, the Gemini Live session object itself, or the desktop's
-# embedded 3D dashboard instance) and are therefore NOT handled by
-# ToolExecutor — main.py's JarvisLive still handles these four inline,
-# unchanged, because faking a camera/screen/live-session headlessly would
-# mean pretending a capability exists that doesn't. See tool_executor.py's
-# module docstring.
+# screen capture, or the Gemini Live session object itself) and are
+# therefore NOT handled by ToolExecutor — main.py's JarvisLive still
+# handles these three inline, unchanged, because faking a camera/screen/
+# live-session headlessly would mean pretending a capability exists that
+# doesn't. navigate_command_center is deliberately NOT in this set: it
+# only needs a DashboardServer instance (dashboard/server.py — pure
+# FastAPI/websocket, no PyQt), which core/headless/app.py mounts in this
+# same process, so it is genuinely available headlessly too — see
+# tool_executor.py's own navigate_command_center branch and
+# core/headless/context.py's ToolContext.dashboard_server field. See
+# tool_executor.py's module docstring for the three that remain here.
 SESSION_ONLY_TOOLS = frozenset({
-    "screen_process", "close_camera", "shutdown_jarvis", "navigate_command_center",
+    "screen_process", "close_camera", "shutdown_jarvis",
 })

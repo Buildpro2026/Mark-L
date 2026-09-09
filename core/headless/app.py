@@ -66,6 +66,10 @@ def create_app(start_background_worker: bool = True) -> FastAPI:
             "/health will report degraded and its routes return 503."
         )
     app.state.dashboard_server = dashboard_server
+    # run_chat_turn() (core/headless/ui.py) needs this to give
+    # navigate_command_center something to navigate — see that module's
+    # own comment on why a module-level reference rather than app.state.
+    ui.set_dashboard_server(dashboard_server)
 
     if start_background_worker:
         @app.on_event("startup")

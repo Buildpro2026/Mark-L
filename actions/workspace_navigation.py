@@ -108,6 +108,30 @@ _VERB_PREFIX = re.compile(
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 _BARE_DOMAIN_RE = re.compile(r"\b((?:[\w-]+\.)+[a-z]{2,})(/[^\s]*)?\b", re.I)
 
+# Well-known sites spoken/typed by brand name, without a domain suffix —
+# "open Google", "open YouTube". _BARE_DOMAIN_RE above requires a literal
+# dot, so a bare brand name never matched it and fell all the way through
+# to resolve_nucleus(), which of course has no such area either — "open
+# Google" resolved to nothing at all, the actual reported bug. Deliberately
+# a small, explicit allowlist rather than "assume any single word is a
+# website": an unlisted bare word still falls through to resolve_nucleus()
+# and gets an honest "I couldn't find that" rather than a guessed domain.
+_KNOWN_SITE_NAMES: dict[str, str] = {
+    "google": "https://google.com",
+    "youtube": "https://youtube.com",
+    "gmail": "https://mail.google.com",
+    "github": "https://github.com",
+    "linkedin": "https://linkedin.com",
+    "hubspot": "https://app.hubspot.com",
+    "amazon": "https://amazon.com",
+    "facebook": "https://facebook.com",
+    "instagram": "https://instagram.com",
+    "twitter": "https://x.com",
+    "x": "https://x.com",
+    "tiktok": "https://www.tiktok.com",
+    "buffer": "https://publish.buffer.com",
+}
+
 
 def is_embeddable(url: str) -> bool:
     """False for hosts known to send X-Frame-Options / frame-ancestors.
@@ -137,6 +161,9 @@ def normalize_url(text: str) -> Optional[str]:
     bare = _BARE_DOMAIN_RE.search(text.strip())
     if bare and "." in bare.group(1):
         return "https://" + bare.group(0).rstrip(".,;)")
+    known = _KNOWN_SITE_NAMES.get(text.strip().lower())
+    if known:
+        return known
     return None
 
 

@@ -128,13 +128,17 @@ def _clean_transcript(text: str) -> str:
 # the identical tool surface, not two hand-maintained copies that can
 # silently drift apart (see core/headless/tool_executor.py's module
 # docstring for the matching execution-side unification). Tools in
-# SESSION_ONLY_TOOLS (screen_process, close_camera, shutdown_jarvis,
-# navigate_command_center) are declared here too, since this is the real
-# live desktop/voice session they require — _execute_tool below still
-# handles three of those four inline; navigate_command_center's embedded
-# 3D command-center wiring is not yet implemented (see the J-series
-# reports), so Gemini can now discover it but calling it currently
-# returns a clear "Unknown tool" response rather than pretending to work.
+# SESSION_ONLY_TOOLS (screen_process, close_camera, shutdown_jarvis) are
+# declared here too, and _execute_tool below still handles all three
+# inline, since they need this real live desktop/voice session (a camera,
+# a screen, this Gemini Live session object itself). navigate_command_
+# center is NOT in that set — it's handled inline just below for the
+# real reason (this is where main.py's own live self._dashboard instance
+# lives, not because the shared ToolExecutor can't run it: since 2026-09,
+# ToolExecutor has its own navigate_command_center branch too, using a
+# DashboardServer instance from ToolContext.dashboard_server, which is
+# what makes it reachable from /ui's chat and dashboard_bridge.py's /3d
+# relay — see core/headless/tool_executor.py's module docstring.
 from core.headless.tool_registry import TOOL_DECLARATIONS
 
 # --- Plugin system ---

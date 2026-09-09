@@ -48,7 +48,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -71,10 +71,28 @@ _MAX_TOOL_CALL_ROUNDS = 4            # caps a runaway tool-call chain, not norma
 STATIC_DIR = Path(__file__).parent / "ui_static"
 INDEX_FILE = STATIC_DIR / "index.html"
 AVATAR_DIR = STATIC_DIR / "avatar"
-# Pre-generated (SadTalker/MuseTalk, offline, $0, CPU) — see FaceRenderer in
-# index.html. An allowlist rather than trusting the path param directly,
-# even though FastAPI path params can't contain "/" on their own.
+# Pre-generated (SadTalker/MuseTalk, offline, $0, CPU) — dormant since the
+# 2026-09-09 orb rebuild (see OrbRenderer in index.html) replaced the video
+# avatar with a canvas-drawn presence; the endpoint below still serves
+# these files correctly, just unused by the page now. An allowlist rather
+# than trusting the path param directly, even though FastAPI path params
+# can't contain "/" on their own.
 _AVATAR_ASSETS = {"idle_loop.mp4", "speaking_sample.mp4"}
+
+# The one DashboardServer instance for this process, when core/headless/
+# app.py managed to mount one (it has no PyQt dependency, so this is
+# normally set) — set once at startup via set_dashboard_server(), read by
+# run_chat_turn() below to give ToolContext a real navigate_command_center
+# target. A plain module-level reference rather than app.state because
+# dashboard_bridge.run() (core/headless/dashboard_bridge.py) drains its own
+# background queue with no per-request app/Request object to read state
+# from; both it and every /ui/api/chat request end up at the same object.
+_dashboard_server: Any = None
+
+
+def set_dashboard_server(server: Any) -> None:
+    global _dashboard_server
+    _dashboard_server = server
 
 COOKIE_NAME = "jarvis_ui_session"
 SESSION_TTL_SECONDS = 365 * 24 * 3600   # Lee's call 2026-08-19: was 12h, too short for a tool left open across a workday
@@ -497,7 +515,7 @@ async def run_chat_turn(
     from core.headless.context import ToolContext
     from core.headless.tool_executor import ToolExecutor
 
-    executor = ToolExecutor(ToolContext())
+    executor = ToolExecutor(ToolContext(dashboard_server=_dashboard_server))
     tool_calls_made: list[dict] = []
     return await _run_provider_chain(providers, message, history, on_status, executor, tool_calls_made, on_tool_event)
 
