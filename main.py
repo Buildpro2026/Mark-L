@@ -123,8 +123,93 @@ except ValueError:
 BARGE_IN_PREFIX_PADDING_MS = 100
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    """The Gemini API key — the real GEMINI_API_KEY env var first (the
+    headless deployment's own source of truth, so a machine with both set
+    up doesn't silently read a stale/empty config-file copy instead), then
+    config/api_keys.json. Never echoes the key's own value anywhere,
+    including in an error: a missing file, unreadable JSON, or an empty
+    key all raise the exact same fixed message, so a caller that logs this
+    exception can never leak whatever partial value was actually present."""
+    from core.headless import config as _hc_config
+    if _hc_config.GEMINI_API_KEY:
+        return _hc_config.GEMINI_API_KEY
+    try:
+        with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
+            key = json.load(f).get("gemini_api_key") or ""
+    except Exception:
+        key = ""
+    if not key:
+        raise RuntimeError("API key not valid — please re-enter your key.")
+    return key
+
+
+def _classify_connection_error(err: BaseException, prev_backoff: int = 3) -> tuple[str, int]:
+    """Turns one raw exception from the reconnect loop into a safe,
+    user-visible log line plus the next backoff delay in seconds.
+
+    Two proven bugs this replaces: (1) an audio-device failure (no mic/
+    speaker found) used to retry completely silently — no ui.write_log
+    call at all, so the user saw nothing while JARVIS quietly failed
+    forever; (2) every network error used one hardcoded Turkish string
+    regardless of the user's configured language.
+
+    Checked in priority order — quota/rate-limit and audio-device errors
+    can both incidentally contain text a looser network-substring check
+    would also match, so those go first:
+      1. 429/RESOURCE_EXHAUSTED — escalating backoff (30s, doubling to a
+         120s cap) so a rate-limited API is never hammered on a flat retry.
+      2. No microphone / no speaker — a specific, actionable message; does
+         not escalate backoff, since retrying quickly is fine once the
+         device is reconnected.
+      3. Network/connectivity — backoff doubles, capped at 60s.
+      4. Anything else — the exception's TYPE name only, in English,
+         resetting backoff to the default. Never the exception's own
+         message text: a raw SDK/network exception can embed a URL,
+         header, or debug string that carries the API key, and this is
+         the one branch with no more specific handling to keep it out."""
+    text = str(err)
+
+    if "429" in text or "RESOURCE_EXHAUSTED" in text.upper():
+        backoff = min(prev_backoff * 2, 120) if prev_backoff >= 30 else 30
+        return f"ERR: API quota exceeded (429) — retrying in {backoff}s.", backoff
+
+    lower = text.lower()
+    if "microphone" in lower and "input device" in lower:
+        return (
+            "ERR: No microphone found. Check your microphone is connected "
+            "and enabled in Windows Sound settings — JARVIS will reconnect "
+            "automatically once it is.",
+            prev_backoff,
+        )
+    if "speaker" in lower or "output device" in lower or "output-capable" in lower:
+        return (
+            "ERR: No speaker/headphone output available. Please reconnect "
+            "your microphone/speakers — JARVIS will reconnect automatically.",
+            prev_backoff,
+        )
+
+    is_net_err = isinstance(err, (TimeoutError, ConnectionRefusedError, OSError)) or any(
+        k in text for k in (
+            "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
+            "ConnectionRefusedError", "OSError", "Cannot connect",
+        ))
+    if is_net_err:
+        backoff = min(prev_backoff * 2, 60)
+        return (
+            f"NET: Could not connect — retrying in {backoff}s. "
+            "Check your internet connection (a VPN may be required).",
+            backoff,
+        )
+
+    return f"ERR: {type(err).__name__} — retrying in 3s.", 3
+
+
+def _post_session_state(had_error: bool) -> str:
+    """What the HUD should show once one run()-loop iteration ends.
+    "SLEEPING" after a clean disconnect (nothing wrong, just no active
+    session) used to be shown after a real connection failure too, which
+    reads as idle when JARVIS is actually about to retry."""
+    return "RECONNECTING" if had_error else "SLEEPING"
 
 
 def _load_system_prompt() -> str:
@@ -1160,6 +1245,7 @@ class JarvisLive:
             # trips this — this loop only ever holds one connection open —
             # but it is real, tested protection rather than an assumption.
             session_id = uuid.uuid4().hex
+            had_error = False
             try:
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
@@ -1225,6 +1311,7 @@ class JarvisLive:
                 # externally, which `except Exception` would miss, letting the
                 # exception escape the while-loop and causing asyncio.run() to
                 # start shutdown — resulting in "executor after shutdown" errors).
+                had_error = True
                 err_str = str(e)
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
@@ -1240,20 +1327,12 @@ class JarvisLive:
                     _conn_backoff = 3
                     continue
 
-                # Network / timeout errors — log clearly and back off
-                is_net_err = any(k in err_str for k in (
-                    "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
-                    "ConnectionRefusedError", "OSError", "Cannot connect",
-                ))
-                if is_net_err:
-                    _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
-                    self._conn_backoff = _conn_backoff
-                    self.ui.write_log(
-                        f"NET: Bağlantı kurulamadı — {_conn_backoff}s sonra tekrar deneniyor. "
-                        "(VPN gerekiyor olabilir)"
-                    )
-                else:
-                    self._conn_backoff = 3
+                # Every other error — one classifier, one always-visible
+                # message, never the raw exception text (see
+                # _classify_connection_error's own docstring for why).
+                msg, self._conn_backoff = _classify_connection_error(
+                    e, getattr(self, "_conn_backoff", 3))
+                self.ui.write_log(msg)
             finally:
                 self.session = None
                 self._conversation.release_session(session_id)
@@ -1262,7 +1341,7 @@ class JarvisLive:
                     asyncio.create_task(self._save_session_summary())
 
             self.set_speaking(False)
-            self.ui.set_state("SLEEPING")
+            self.ui.set_state(_post_session_state(had_error))
 
             if self._dashboard:
                 await self._dashboard.broadcast({"type": "status", "state": "sleeping"})
