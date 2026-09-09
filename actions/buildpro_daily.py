@@ -170,6 +170,15 @@ def normalize_job(raw: dict[str, Any], source: str = "") -> dict[str, Any]:
         "seniority": seniority,
         "project_types": projects,
         "discovered_at": datetime.now(timezone.utc).isoformat(),
+        # From WebResearchJobSource (or any future adapter that supplies
+        # them): when the posting states it was published, how much that
+        # kind of source is trusted, and whether the title/fields were
+        # directly read off the page. '' rather than a guess when a source
+        # (like a manual/API entry) does not supply them.
+        "date_posted": _clean(raw.get("date_posted")),
+        "freshness_state": _clean(raw.get("freshness_state")),
+        "confidence": raw.get("confidence"),
+        "evidence": _clean(raw.get("evidence")),
     }
     return normalized
 
@@ -219,6 +228,10 @@ def intake_jobs(raw_jobs: list[dict[str, Any]], source: str = "") -> dict[str, A
                 f"url:{meta['source_url']}" if meta["source_url"] else "",
                 f"company:{meta['company']}" if meta["company"] else "",
                 f"seniority:{meta['seniority']}" if meta["seniority"] else "",
+                f"posted:{meta['date_posted']}" if meta.get("date_posted") else "",
+                f"freshness:{meta['freshness_state']}" if meta.get("freshness_state") else "",
+                f"confidence:{meta['confidence']:.2f}" if isinstance(meta.get("confidence"), (int, float)) else "",
+                f"evidence:{meta['evidence']}" if meta.get("evidence") else "",
             ]))
             normalized["source"] = provenance[:500]
 
@@ -286,7 +299,9 @@ class WebResearchJobSource(JobSource):
     name = "web_research"
 
     def __init__(self, roles: Optional[list[str]] = None, location: str = ""):
-        self.roles = roles or list(LEADERSHIP_ROLES[:4])
+        # The full leadership-role list, not a prefix of it — the roles
+        # this class exists to find are the whole point of it.
+        self.roles = roles or list(LEADERSHIP_ROLES)
         self.location = location
         # Whether the last fetch could reach the web at all. "Configured
         # but unreachable" and "reachable but nothing matched" are
@@ -325,15 +340,32 @@ class WebResearchJobSource(JobSource):
                 title = _value("job_title")
                 if not title:
                     continue     # a posting with no title is not a posting
-                postings.append({
+
+                def _evidence(name):
+                    return (fields.get(name) or {}).get("evidence")
+
+                freshness = result.get("freshness") or {}
+                posting = {
                     "title": title,
                     "company": _value("company") or "",
                     "location": _value("location") or self.location,
                     "salary": _value("compensation") or "",
+                    "employment_type": _value("employment_type") or "",
                     "description": (fields.get("summary") or {}).get("value") or "",
                     "url": result.get("source_url") or "",
                     "source": f"web:{result.get('source_type') or 'unknown'}",
-                })
+                    "role_searched": role,
+                    # Carried through so a job's provenance records not just
+                    # WHERE it came from but how much to trust it: the
+                    # page's own stated age (freshness), how reliable this
+                    # kind of source is taken to be, and whether the title
+                    # was directly read off the page or merely a query echo.
+                    "date_posted": freshness.get("published_at") or "",
+                    "freshness_state": freshness.get("state") or "UNKNOWN",
+                    "confidence": result.get("source_reliability"),
+                    "evidence": _evidence("job_title") or "OBSERVED",
+                }
+                postings.append(posting)
         self.last_state = OK if reachable else UNAVAILABLE
         return postings
 
@@ -459,9 +491,16 @@ def run_daily_matching(min_score: float = 50.0, top_n: int = 10) -> dict[str, An
 
     top = scored_matches[0] if scored_matches else None
 
-    # HUBSPOT CONTEXT on the top match only — one read-only lookup per run,
-    # not one per match. Isolated: a HubSpot outage must not cost the
-    # matching result that is the actual point of this run.
+    # HUBSPOT on the top match only — one lookup per run, not one per
+    # match. Isolated: a HubSpot outage must not cost the matching result
+    # that is the actual point of this run.
+    #
+    # A STRONG match with no existing HubSpot record moves one step
+    # further than a read: prepare_hubspot_writeback() proposes creating
+    # the company via the existing approval-gated agent rather than only
+    # reporting the absence — but it still never writes anything itself,
+    # and a match below the strong threshold gets the read-only context
+    # only, so a weak/irrelevant match can never spend an approval slot.
     if top is not None:
         jobs_by_id = {j["id"]: j for j in jobs}
         job = jobs_by_id.get(top.get("job_id"))
@@ -469,8 +508,31 @@ def run_daily_matching(min_score: float = 50.0, top_n: int = 10) -> dict[str, An
         if company:
             try:
                 from actions import cross_system
-                top["hubspot"] = cross_system.hubspot_context_for_employer(company)
+                if float(top["score"]) >= STRONG_MATCH_SCORE:
+                    top["hubspot"] = cross_system.prepare_hubspot_writeback(
+                        company, job_id=top.get("job_id"))
+                else:
+                    top["hubspot"] = cross_system.hubspot_context_for_employer(company)
                 top["employer"] = company
+
+                # RESEARCH what is needed. A strong match against an
+                # employer with no existing CRM history is exactly the
+                # "the CEO does not yet have enough information to decide"
+                # case — one bounded, isolated web lookup, distilled into
+                # the Brain, not blocking the report if it fails or the
+                # web is unreachable.
+                if top["hubspot"].get("state") == "APPROVAL_REQUIRED":
+                    try:
+                        from actions import web_research
+                        research = web_research.research(
+                            f"{company} construction company", max_sources=1)
+                        if research.get("ok"):
+                            top["employer_research"] = {
+                                "sources_read": len(research.get("sources_read") or []),
+                                "confidence": research.get("confidence"),
+                            }
+                    except Exception:
+                        logger.debug("employer research failed for %r", company, exc_info=True)
             except Exception:
                 logger.debug("hubspot context lookup failed for %r", company, exc_info=True)
 
@@ -526,7 +588,7 @@ def _match_line(match: dict[str, Any], rank: int) -> list[str]:
     elif match.get("rationale"):
         lines.append(f"Why: {match['rationale']}")
     hubspot = match.get("hubspot")
-    if hubspot and hubspot.get("state") == "OK":
+    if hubspot and hubspot.get("state") in ("OK", "RECORD_EXISTS", "APPROVAL_REQUIRED", "WRITE_FAILED"):
         lines.append(f"HubSpot: {hubspot['detail']}")
     lines.append(f"Recommended action: {recommended_action(match)}")
     return lines

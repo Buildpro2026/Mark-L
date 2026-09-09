@@ -118,6 +118,24 @@ def recover_stale_tasks(orchestrator=None, now: Optional[float] = None) -> list[
     return recovered
 
 
+def expire_stale_approvals(orchestrator=None) -> list[dict[str, Any]]:
+    """Expires approval requests nobody has answered in time.
+
+    AgentOrchestrator.expire_stale_approvals() has done exactly this since
+    it was written and nothing ever called it — an EXECUTE-level task
+    could sit PENDING_APPROVAL indefinitely and then run the moment
+    someone approved a stale dashboard, acting on a situation that might
+    be weeks out of date. This is the missing call, not new expiry logic."""
+    from actions.agent_orchestrator import orchestrator as _default
+    orchestrator = orchestrator or _default
+    expired = orchestrator.expire_stale_approvals()
+    for task in expired:
+        _record("recovery", source=task.agent_id,
+                summary=f"Expired unanswered approval for task {task.id}",
+                ok=True, subject=task.id)
+    return [{"task_id": t.id, "agent_id": t.agent_id} for t in expired]
+
+
 def check_agent_failures(orchestrator=None) -> list[dict[str, Any]]:
     """Agents failing consistently. A single failure is noise; a streak is a
     broken agent, and only the streak is escalated."""
@@ -211,6 +229,7 @@ def run_sweep(orchestrator=None) -> dict[str, Any]:
 
     for name, fn in (
         ("stale_tasks", lambda: recover_stale_tasks(orchestrator=orchestrator)),
+        ("expired_approvals", lambda: expire_stale_approvals(orchestrator=orchestrator)),
         ("agent_failures", lambda: check_agent_failures(orchestrator=orchestrator)),
         ("integrations", check_integrations),
         ("notifications", check_notification_failures),

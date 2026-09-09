@@ -832,6 +832,54 @@ def _urgent_escalation_sweep_handler(task: "AgentTask") -> dict:
     }
 
 
+def _buildpro_hubspot_writeback_handler(task: "AgentTask") -> dict:
+    """The write half of BuildPro <-> HubSpot: creates the HubSpot company
+    record for an employer a strong recruiting match has surfaced.
+
+    buildpro_hubspot_sync (above) is explicitly read-only in the other
+    direction (HubSpot -> BuildPro) and says so in its own docstring; this
+    is deliberately the separate, EXECUTE-level agent for the direction it
+    does not cover, not a change to it. task.description is the company
+    name to create — the same "identifier the task already names" pattern
+    _buildpro_email_responder_handler uses for a draft_id. assign_task() on
+    an EXECUTE agent always leaves this PENDING_APPROVAL until Lee calls
+    approve_task(); this handler only ever runs after that.
+
+    Searches again immediately before writing (not just when the task was
+    proposed) — the gap between a match being found and Lee approving it
+    could be long enough for the company to have been added by someone
+    else in the meantime, and upsert_company() would then correctly update
+    rather than duplicate, but re-checking here means the audit log
+    reflects what was actually true at write time."""
+    from actions import hubspot_integration as hs
+    from actions import audit_log
+
+    name = (task.description or "").strip()
+    if not name:
+        return {"summary": "No company name on this task.", "created": False}
+    if not hs.is_configured():
+        return {"summary": "HubSpot is not configured.", "created": False}
+
+    existing = hs.search_companies(name, property_name="name", limit=1)
+    already = bool(existing.get("ok") and (existing.get("results") or existing.get("items")))
+
+    result = hs.upsert_company(name, {"name": name}, approved=True)
+    audit_log.record(
+        "hubspot_company_writeback", actor="agent:buildpro_hubspot_writeback_agent",
+        task=task.id, approval_status="approved",
+        execution_status="succeeded" if result.get("ok") else "failed",
+        result={"company": name, "already_existed": already},
+        error=None if result.get("ok") else result.get("detail"),
+        external_system="hubspot", reference_id=result.get("id"),
+    )
+    if not result.get("ok"):
+        return {"summary": f"Could not write '{name}' to HubSpot: {result.get('detail')}",
+                "created": False}
+    return {"summary": (f"Updated existing HubSpot company '{name}'." if already else
+                        f"Created HubSpot company '{name}'."),
+            "created": not already, "updated": already, "hubspot_id": result.get("id")}
+
+
 def _buildpro_email_responder_handler(task: "AgentTask") -> dict:
     """J4: the real EXECUTE-capable half of the BuildPro Email Monitor
     workflow. buildpro_email_monitor_handler (SUGGEST, above) only ever
@@ -1307,6 +1355,18 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         nucleus_id="buildpro", business="buildpro",
         permission_level=PermissionLevel.EXECUTE, schedule=None,
         handler=_buildpro_email_responder_handler,
+    ),
+    "buildpro_hubspot_writeback_agent": AgentDefinition(
+        id="buildpro_hubspot_writeback_agent", name="BuildPro HubSpot Writeback",
+        description=(
+            "Creates/updates one HubSpot company (task description = company name) for "
+            "an employer a strong recruiting match surfaced with no existing HubSpot "
+            "record. EXECUTE-level: always requires Lee's explicit approve_task() before "
+            "writing anything to the CRM."
+        ),
+        nucleus_id="buildpro", business="buildpro",
+        permission_level=PermissionLevel.EXECUTE, schedule=None,
+        handler=_buildpro_hubspot_writeback_handler,
     ),
     "business_research_agent": AgentDefinition(
         id="business_research_agent", name="Business Research Agent",

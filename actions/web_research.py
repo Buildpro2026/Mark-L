@@ -771,6 +771,10 @@ _LOCATION_RE = re.compile(
     r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}),[ \t]*([A-Z]{2})\b")
 
 
+_EMPLOYMENT_TYPE_RE = re.compile(
+    r"\b(full[\s-]?time|part[\s-]?time|contract(?:or)?|permanent|temporary)\b", re.I)
+
+
 def extract_job(page: dict[str, Any]) -> dict[str, Any]:
     """Job-posting fields from a loaded page."""
     if not page.get("ok"):
@@ -803,6 +807,10 @@ def extract_job(page: dict[str, Any]) -> dict[str, Any]:
                 "as stated in the posting")
     else:
         _record("compensation", None)
+
+    employment = _EMPLOYMENT_TYPE_RE.search(text)
+    _record("employment_type", employment.group(0).title() if employment else None,
+            "as stated in the posting" if employment else "")
 
     _record("source_url", url or None)
     fields["source_type"] = finding("source_type", source_type(url), OBSERVED, url, title)

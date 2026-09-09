@@ -319,12 +319,62 @@ def match_new_candidate(candidate_id: int, min_score: Optional[float] = None,
         logger.warning("matching failed for candidate %s: %s", candidate_id, exc)
         return {"ok": False, "state": FAILED, "detail": str(exc)[:300], "matches": []}
 
-    ranked = sorted(matches, key=lambda m: -float(m.get("score") or 0))[:limit]
+    # generate_matches_for_candidate() returns EVERY job it scored,
+    # including ones below min_score (unstored, for its own bookkeeping) —
+    # it is not this function's contract, and a caller asking for matches
+    # at or above a threshold must never see one below it.
+    scored = [m for m in matches if m.get("score") is not None]
+    if min_score is not None:
+        scored = [m for m in scored if float(m["score"]) >= min_score]
+    ranked = sorted(scored, key=lambda m: -float(m["score"]))[:limit]
+
+    # A strong match on a candidate who JUST arrived is worth surfacing now,
+    # not on tomorrow's batch report — this is the resume-intake half of the
+    # observe -> decide -> notify loop buildpro_daily already runs on a
+    # schedule. Isolated: a notification failure must not turn a real match
+    # into a failed intake.
+    if ranked and float(ranked[0]["score"]) >= _strong_match_threshold():
+        try:
+            _notify_strong_candidate_match(candidate_id, ranked[0])
+        except Exception:
+            logger.debug("could not surface the strong match for candidate %s",
+                        candidate_id, exc_info=True)
+
     return {"ok": True, "state": OK, "candidate_id": candidate_id,
-            "matches": ranked, "match_count": len(matches),
+            "matches": ranked, "match_count": len(scored),
             # Never "we found 25 matches" when the matcher found three.
-            "detail": (f"{len(matches)} match(es) scored"
-                       if matches else "no job currently matches this candidate")}
+            "detail": (f"{len(scored)} match(es) scored"
+                       if scored else "no job currently matches this candidate")}
+
+
+def _strong_match_threshold() -> float:
+    from actions import buildpro_daily
+    return buildpro_daily.STRONG_MATCH_SCORE
+
+
+def _notify_strong_candidate_match(candidate_id: int, match: dict[str, Any]) -> None:
+    """One notification, one Brain write — the connection from a fresh
+    resume's match straight to what Lee sees and what JARVIS remembers,
+    rather than only reaching him the next time the daily cycle runs."""
+    from actions import buildpro_data, notifications, brain_memory
+
+    candidate = buildpro_data.get_candidate(candidate_id) or {}
+    job = buildpro_data.get_job(match.get("job_id")) or {}
+    name = candidate.get("name") or f"candidate {candidate_id}"
+    title = job.get("title") or f"job {match.get('job_id')}"
+    score = float(match["score"])
+
+    notifications.business_alert(
+        event_id=f"strong-match-{candidate_id}-{match.get('job_id')}",
+        title=f"Strong match: {name} -> {title}",
+        detail=f"{score:.0f}% match. {match.get('rationale') or ''}".strip(),
+        destination_source=None,   # no navigable destination for a raw match yet
+    )
+    brain_memory.remember(
+        brain_memory.OUTCOME, f"{name} {title} match",
+        f"{name} scored {score:.0f}% against {title} on intake",
+        confidence=min(score / 100.0, 0.95), source="buildpro_matching",
+        business="buildpro")
 
 # ══ HUBSPOT ══════════════════════════════════════════════════════════════
 # HubSpot is the CRM of record. A recruiting decision that ignores whether
@@ -365,3 +415,61 @@ def hubspot_context_for_employer(company_name: str) -> dict[str, Any]:
                 "detail": f"'{company_name}' already exists in HubSpot"}
     return {"state": OK, "in_hubspot": False,
             "detail": f"'{company_name}' has no existing HubSpot company record — new prospect"}
+
+
+# Distinct outcome states for the write path, per the spec: a caller must
+# be able to tell "already there" from "I proposed adding it" from "the
+# write actually happened" from "it failed" from "HubSpot is unreachable".
+LOOKUP_SUCCEEDED = "LOOKUP_SUCCEEDED"
+RECORD_EXISTS = "RECORD_EXISTS"
+APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+WRITE_FAILED = "WRITE_FAILED"
+
+
+def prepare_hubspot_writeback(company_name: str, job_id: Optional[int] = None
+                              ) -> dict[str, Any]:
+    """Move a strong match's employer toward a real HubSpot record —
+    without ever writing one here.
+
+    A company already in HubSpot needs nothing further: RECORD_EXISTS. A
+    genuinely new one gets an EXECUTE-level task on
+    buildpro_hubspot_writeback_agent, which — like every EXECUTE agent in
+    this codebase — lands PENDING_APPROVAL and performs no write until Lee
+    calls approve_task(). This function never calls upsert_company()
+    itself and never passes approved=True to anything; the approval gate
+    is not this module's to bypass.
+
+    Deduplicated through the existing autonomous_ledger claim, the same
+    mechanism business_pipeline.dispatch_findings() already uses: the
+    first strong match for an employer proposes the task, and every match
+    against that same employer afterward — this run or the next — finds
+    it already claimed and proposes nothing new."""
+    from actions import autonomous_ledger as ledger
+    from actions.agent_orchestrator import orchestrator
+
+    context = hubspot_context_for_employer(company_name)
+    if context["state"] != OK:
+        return {**context, "task_id": None}       # NOT_CONFIGURED / FAILED, unchanged
+    if context["in_hubspot"]:
+        return {**context, "state": RECORD_EXISTS, "task_id": None}
+
+    subject_id = ledger.subject_key(company_name)
+    if ledger.already_handled("hubspot_writeback", subject_id):
+        return {**context, "state": RECORD_EXISTS,
+                "detail": f"a HubSpot writeback for '{company_name}' was already proposed",
+                "task_id": None}
+
+    if not ledger.claim("hubspot_writeback", subject_id, detail={"company": company_name}):
+        return {**context, "state": RECORD_EXISTS,
+                "detail": "claimed by a concurrent run", "task_id": None}
+
+    try:
+        task = orchestrator.assign_task("buildpro_hubspot_writeback_agent", company_name)
+    except Exception as exc:
+        ledger.release("hubspot_writeback", subject_id)
+        return {"state": WRITE_FAILED, "in_hubspot": False, "task_id": None,
+                "detail": f"could not create the writeback task: {str(exc)[:200]}"}
+
+    return {"state": APPROVAL_REQUIRED, "in_hubspot": False, "task_id": task.id,
+            "task_status": task.status.value,
+            "detail": f"proposed creating '{company_name}' in HubSpot — awaiting approval"}

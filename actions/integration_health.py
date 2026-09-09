@@ -193,6 +193,31 @@ def _brain() -> dict[str, Any]:
     return {"state": CONFIGURED}
 
 
+def _web_research() -> dict[str, Any]:
+    """No credential to check — the search path is DuckDuckGo scraping, not
+    an API key. The only honest question is whether it can currently reach
+    the network, so this is a live one-result search rather than an
+    env-var check, matching how _hubspot() and _buffer() already work."""
+    from actions import web_research
+    result = web_research.search("jarvis integration health check", max_results=1)
+    if result.get("ok"):
+        return {"state": CONFIGURED}
+    return {"state": UNAVAILABLE, "detail": result.get("detail") or "search returned no sources"}
+
+
+def _buildpro_store() -> dict[str, Any]:
+    """Local sqlite storage — never NOT_CONFIGURED (there is no credential),
+    only CONFIGURED or UNAVAILABLE if the file can't be opened."""
+    from actions import buildpro_data
+    try:
+        conn = buildpro_data._connect()
+        conn.execute("SELECT 1")
+        conn.close()
+        return {"state": CONFIGURED}
+    except Exception as exc:
+        return {"state": UNAVAILABLE, "detail": str(exc)}
+
+
 PROBES: dict[str, Callable[[], dict[str, Any]]] = {
     "google": _google,
     "hubspot": _hubspot,
@@ -202,6 +227,8 @@ PROBES: dict[str, Callable[[], dict[str, Any]]] = {
     "llm": _llm,
     "product_data": _product_data,
     "jarvis_brain": _brain,
+    "web_research": _web_research,
+    "buildpro_store": _buildpro_store,
 }
 
 # What each business operation actually needs to be possible at all.
@@ -213,6 +240,8 @@ CAPABILITY_REQUIREMENTS: dict[str, list[str]] = {
     "owner_alerts": ["twilio", "owner_phone"],
     "product_discovery": [],          # falls back to existing local sources
     "knowledge_recall": ["jarvis_brain"],
+    "job_discovery": ["web_research", "buildpro_store"],
+    "candidate_matching": ["buildpro_store"],
 }
 
 
