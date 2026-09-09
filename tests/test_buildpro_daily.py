@@ -24,6 +24,13 @@ def _db(monkeypatch, tmp_path):
     monkeypatch.setattr(bd, "DB_PATH", tmp_path / "bp.db")
 
 
+@pytest.fixture
+def _no_live_sources(monkeypatch):
+    """Matching tests must not spend the run on blocked network calls —
+    only the two discovery tests exercise the live source."""
+    monkeypatch.setattr(bpd, "available_sources", lambda: [])
+
+
 JOB = {
     "title": "Senior Project Manager — Data Center",
     "company": "Turner", "location": "Phoenix, AZ",
@@ -139,15 +146,45 @@ def test_provenance_is_preserved_on_the_stored_job():
 
 # ══ DISCOVERY IS HONEST ══════════════════════════════════════════════════
 
-def test_discovery_with_no_source_reports_not_configured():
+def test_discovery_reports_unreachable_rather_than_a_clean_zero(monkeypatch):
+    # A research-backed source needs no credential, so one is always
+    # configured. When it cannot reach the web it returns zero postings —
+    # and "could not reach the web" must never be reported as "there were
+    # no jobs". Driven by a stub rather than real blocked network calls.
+    class _Unreachable(bpd.JobSource):
+        name = "stub"
+        last_state = bpd.UNAVAILABLE
+        def is_configured(self): return True
+        def fetch(self, limit=50): return []
+
+    monkeypatch.setattr(bpd, "available_sources", lambda: [_Unreachable()])
     out = bpd.discover_jobs()
     assert out["ok"] is False
-    assert out["state"] == bpd.NOT_CONFIGURED
+    assert out["state"] == bpd.UNAVAILABLE
     assert out["stored"] == 0
-    assert "No job-board source is configured" in out["detail"]
+    assert "No job source could be reached" in out["detail"]
+    # And the per-source state is not overwritten by intake's own "OK".
+    assert out["sources"][0]["state"] == bpd.UNAVAILABLE
 
 
-def test_discovery_never_invents_postings():
+def test_a_reachable_source_that_found_nothing_is_not_reported_as_unreachable(monkeypatch):
+    class _Empty(bpd.JobSource):
+        name = "stub"
+        last_state = bpd.OK
+        def is_configured(self): return True
+        def fetch(self, limit=50): return []
+
+    monkeypatch.setattr(bpd, "available_sources", lambda: [_Empty()])
+    out = bpd.discover_jobs()
+    assert out["ok"] is True and out["state"] == bpd.OK
+
+
+def test_a_configured_source_is_available_without_a_credential():
+    sources = bpd.available_sources()
+    assert sources and sources[0].is_configured() is True
+
+
+def test_discovery_never_invents_postings(_no_live_sources):
     bpd.discover_jobs()
     assert bd.list_jobs() == [], "discovery stored a job it never retrieved"
 
@@ -267,7 +304,7 @@ def test_the_recommended_action_scales_with_the_score():
     assert bpd.recommended_action({"score": 52}) == "Review before contacting"
 
 
-def test_the_run_records_its_outcome_for_learning(monkeypatch):
+def test_the_run_records_its_outcome_for_learning(monkeypatch, _no_live_sources):
     from actions import ceo_decision
     recorded = []
     monkeypatch.setattr(ceo_decision, "record_outcome",
@@ -281,7 +318,7 @@ def test_the_run_records_its_outcome_for_learning(monkeypatch):
 
 # ══ THROUGH THE REAL TOOL EXECUTOR ═══════════════════════════════════════
 
-def test_the_daily_report_runs_through_the_real_tool_executor():
+def test_the_daily_report_runs_through_the_real_tool_executor(_no_live_sources):
     import asyncio
     from core.headless.tool_executor import ToolExecutor, ToolContext
 
@@ -292,8 +329,9 @@ def test_the_daily_report_runs_through_the_real_tool_executor():
 
     assert "DAILY BUILDPRO MATCHES" in result
     assert "Dana Reeves" in result
-    # No source configured, and the tool says so rather than implying it looked.
-    assert "no job-board source is configured" in result.lower()
+    # No live source in this test, and the tool says discovery did not
+    # retrieve anything rather than implying it ran cleanly.
+    assert "did not retrieve" in result.lower() or "not_configured" in result.lower()
 
 
 def test_job_intake_runs_through_the_real_tool_executor():

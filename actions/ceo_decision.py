@@ -100,7 +100,7 @@ def context_for(item: dict[str, Any]) -> dict[str, Any]:
     source = str(item.get("source") or item.get("kind") or "")
     context: dict[str, Any] = {
         "subject": subject, "brain": "", "outcomes": [], "lessons": [],
-        "failure_streak": 0, "retrieved": [],
+        "knowledge": [], "failure_streak": 0, "retrieved": [],
     }
 
     try:
@@ -134,6 +134,18 @@ def context_for(item: dict[str, Any]) -> dict[str, Any]:
             context["retrieved"].append("lessons")
     except Exception:
         logger.debug("lesson recall failed", exc_info=True)
+
+    # Typed operating knowledge (actions/brain_memory.py) — facts, prior
+    # decisions and lessons JARVIS accumulated by working, scored for
+    # relevance to THIS item rather than dumped wholesale.
+    try:
+        from actions import brain_memory
+        knowledge = brain_memory.recall_for(subject, limit=MEMORY_ENTRIES_PER_ITEM)
+        if knowledge:
+            context["knowledge"] = knowledge
+            context["retrieved"].append("knowledge")
+    except Exception:
+        logger.debug("knowledge recall failed for %r", subject, exc_info=True)
 
     return context
 
@@ -229,6 +241,10 @@ def score_item(item: dict[str, Any], context: Optional[dict[str, Any]] = None
         reasoning.append(f"{len(context['lessons'])} prior lesson(s) on file")
     if context.get("brain"):
         reasoning.append("Brain has relevant context")
+    if context.get("knowledge"):
+        best = context["knowledge"][0]
+        reasoning.append(f"prior knowledge: {best['content'][:100]} "
+                         f"({best['confidence']:.0%} confident)")
 
     return {
         **item,

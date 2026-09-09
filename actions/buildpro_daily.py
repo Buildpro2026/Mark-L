@@ -45,6 +45,7 @@ EXCEPTIONAL_MATCH_SCORE = 90.0
 # Truthful states shared with the rest of the system.
 OK = "OK"
 NOT_CONFIGURED = "NOT_CONFIGURED"
+UNAVAILABLE = "UNAVAILABLE"     # configured, but nothing could be reached
 FAILED = "FAILED"
 
 _WHITESPACE = re.compile(r"\s+")
@@ -258,11 +259,94 @@ class JobSource:
         raise NotImplementedError
 
 
+# The roles BuildPro recruits for. Used to BUILD SEARCHES, never to
+# generate postings — every job returned still comes off a real page.
+LEADERSHIP_ROLES: tuple[str, ...] = (
+    "VP of Construction", "Vice President of Construction",
+    "Director of Construction", "Senior Director of Construction",
+    "Construction Executive", "Regional Construction Manager",
+    "General Manager Construction", "Construction Operations Executive",
+    "COO Construction", "President Construction",
+)
+
+
+class WebResearchJobSource(JobSource):
+    """Public job postings, found with the general research engine.
+
+    Not a job-board API and not a scraper for one specific site: it
+    searches for the role, reads the pages that come back, and takes
+    whatever a posting actually states. A page that yields no title is
+    skipped rather than filled in.
+
+    Configured whenever the research engine can reach the web at all —
+    there is no credential, which is the point. When the web is
+    unreachable it returns nothing and the run reports NOT_CONFIGURED
+    like any other unavailable source."""
+
+    name = "web_research"
+
+    def __init__(self, roles: Optional[list[str]] = None, location: str = ""):
+        self.roles = roles or list(LEADERSHIP_ROLES[:4])
+        self.location = location
+        # Whether the last fetch could reach the web at all. "Configured
+        # but unreachable" and "reachable but nothing matched" are
+        # different facts and must not both report OK.
+        self.last_state = OK
+
+    def is_configured(self) -> bool:
+        try:
+            from actions import web_research  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def fetch(self, limit: int = 50) -> list[dict[str, Any]]:
+        from actions import web_research as wr
+
+        per_role = max(1, limit // max(len(self.roles), 1))
+        postings: list[dict[str, Any]] = []
+        reachable = False
+        for role in self.roles:
+            query = f"{role} jobs" + (f" {self.location}" if self.location else "")
+            outcome = wr.research(query, max_sources=min(per_role, 3),
+                                  extractor=wr.extract_job, record=False)
+            if not outcome.get("ok"):
+                logger.info("job search for %r found nothing readable: %s",
+                            role, outcome.get("detail"))
+                continue
+            reachable = True
+            for result in outcome.get("results") or []:
+                fields = result.get("fields") or {}
+
+                def _value(name):
+                    entry = fields.get(name) or {}
+                    return entry.get("value")
+
+                title = _value("job_title")
+                if not title:
+                    continue     # a posting with no title is not a posting
+                postings.append({
+                    "title": title,
+                    "company": _value("company") or "",
+                    "location": _value("location") or self.location,
+                    "salary": _value("compensation") or "",
+                    "description": (fields.get("summary") or {}).get("value") or "",
+                    "url": result.get("source_url") or "",
+                    "source": f"web:{result.get('source_type') or 'unknown'}",
+                })
+        self.last_state = OK if reachable else UNAVAILABLE
+        return postings
+
+
 def available_sources() -> list[JobSource]:
-    """Every configured job source. Empty is honest: this deployment has
-    no job-board credential of any kind, and discover_jobs() reports
-    NOT_CONFIGURED rather than returning invented postings."""
-    return []
+    """Every configured job source.
+
+    The research-backed source needs no credential and so is always
+    present; whether it RETURNS anything depends on the web being
+    reachable, which is a different question and reported separately. A
+    credentialled board adapter can be added here without touching
+    anything else."""
+    return [WebResearchJobSource()]
 
 
 def discover_jobs(limit_per_source: int = 25) -> dict[str, Any]:
@@ -291,11 +375,30 @@ def discover_jobs(limit_per_source: int = 25) -> dict[str, Any]:
             outcome = intake_jobs(raw, source=source.name)
             stored += outcome["stored"]
             updated += outcome["updated"]
-            results.append({"source": source.name, "state": OK, **outcome})
+            # A source that could not reach the web returned zero postings
+            # for a reason that is NOT "there were none" — reporting that
+            # as OK is the false-success failure this codebase exists to
+            # avoid.
+            state = getattr(source, "last_state", OK)
+            # `**outcome` must come FIRST: intake_jobs() returns its own
+            # "state": OK, and spreading it after this key silently
+            # overwrote an UNAVAILABLE source with a clean OK — the exact
+            # false success this branch exists to prevent.
+            results.append({**outcome, "source": source.name, "state": state})
         except Exception as exc:
             logger.warning("job source %s failed: %s", source.name, exc)
             results.append({"source": source.name, "state": FAILED,
                             "detail": str(exc)[:300]})
+
+    reachable = [r for r in results if r.get("state") == OK]
+    if not reachable:
+        return {
+            "ok": False, "state": UNAVAILABLE, "stored": stored, "updated": updated,
+            "sources": results,
+            "detail": ("No job source could be reached, so no postings were "
+                       "retrieved. Jobs added through intake_jobs() are matched "
+                       "normally."),
+        }
     return {"ok": True, "state": OK, "stored": stored, "updated": updated,
             "sources": results}
 

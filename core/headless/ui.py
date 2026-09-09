@@ -203,6 +203,24 @@ def ui_brief():
     return status_api.brief()
 
 
+@api.get("/command-center")
+def ui_command_center(sections: str = ""):
+    """One structured read of what JARVIS is actually doing — priorities
+    with their reasoning, pending approvals, BuildPro matches, research,
+    what the Brain learned, health, activity and failures.
+
+    On the same session-authenticated /ui/api router as every other route
+    here, so it inherits the existing auth rather than introducing a new
+    boundary. Read-only, and credential-shaped values are redacted before
+    anything leaves the process.
+
+    `sections` narrows the work: a view showing only approvals should not
+    run the whole matching pass to draw itself."""
+    from actions import command_center_state
+    wanted = [s.strip() for s in (sections or "").split(",") if s.strip()]
+    return command_center_state.snapshot(wanted or None)
+
+
 class SettingsUpdateRequest(BaseModel):
     updates: dict
 

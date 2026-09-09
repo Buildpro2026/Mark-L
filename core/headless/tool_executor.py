@@ -188,8 +188,14 @@ class ToolExecutor:
                 r = await loop.run_in_executor(
                     None, lambda: web_research.research(question, max_sources=max_sources))
                 lines = [web_research.summarize(r)]
+                if r.get("duplicates_removed"):
+                    lines.append(f"  ({r['duplicates_removed']} duplicate source(s) removed)")
                 if r.get("ok") and r.get("results"):
-                    comparison = web_research.compare_field(r["results"], args.get("field") or "price")
+                    # contradictions() is compare_field plus attribution of
+                    # which source to lead with — every claim survives.
+                    field = args.get("field") or ("price" if r.get("domain") == "product" else "")
+                    comparison = (web_research.contradictions(r["results"], field)
+                                  if field else {"ok": False})
                     if comparison.get("ok"):
                         lines.append("")
                         lines.append(comparison["detail"] + ":")
@@ -199,8 +205,20 @@ class ToolExecutor:
                         if comparison.get("lowest"):
                             lines.append(f"  Lowest observed: {comparison['lowest']['value']} "
                                          f"at {comparison['lowest']['source_url']}")
-                        if comparison.get("conflict"):
+                        if comparison.get("contradiction"):
+                            lead = comparison["lead_with"]
+                            lines.append(f"  Sources disagree. Leading with {lead['value']} "
+                                         f"({comparison['lead_reason']}); every value is kept above.")
+                        elif comparison.get("conflict"):
                             lines.append("  Sources disagree — both values are shown rather than averaged.")
+
+                # Findings the sources did NOT carry are stated as unknown
+                # rather than omitted, so a gap reads as a gap.
+                for extracted in r["results"][:1]:
+                    missing = [name for name, f in (extracted.get("fields") or {}).items()
+                               if f.get("evidence") == web_research.UNKNOWN]
+                    if missing:
+                        lines.append(f"  Not found on the source(s) read: {', '.join(missing[:8])}")
                 audit_log.record(
                     "web_research", execution_status="succeeded" if r.get("ok") else "failed",
                     result={"sources_read": len(r.get("sources_read") or []),
@@ -1155,9 +1173,11 @@ class ToolExecutor:
                 from actions import buildpro_daily
                 r = await loop.run_in_executor(None, buildpro_daily.run_and_report)
                 result = r.get("report") or "The matching run produced no report."
-                if (r.get("discovery") or {}).get("state") == "NOT_CONFIGURED":
-                    result += ("\n\nNote: no job-board source is configured, so no new "
-                               "postings were retrieved today.")
+                discovery_state = (r.get("discovery") or {}).get("state")
+                if discovery_state and discovery_state != "OK":
+                    result += (f"\n\nNote: job discovery did not retrieve new postings "
+                               f"({discovery_state.lower()}): "
+                               f"{(r.get('discovery') or {}).get('detail') or ''}".rstrip())
             elif bmaction == "intake_jobs":
                 from actions import buildpro_daily
                 jobs = args.get("jobs") or []

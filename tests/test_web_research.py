@@ -72,7 +72,7 @@ def test_a_research_request_reads_sources_and_returns_findings(monkeypatch):
 
 def test_every_finding_carries_its_source_and_evidence_class(monkeypatch):
     _search(monkeypatch, ["https://toolshop.example/hammer"])
-    out = wr.research("hammer", max_sources=1, fetcher=_fetcher({"toolshop": PAGE_A}))
+    out = wr.research("current price of the Rotary Hammer XR", max_sources=1, fetcher=_fetcher({"toolshop": PAGE_A}))
     price = out["results"][0]["fields"]["price"]
 
     assert price["evidence"] == wr.OBSERVED
@@ -84,7 +84,7 @@ def test_every_finding_carries_its_source_and_evidence_class(monkeypatch):
 
 def test_a_calculated_value_is_labelled_as_calculated(monkeypatch):
     _search(monkeypatch, ["https://toolshop.example/hammer"])
-    out = wr.research("hammer", max_sources=1, fetcher=_fetcher({"toolshop": PAGE_A}))
+    out = wr.research("current price of the Rotary Hammer XR", max_sources=1, fetcher=_fetcher({"toolshop": PAGE_A}))
     fields = out["results"][0]["fields"]
     # $429 against a $499 also on the page.
     assert fields["discount_pct"]["evidence"] == wr.CALCULATED
@@ -93,7 +93,7 @@ def test_a_calculated_value_is_labelled_as_calculated(monkeypatch):
 
 def test_comparison_exposes_conflict_rather_than_averaging(monkeypatch):
     _search(monkeypatch, ["https://toolshop.example/hammer", "https://buildmart.example/hammer"])
-    out = wr.research("hammer", max_sources=2,
+    out = wr.research("current price of the Rotary Hammer XR", max_sources=2,
                       fetcher=_fetcher({"toolshop": PAGE_A, "buildmart": PAGE_B}))
     comparison = wr.compare_field(out["results"], "price")
 
@@ -109,7 +109,7 @@ def test_comparison_exposes_conflict_rather_than_averaging(monkeypatch):
 
 def test_a_field_that_is_not_on_the_page_stays_unknown(monkeypatch):
     _search(monkeypatch, ["https://buildmart.example/hammer"])
-    out = wr.research("hammer", max_sources=1, fetcher=_fetcher({"buildmart": PAGE_B}))
+    out = wr.research("current price of the Rotary Hammer XR", max_sources=1, fetcher=_fetcher({"buildmart": PAGE_B}))
     review_count = out["results"][0]["fields"]["review_count"]
 
     assert review_count["value"] is None
@@ -123,7 +123,7 @@ def test_a_value_of_none_can_never_carry_a_confident_evidence_class():
 
 def test_a_blocked_source_is_reported_not_silently_dropped(monkeypatch):
     _search(monkeypatch, ["https://toolshop.example/hammer", "https://walled.example/x"])
-    out = wr.research("hammer", max_sources=2, fetcher=_fetcher(
+    out = wr.research("current price of the Rotary Hammer XR", max_sources=2, fetcher=_fetcher(
         {"toolshop": PAGE_A},
         failures={"https://walled.example/x": {"ok": False, "state": wr.BLOCKED,
                                                "detail": "the site refused the request (HTTP 403)"}}))
@@ -137,7 +137,7 @@ def test_a_blocked_source_is_reported_not_silently_dropped(monkeypatch):
 
 def test_no_reachable_source_is_never_reported_as_research(monkeypatch):
     _search(monkeypatch, ["https://down.example/a"])
-    out = wr.research("hammer", max_sources=1, fetcher=_fetcher(
+    out = wr.research("current price of the Rotary Hammer XR", max_sources=1, fetcher=_fetcher(
         {}, failures={"https://down.example/a": {"ok": False, "state": wr.TIMEOUT,
                                                  "detail": "timed out"}}))
     assert out["ok"] is False
@@ -148,7 +148,7 @@ def test_no_reachable_source_is_never_reported_as_research(monkeypatch):
 
 def test_the_summary_never_claims_a_source_it_could_not_read(monkeypatch):
     _search(monkeypatch, ["https://toolshop.example/hammer", "https://walled.example/x"])
-    out = wr.research("hammer", max_sources=2, fetcher=_fetcher(
+    out = wr.research("current price of the Rotary Hammer XR", max_sources=2, fetcher=_fetcher(
         {"toolshop": PAGE_A},
         failures={"https://walled.example/x": {"ok": False, "state": wr.BLOCKED, "detail": "403"}}))
     summary = wr.summarize(out)
@@ -170,7 +170,7 @@ def test_research_is_distilled_into_memory_not_dumped(monkeypatch):
     monkeypatch.setattr(operating_memory, "record",
                         lambda *a, **k: recorded.append(k) or 1)
     _search(monkeypatch, ["https://toolshop.example/hammer"])
-    wr.research("hammer", max_sources=1, fetcher=_fetcher({"toolshop": PAGE_A}))
+    wr.research("current price of the Rotary Hammer XR", max_sources=1, fetcher=_fetcher({"toolshop": PAGE_A}))
 
     assert recorded, "the run was never remembered"
     stored = str(recorded[0])
