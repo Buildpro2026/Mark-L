@@ -110,3 +110,65 @@ def test_web_search_entry_point_never_surfaces_a_raw_429_to_the_user(monkeypatch
     assert "Fallback works" in result
     assert "429" not in result
     assert "RESOURCE_EXHAUSTED" not in result
+
+
+# ── _grounding_sources / _gemini_search: real citations, never invented ───
+
+def _fake_grounded_response(text="The current price is $999.", chunks=None):
+    web_chunks = [type("Chunk", (), {"web": type("Web", (), {"uri": u, "title": t})()})()
+                  for u, t in (chunks or [])]
+    candidate = type("Candidate", (), {
+        "content": type("Content", (), {"parts": [type("Part", (), {"text": text})()]})(),
+        "grounding_metadata": type("Meta", (), {"grounding_chunks": web_chunks})(),
+    })()
+    return type("Response", (), {"candidates": [candidate]})()
+
+
+def test_grounding_sources_extracts_real_citation_urls():
+    response = _fake_grounded_response(chunks=[
+        ("https://www.apple.com/iphone-17/", "iPhone 17 - Apple"),
+        ("https://www.bestbuy.com/site/iphone-17", "iPhone 17 at Best Buy"),
+    ])
+    sources = ws._grounding_sources(response)
+    assert sources == [
+        {"url": "https://www.apple.com/iphone-17/", "title": "iPhone 17 - Apple"},
+        {"url": "https://www.bestbuy.com/site/iphone-17", "title": "iPhone 17 at Best Buy"},
+    ]
+
+
+def test_grounding_sources_deduplicates_repeated_urls():
+    response = _fake_grounded_response(chunks=[
+        ("https://example.com/a", "A"), ("https://example.com/a", "A again"),
+    ])
+    assert len(ws._grounding_sources(response)) == 1
+
+
+def test_grounding_sources_is_empty_with_no_chunks_never_invents_one():
+    response = _fake_grounded_response(chunks=[])
+    assert ws._grounding_sources(response) == []
+
+
+def test_grounding_sources_survives_a_response_shape_with_no_metadata_at_all():
+    response = type("Response", (), {"candidates": [type("C", (), {})()]})()
+    assert ws._grounding_sources(response) == []
+
+
+def test_gemini_search_includes_real_sources_and_a_checked_timestamp(monkeypatch):
+    response = _fake_grounded_response(
+        text="The current price is $999.",
+        chunks=[("https://www.apple.com/iphone-17/", "iPhone 17 - Apple")])
+
+    class _FakeModels:
+        def generate_content(self, **kw):
+            return response
+
+    import core.headless.gemini_client as gemini_client
+    monkeypatch.setattr(gemini_client, "get_client",
+                        lambda key: type("Client", (), {"models": _FakeModels()})())
+    monkeypatch.setattr(ws, "_get_api_key", lambda: "fake-key")
+
+    result = ws._gemini_search("current price of iphone 17")
+
+    assert "The current price is $999." in result
+    assert "https://www.apple.com/iphone-17/" in result
+    assert "checked " in result and "UTC" in result

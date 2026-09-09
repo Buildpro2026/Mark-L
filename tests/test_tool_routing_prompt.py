@@ -55,6 +55,23 @@ def test_prompt_forbids_claiming_a_browser_the_user_cannot_see():
     assert "not visible to the user" in t or "browser_control" in t
 
 
+def test_prompt_routes_price_and_product_research_to_web_research():
+    # "Current-price/product research must actually use the research
+    # capability" — web_research is that capability (it opens pages and
+    # returns sourced, timestamped, evidence-graded findings); web_search
+    # only returns prose. The prompt must send these questions to the
+    # right tool, not just mention web_research exists somewhere.
+    t = _text().lower()
+    assert "web_research" in t
+    assert "current price" in t
+    assert "source" in t and ("timestamp" in t or "observed" in t or "when it was" in t.replace("_", " "))
+
+
+def test_prompt_never_lets_web_search_absorb_research_grade_questions():
+    t = _text().lower()
+    assert "prefer web_research" in t or "research capability" in t
+
+
 # ── dispatch mechanics: what happens once the model DOES call a tool ────
 
 def _fake_web_search_result(monkeypatch, result="iPhone 17: $999 (Apple.com, checked live)."):
@@ -123,6 +140,42 @@ def test_a_failed_tool_call_is_reported_as_an_error_not_a_fabricated_answer(monk
     # guarantees the TOOL RESULT it was given told the truth, never a
     # fabricated success.
     assert reply == "I couldn't look that up right now."
+
+
+def test_a_price_question_the_model_routes_to_web_research_returns_real_sources(monkeypatch):
+    # The actual capability the prompt now points price/product questions
+    # at: web_research.research() -> real source URLs, an observed_at
+    # timestamp per source, and a confidence figure — not prose with
+    # nothing behind it.
+    monkeypatch.setattr("core.headless.ui.config.OLLAMA_API_KEY", "fake-key-not-real")
+    from actions import web_research
+
+    outcome = {
+        "ok": True, "state": web_research.OK, "question": "current price of iPhone 17",
+        "domain": "product", "sources_considered": 3, "duplicates_removed": 0,
+        "sources_read": [{
+            "url": "https://www.apple.com/iphone-17/", "title": "iPhone 17 - Apple",
+            "observed_at": "2026-09-09T12:00:00+00:00", "source_type": "retailer",
+            "reliability": 0.9, "freshness": {"state": "CURRENT"},
+        }],
+        "sources_failed": [], "results": [{"fields": {}}], "confidence": 0.33,
+    }
+    monkeypatch.setattr(web_research, "research", lambda question, max_sources=3: outcome)
+
+    fc = FakeFunctionCall("web_research", {"question": "current price of iPhone 17"})
+    responses = [FakeResponse(function_calls=[fc]), FakeResponse(text="It's $999, per Apple's own site.")]
+    install(monkeypatch, responses)
+
+    from core.headless import ui as headless_ui
+    reply, calls = asyncio.run(
+        headless_ui.run_chat_turn("what's the current price of an iphone 17", []))
+
+    assert reply == "It's $999, per Apple's own site."
+    assert calls and calls[0]["name"] == "web_research"
+    result = calls[0]["result"]
+    assert "https://www.apple.com/iphone-17/" in result   # the real source URL
+    assert "observed 2026-09-09" in result                # the real timestamp
+    assert "Confidence: 33%" in result                     # the real confidence figure
 
 
 def test_navigation_commands_are_covered_by_the_existing_headless_navigation_suite():

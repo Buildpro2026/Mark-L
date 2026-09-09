@@ -20,7 +20,35 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
+def _grounding_sources(response) -> list[dict]:
+    """Real citation URLs Gemini's own google_search grounding actually
+    used — never the model's own prose, which can name a URL from memory
+    that was never read. candidate.grounding_metadata.grounding_chunks[]
+    is the API's own record of what it looked at; anything not present
+    there is not a verified source, so this returns [] rather than
+    inventing one."""
+    try:
+        candidate = response.candidates[0]
+        meta = getattr(candidate, "grounding_metadata", None)
+        chunks = getattr(meta, "grounding_chunks", None) or []
+    except (AttributeError, IndexError):
+        return []
+
+    sources, seen = [], set()
+    for chunk in chunks:
+        web = getattr(chunk, "web", None)
+        if web is None or not getattr(web, "uri", None):
+            continue
+        uri = web.uri
+        if uri in seen:
+            continue
+        seen.add(uri)
+        sources.append({"url": uri, "title": getattr(web, "title", "") or ""})
+    return sources
+
+
 def _gemini_search(query: str) -> str:
+    from datetime import datetime, timezone
     from core.headless.gemini_client import get_client
 
     client   = get_client(_get_api_key())
@@ -38,7 +66,18 @@ def _gemini_search(query: str) -> str:
     text = text.strip()
     if not text:
         raise ValueError("Gemini returned an empty response.")
-    return text
+
+    # Real, API-verified citations only — never invented. A grounded
+    # search with no chunks at all (a rare but real response shape) just
+    # gets the timestamp, honestly, with no fabricated "Sources:" list.
+    sources = _grounding_sources(response)
+    checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [text, "", f"(checked {checked_at})"]
+    if sources:
+        lines.append("Sources:")
+        for s in sources[:5]:
+            lines.append(f"  - {s['title'] or s['url']}: {s['url']}")
+    return "\n".join(lines).strip()
 
 
 def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
