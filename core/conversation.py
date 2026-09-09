@@ -404,12 +404,29 @@ def is_self_echo(candidate_text: str, recent_jarvis_text: str, *,
     words get merged, clipped or misheard on the way through. A fuzzy
     ratio over the normalized text catches that without needing the two
     strings to match exactly. An empty candidate or nothing currently
-    playing can never be an echo of anything."""
+    playing can never be an echo of anything.
+
+    The similarity ratio alone misses a real failure mode: SequenceMatcher's
+    ratio is 2*matched/(len(a)+len(b)), so it shrinks toward zero whenever
+    `recent_jarvis_text` (out_buf, JARVIS's full output so far this turn) is
+    much longer than the short fragment that actually leaked back through
+    the mic — even when that fragment is a verbatim, complete match inside
+    it. In production this is exactly the "JARVIS hears his own voice and
+    cuts himself off" report: a few seconds into a longer reply, a short
+    burst of his own audio leaks back, the ratio against everything he's
+    said so far comes out well under threshold, and the echo goes
+    unrecognized. A word-containment check (every significant word of the
+    candidate already appears in what JARVIS said) catches that case
+    directly, independent of how long recent_jarvis_text has grown — the
+    same fix already applied on the browser voice path's hasNovelWords()."""
     a = _normalize_for_comparison(candidate_text)
     b = _normalize_for_comparison(recent_jarvis_text)
     if not a or not b:
         return False
-    return difflib.SequenceMatcher(None, a, b).ratio() >= similarity_threshold
+    if difflib.SequenceMatcher(None, a, b).ratio() >= similarity_threshold:
+        return True
+    words = [w for w in a.split() if len(w) > 3]
+    return bool(words) and all(w in b for w in words)
 
 
 def is_genuine_user_transcript(candidate_text: str, *, recent_jarvis_text: str = "",

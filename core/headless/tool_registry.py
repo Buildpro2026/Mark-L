@@ -192,10 +192,18 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Controls any web browser. Use for: opening websites, searching the web, "
-            "clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. "
-            "Simple open/search requests launch the user's own browser normally (their real profile "
-            "and logged-in accounts); interactive actions (click, type, fill_form...) attach an "
+            "Drives a REAL, separate browser window on the user's own machine, outside "
+            "JARVIS's interface — their actual profile, logged-in accounts, and cookies. "
+            "Use ONLY for interactive automation the Command Center cannot do: clicking, "
+            "typing, filling forms, scrolling, screenshots, reading page content, or "
+            "logging into a site with the user's saved credentials. Do NOT use this for "
+            "a plain 'open X' / 'show me X' / 'go to X' request with no automation step — "
+            "that is navigate_command_center's job (it shows the page inside the Command "
+            "Center the user is already looking at, not a separate window they may not "
+            "see). Only reach for browser_control when the user explicitly names a "
+            "browser app ('open this in Chrome', 'use Firefox') or asks for an action "
+            "navigate_command_center cannot perform (click, type, scrape, log in, fill a "
+            "form). Interactive actions (click, type, fill_form...) attach an "
             "automation browser that ALSO uses the user's real profile and real logged-in sessions — "
             "this is not a sandboxed/throwaway browser, so treat every click and typed value as if it "
             "has the user's full authority. "

@@ -82,6 +82,45 @@ def test_prompt_forbids_inferring_non_existence_from_a_failed_search():
     assert "does not exist" in t or "not evidence" in t
 
 
+# ── browser_control vs navigate_command_center: two tools that both claim
+# "open a website" ─────────────────────────────────────────────────────────
+# The reported bug: "open Google" launched the user's real, separate Chrome
+# window instead of showing the page inside the Command Center. core/
+# prompt.txt already told the model to always use navigate_command_center
+# for a plain "open X" — but browser_control's OWN function declaration
+# (the JSON schema actually offered to the model) said "Use for: opening
+# websites... any web-based task" with no carve-out, competing for the same
+# intent. A function declaration's own description carries real weight in
+# tool selection independent of prose system-prompt guidance, so the
+# declaration itself has to stop claiming ownership of a plain open/show
+# request, not just the surrounding prompt.
+
+def test_browser_control_declaration_defers_plain_opens_to_command_center():
+    from core.headless.tool_registry import TOOL_DECLARATIONS
+    decl = next(t for t in TOOL_DECLARATIONS if t["name"] == "browser_control")
+    desc = decl["description"].lower()
+    assert "navigate_command_center" in desc
+    assert "do not use this for" in desc or "not for" in desc
+
+
+def test_navigate_command_center_declaration_still_claims_plain_opens():
+    from core.headless.tool_registry import TOOL_DECLARATIONS
+    decl = next(t for t in TOOL_DECLARATIONS if t["name"] == "navigate_command_center")
+    desc = decl["description"].lower()
+    assert "open google" in desc
+    assert "only way" in desc
+
+
+def test_prompt_forbids_markdown_in_replies():
+    # Reported bug: JARVIS read "**", "//" and other markdown/code syntax
+    # aloud instead of the human-readable text — every reply is either
+    # spoken or shown as plain (non-rendering) text, so markdown syntax
+    # must never appear in a reply to begin with.
+    t = _text().lower()
+    assert "markdown" in t
+    assert "**bold**" in t or "bullet" in t
+
+
 # ── dispatch mechanics: what happens once the model DOES call a tool ────
 
 def _fake_web_search_result(monkeypatch, result="iPhone 17: $999 (Apple.com, checked live)."):

@@ -313,3 +313,42 @@ def test_ui_tasks_endpoint_lists_all_tasks_for_the_org_chart(monkeypatch):
     assert "tasks" in body
     assert isinstance(body["tasks"], list)
 
+
+# ── Chat messages preserve line breaks ────────────────────────────────────
+# Reported bug: opening an email (or any multi-line tool result — a gmail
+# read, a multi-line search summary) showed up as one jumbled run-on line
+# in the chat transcript. appendMessage() drops plain, already-escaped text
+# with real '\n' characters into a bare <div> — the browser's default
+# white-space collapses every newline unless the CSS says otherwise, which
+# .msg never did (only the unrelated Obsidian note reader had the fix).
+
+def test_chat_message_bubbles_preserve_newlines(monkeypatch):
+    client = _client(monkeypatch)
+    r = client.get("/ui")
+    html = r.text
+    assert "white-space: pre-wrap" in html or "white-space:pre-wrap" in html
+    # Scoped to the actual message bubble rule, not just present anywhere
+    # in the stylesheet (e.g. the unrelated knowledge-reader block).
+    import re
+    msg_rule = re.search(r"\.msg\s*\{[^}]*\}", html)
+    assert msg_rule is not None
+    assert "pre-wrap" in msg_rule.group(0)
+
+
+# ── Voice reads the reply, not its markdown syntax ────────────────────────
+# Reported bug: JARVIS spoke raw markdown/code punctuation ("**", "//")
+# aloud instead of the human-readable text underneath. cleanForSpeech()
+# already stripped bold/italic/code/headers/lists/links; it never handled
+# a "//" code-comment marker, which is what the report specifically named.
+
+def test_clean_for_speech_strips_comment_slashes_but_keeps_urls(monkeypatch):
+    client = _client(monkeypatch)
+    html = client.get("/ui").text
+    assert "cleanForSpeech" in html
+    import re
+    fn = re.search(r"function cleanForSpeech\(text\)\s*\{.*?\n  \}", html, re.S)
+    assert fn is not None
+    body = fn.group(0)
+    assert r"\/\/" in body  # a // stripping rule exists
+    assert "(?<!:)" in body  # ...and it does not eat https:// URLs
+

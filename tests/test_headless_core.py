@@ -586,6 +586,39 @@ def test_gmail_send_via_tool_executor_writes_an_audit_entry(monkeypatch, tmp_pat
     assert any(r["action"] == "gmail_send" and r["execution_status"] == "succeeded" for r in rows)
 
 
+def test_gmail_read_relays_a_natural_summary_not_a_field_code_dump():
+    # Reported bug: "opening" an email dumped it into chat as a raw
+    # From:/To:/Subject:/Category: (confidence 0.85 - reason) field block —
+    # a technical, code-shaped format rather than JARVIS actually
+    # presenting the email. Text stays human-readable (natural sentences,
+    # no colon-labeled field dump) since it is relayed to the user largely
+    # as-is, spoken or shown in chat.
+    from actions import gmail_integration
+    from core.headless.tool_executor import ToolExecutor
+    from core.headless.context import ToolContext
+
+    def _fake_get_message(message_id):
+        return {
+            "id": message_id, "sender": "Jane Doe <jane@example.com>",
+            "sender_domain": "example.com", "to": "me@buildpro.com",
+            "subject": "Interview availability", "date": "Mon, 9 Sep 2026 10:00:00 -0700",
+            "body": "I'm available Tuesday or Wednesday afternoon.",
+            "attachments": [], "permalink": "https://mail.google.com/mail/u/0/#all/abc123",
+        }
+    import unittest.mock as mock
+    with mock.patch.object(gmail_integration, "get_message", _fake_get_message):
+        executor = ToolExecutor(ToolContext())
+        result = asyncio.run(executor.execute("gmail", {"action": "read", "message_id": "abc123"}))
+
+    assert "From:" not in result
+    assert "Category:" not in result
+    assert "confidence" not in result
+    assert "Jane Doe" in result
+    assert "Interview availability" in result
+    assert "I'm available Tuesday or Wednesday afternoon." in result
+    assert "https://mail.google.com/mail/u/0/#all/abc123" in result
+
+
 def test_main_py_imports_cleanly_with_no_missing_modules():
     """A guard against exactly the failure this caught live: main.py
     referenced a knowledge.knowledge_manager module that didn't exist

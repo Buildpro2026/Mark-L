@@ -573,27 +573,32 @@ class ToolExecutor:
                 if not message_id:
                     result = "I need a message_id (from a prior 'list' call) to read a specific email."
                 else:
-                    from actions import email_classification
                     try:
                         m = await loop.run_in_executor(None, lambda: gmail_integration.get_message(message_id))
                     except Exception as exc:
                         m = None
                         result = f"Couldn't read that message: {exc}"
                     if m is not None:
-                        cls = email_classification.classify_email(m)
                         body_text = (m.get("body") or "").strip()
                         body_preview = body_text[:6000] + ("... [truncated]" if len(body_text) > 6000 else "") if body_text else "(no readable body — no text/plain or text/html part)"
-                        attach_names = ", ".join(a.get("filename", "?") for a in (m.get("attachments") or [])) or "none"
-                        result = (
-                            f"From: {m.get('sender')} ({m.get('sender_domain') or 'unknown domain'})\n"
-                            f"To: {m.get('to')}\n"
-                            f"Subject: {m.get('subject')}\n"
-                            f"Date: {m.get('date')}\n"
-                            f"Category: {cls['category']} (confidence {cls['confidence']:.2f} — {cls['reason']})\n"
-                            f"Attachments: {attach_names}\n"
-                            f"Link: {m.get('permalink') or 'unavailable'}\n\n"
-                            f"Body:\n{body_preview}"
-                        )
+                        attachments = m.get("attachments") or []
+                        # Natural sentences, not a code-style field:value dump —
+                        # this text is relayed to the user largely as-is (spoken
+                        # or shown in chat), and a technical label block reads
+                        # as JARVIS dumping raw data rather than opening an email.
+                        lines = [
+                            f"Email from {m.get('sender') or 'an unknown sender'}, "
+                            f"subject \"{m.get('subject') or '(no subject)'}\", {m.get('date') or 'date unknown'}.",
+                        ]
+                        if attachments:
+                            names = ", ".join(a.get("filename", "an attachment") for a in attachments)
+                            lines.append(f"Attachments: {names}.")
+                        lines.append("")
+                        lines.append(body_preview)
+                        if m.get("permalink"):
+                            lines.append("")
+                            lines.append(f"Open in Gmail: {m['permalink']}")
+                        result = "\n".join(lines)
             elif gaction == "draft":
                 to      = (args.get("to") or "").strip()
                 subject = (args.get("subject") or "").strip()

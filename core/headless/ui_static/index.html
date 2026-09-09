@@ -405,6 +405,12 @@
   .msg {
     position: relative; max-width: 82%; padding: 10px 13px; border-radius: 10px; font-size: 13px; line-height: 1.55;
     box-shadow: 0 8px 24px rgba(0,0,0,.12); animation: msg-in .18s ease both;
+    /* Message text is plain, already-escaped text with real newlines (a
+       gmail read result's From/Subject/Body lines, a multi-line search
+       summary, ...) — without this, the browser's default white-space
+       collapses every newline and the whole reply runs together into one
+       jumbled line. Same treatment #knowledge-reader-content already uses. */
+    white-space: pre-wrap; word-break: break-word;
   }
   @keyframes msg-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   .msg.user {
@@ -4346,6 +4352,12 @@ checkSession();
       .replace(/^\s*\d+\.\s+/gm, "")
       .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
       .replace(/[_~]/g, "")
+      // A code-comment "//" marker (never the "//" inside "https://",
+      // which is always preceded by a colon) — the reported bug: JARVIS
+      // read "slash slash" aloud when a reply quoted a line of code.
+      .replace(/(?<!:)\/\//g, "")
+      .replace(/^\s*>\s+/gm, "")
+      .replace(/\|/g, " ")
       .replace(/\s+/g, " ")
       .trim();
   }

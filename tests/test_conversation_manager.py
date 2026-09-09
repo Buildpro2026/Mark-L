@@ -5,12 +5,14 @@ over itself, changing topic mid-sentence when a monitor fired, resuming a
 response the user had already interrupted, and going permanently deaf
 after an exception left it stuck in SPEAKING.
 """
+import difflib
 import threading
 import time
 
 import pytest
 
 from core import conversation as cv
+from core.conversation import DEFAULT_ECHO_SIMILARITY_THRESHOLD
 
 
 def _mgr(**kw):
@@ -375,7 +377,12 @@ def test_self_echo_respects_a_custom_similarity_threshold():
     # A partial, not-quite-exact overlap — passes a loose threshold,
     # fails a strict one. Confirms the threshold is load-bearing, not
     # a decorative parameter nobody can actually move.
-    candidate = "weather today sunny breeze"
+    #
+    # Not fully word-contained in `recent` (unlike a real echo fragment) —
+    # "kinda"/"sunnyish"/"morning" aren't JARVIS's own words — so the
+    # word-containment check below doesn't short-circuit this one; only
+    # the fuzzy ratio decides, which is exactly what this test checks.
+    candidate = "weather kinda today sunnyish morning"
     recent = "The weather today is sunny with a light breeze across the coast."
     assert cv.is_self_echo(candidate, recent, similarity_threshold=0.3) is True
     assert cv.is_self_echo(candidate, recent, similarity_threshold=0.95) is False
@@ -412,6 +419,31 @@ def test_genuine_transcript_accepts_a_second_distinct_chunk():
 def test_genuine_transcript_rejects_an_empty_chunk():
     assert cv.is_genuine_user_transcript("") is False
     assert cv.is_genuine_user_transcript("   ") is False
+
+
+def test_self_echo_catches_a_short_fragment_of_a_much_longer_reply():
+    # Production bug: "JARVIS hears his own voice and cuts himself off."
+    # SequenceMatcher.ratio() is 2*matched/(len(a)+len(b)) — it shrinks
+    # toward zero whenever recent_jarvis_text (out_buf, everything JARVIS
+    # has said so far this turn) is much longer than the short fragment
+    # that actually leaked back through the mic, even when that fragment
+    # is a verbatim, complete match inside it. A few seconds into a long
+    # reply this let real self-echo through as a "genuine" interruption.
+    long_reply = (
+        "Sure, I can help with that. Your calendar for tomorrow currently "
+        "has three events: a nine a.m. stand-up, a client call at noon "
+        "with BuildPro, and a review session at four p.m. I have also "
+        "flagged one scheduling conflict between the client call and an "
+        "overlapping candidate interview that was booked yesterday."
+    )
+    short_leaked_fragment = "a client call at noon"
+    # The ratio-only check would miss this (fails without the fix):
+    assert difflib.SequenceMatcher(
+        None, short_leaked_fragment, long_reply.lower()
+    ).ratio() < DEFAULT_ECHO_SIMILARITY_THRESHOLD
+    assert cv.is_self_echo(short_leaked_fragment, long_reply) is True
+    assert cv.is_genuine_user_transcript(
+        short_leaked_fragment, recent_jarvis_text=long_reply) is False
 
 
 def test_genuine_transcript_does_not_compare_against_jarvis_once_he_has_finished():
