@@ -335,7 +335,7 @@ def match_new_candidate(candidate_id: int, min_score: Optional[float] = None,
     # into a failed intake.
     if ranked and float(ranked[0]["score"]) >= _strong_match_threshold():
         try:
-            _notify_strong_candidate_match(candidate_id, ranked[0])
+            notify_strong_match(candidate_id, ranked[0])
         except Exception:
             logger.debug("could not surface the strong match for candidate %s",
                         candidate_id, exc_info=True)
@@ -352,10 +352,17 @@ def _strong_match_threshold() -> float:
     return buildpro_daily.STRONG_MATCH_SCORE
 
 
-def _notify_strong_candidate_match(candidate_id: int, match: dict[str, Any]) -> None:
-    """One notification, one Brain write — the connection from a fresh
-    resume's match straight to what Lee sees and what JARVIS remembers,
-    rather than only reaching him the next time the daily cycle runs."""
+def notify_strong_match(candidate_id: int, match: dict[str, Any]) -> None:
+    """One notification, one Brain write for a match worth Lee's immediate
+    attention — a time-sensitive recruiting opportunity, in the same sense
+    as an urgent approval or a critical failure. Called from two places
+    that both discover a strong match and both want the SAME immediate
+    reach, rather than each inventing its own: match_new_candidate() (a
+    fresh resume, scored the moment it lands) and
+    buildpro_daily.run_daily_matching() (the broadest, EXCEPTIONAL end of
+    the daily job x candidate sweep). notify()'s own event_id dedup means
+    the same (candidate, job) pair reaching this from both paths still
+    sends exactly one SMS."""
     from actions import buildpro_data, notifications, brain_memory
 
     candidate = buildpro_data.get_candidate(candidate_id) or {}

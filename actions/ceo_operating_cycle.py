@@ -104,6 +104,27 @@ def already_ran_today(run_date: Optional[str] = None) -> bool:
         return False  # a persistence hiccup must not permanently block the cycle from ever running
 
 
+def last_run_info() -> Optional[dict[str, Any]]:
+    """The most recent recorded cycle run, or None if the cycle has never
+    completed one. For integration_health — the same ceo_cycle_runs row
+    already_ran_today() checks, just handed back instead of collapsed to a
+    bool, so a health probe can say WHEN the last cycle ran, not only
+    whether one ran today."""
+    try:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT run_date, run_ts, summary, risk_count, agents_run "
+                "FROM ceo_cycle_runs ORDER BY run_ts DESC LIMIT 1"
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("could not read the last cycle run", exc_info=True)
+        return None
+
+
 def _mark_ran(run_date: str, summary: str, risk_count: int, agents_run: int) -> None:
     try:
         conn = _connect()

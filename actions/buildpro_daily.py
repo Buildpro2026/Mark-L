@@ -491,6 +491,19 @@ def run_daily_matching(min_score: float = 50.0, top_n: int = 10) -> dict[str, An
 
     top = scored_matches[0] if scored_matches else None
 
+    # A time-sensitive recruiting opportunity — the top of the daily sweep
+    # clearing the EXCEPTIONAL bar — reaches Lee immediately rather than
+    # waiting for the morning report to be read. Reuses the exact
+    # notification cross_system.match_new_candidate() already fires for a
+    # fresh resume's strong match; the shared event_id dedup means a match
+    # already surfaced that way (or on a prior run) never double-texts.
+    if top is not None and float(top["score"]) >= EXCEPTIONAL_MATCH_SCORE and top.get("candidate_id"):
+        try:
+            from actions import cross_system
+            cross_system.notify_strong_match(top["candidate_id"], top)
+        except Exception:
+            logger.debug("could not notify the exceptional top match", exc_info=True)
+
     # HUBSPOT on the top match only — one lookup per run, not one per
     # match. Isolated: a HubSpot outage must not cost the matching result
     # that is the actual point of this run.
@@ -631,10 +644,35 @@ def format_daily_report(result: dict[str, Any], top_n: int = 3) -> str:
 
 def run_and_report(min_score: float = 50.0, top_n: int = 10) -> dict[str, Any]:
     """The whole daily job: discover, match, rank, report, and record the
-    outcome where the next decision will read it."""
+    outcome where the next decision will read it.
+
+    Discovery and matching are two DIFFERENT outcomes, recorded separately
+    on purpose. They used to share one record keyed off matching's own
+    result.get("ok") — so if every job source was unreachable (discovery
+    truly failed) but yesterday's stored jobs still matched fine, the run
+    reported ok=True and the discovery failure vanished. That is exactly
+    "one subsystem's success overwriting another's failure": a job source
+    down for days would never accumulate a failure_streak or escalate,
+    because matching's success kept covering for it."""
     discovery = discover_jobs()
     result = run_daily_matching(min_score=min_score, top_n=top_n)
     report = format_daily_report(result)
+
+    try:
+        from actions import ceo_decision
+        # NOT_CONFIGURED is an honest, expected state (no source available
+        # at all) rather than a fault — matches the DDF-discovery
+        # convention already used in ceo_operating_cycle._verify_and_followup.
+        if discovery.get("state") != NOT_CONFIGURED:
+            ceo_decision.record_outcome(
+                {"source": "buildpro_daily_discovery", "kind": "job_discovery",
+                 "title": "daily BuildPro job discovery", "business": "buildpro"},
+                ok=bool(discovery.get("ok")),
+                detail=(discovery.get("detail") or
+                        f"{discovery.get('stored', 0)} new, {discovery.get('updated', 0)} updated job(s)"),
+                verified=bool(discovery.get("ok")))
+    except Exception:
+        logger.debug("could not record the discovery outcome", exc_info=True)
 
     try:
         from actions import ceo_decision

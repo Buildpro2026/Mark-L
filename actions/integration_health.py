@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Callable
 
 logger = logging.getLogger("jarvis.integration_health")
@@ -241,6 +242,29 @@ def _buildpro_store() -> dict[str, Any]:
         return {"state": UNAVAILABLE, "detail": str(exc)}
 
 
+def _ceo_cycle() -> dict[str, Any]:
+    """Whether the daily CEO cycle is actually running, not merely wired
+    correctly. NOT_CONFIGURED covers a fresh install that has never
+    completed a run yet — expected, not a fault. Past that, staleness is
+    the only honest signal available here: the cycle runs once a day (see
+    ceo_operating_cycle's own already_ran_today()), so a gap past a day
+    plus slack for a delayed trigger means the thing that should be
+    waking it — the Render Cron Job, or the in-process loop when that flag
+    is set — stopped, and JARVIS should say so rather than silently make
+    decisions on stale business state."""
+    from actions import ceo_operating_cycle
+    last = ceo_operating_cycle.last_run_info()
+    if not last:
+        return {"state": NOT_CONFIGURED, "detail": "the CEO cycle has never completed a run"}
+    run_ts = float(last.get("run_ts") or 0)
+    age_hours = (time.time() - run_ts) / 3600.0 if run_ts else None
+    if age_hours is None or age_hours > 36:
+        return {"state": UNAVAILABLE,
+                "detail": f"last cycle ran {last.get('run_date')}"
+                          + (f" ({age_hours:.0f}h ago)" if age_hours is not None else "")}
+    return {"state": CONFIGURED, "detail": f"last ran {last.get('run_date')}"}
+
+
 PROBES: dict[str, Callable[[], dict[str, Any]]] = {
     "google": _google,
     "hubspot": _hubspot,
@@ -253,6 +277,7 @@ PROBES: dict[str, Callable[[], dict[str, Any]]] = {
     "web_research": _web_research,
     "buildpro_store": _buildpro_store,
     "voice": _voice,
+    "ceo_cycle": _ceo_cycle,
 }
 
 # What each business operation actually needs to be possible at all.
